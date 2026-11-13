@@ -1,4 +1,5 @@
 #include "wgc_window_capture.h"
+#include "d3d11_nv12_frame_buffer.h"
 #include "desktop_frame_buffer_pool.h"
 #include "modules/desktop_capture/desktop_frame.h"
 #include "modules/desktop_capture/shared_desktop_frame.h"
@@ -6,6 +7,8 @@
 #include "modules/desktop_capture/win/screen_capture_utils.h"
 #include <d3d11.h>
 #include <dxgi.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
 #include <windows.graphics.capture.interop.h>
 #include <windows.graphics.directx.direct3d11.interop.h>
 #include <winrt/Windows.Foundation.h>
@@ -13,7 +16,9 @@
 #include <winrt/Windows.Graphics.DirectX.h>
 #include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <mutex>
 
 #pragma comment(lib, "runtimeobject.lib")
 
@@ -53,8 +58,11 @@ bool CapturePlatformSupported(DesktopSourceKind kind) {
 
 class OwnedWgcWindowCapturer final : public webrtc::DesktopCapturer {
 public:
-    explicit OwnedWgcWindowCapturer(std::function<void(DesktopCaptureProbePhase)> report, bool screen = false)
-        : report_(std::move(report)), screen_(screen) {}
+    explicit OwnedWgcWindowCapturer(
+        std::function<void(DesktopCaptureProbePhase)> report,
+        bool screen = false,
+        bool gpu_only = false)
+        : report_(std::move(report)), screen_(screen), gpu_only_(gpu_only) {}
     ~OwnedWgcWindowCapturer() override { Close(); }
     bool GetSourceList(SourceList*) override { return false; }
     bool SelectSource(SourceId source) override {
@@ -71,11 +79,16 @@ public:
             if (!session_) Open();
             auto frame = pool_.TryGetNextFrame();
             if (!frame) {
-                // WGC can be idle for a static window. Keep one CPU frame, as
+                // WGC can be idle for a static window. Keep one frame, as
                 // the WebRTC capturer does, so idle content is not mistaken
                 // for capture failure by the enclosing five-second watchdog.
-                callback_->OnCaptureResult(latest_ ? Result::SUCCESS : Result::ERROR_TEMPORARY,
-                    latest_ ? latest_->Share() : nullptr);
+                std::unique_ptr<webrtc::SharedDesktopFrame> cached;
+                if (latest_) {
+                    cached = latest_->Share();
+                    cached->set_capturer_id(latest_->capturer_id());
+                }
+                callback_->OnCaptureResult(cached ? Result::SUCCESS : Result::ERROR_TEMPORARY,
+                    std::move(cached));
                 return;
             }
             // Explicit frame Close on every exit, including D3D exceptions.
@@ -93,6 +106,44 @@ public:
             texture->GetDesc(&description);
             const int width = std::min(size.Width, static_cast<int>(description.Width));
             const int height = std::min(size.Height, static_cast<int>(description.Height));
+
+            if (gpu_only_) {
+                auto gpu_shared = gpu_buffers_.CaptureTexture(
+                    device_.get(),
+                    context_.get(),
+                    adapter_luid_,
+                    device_context_mutex_,
+                    texture.get(),
+                    width,
+                    height,
+                    false);
+                texture = nullptr;
+                access = nullptr;
+                frame.Close();
+                frame = nullptr;
+                if (size.Width != pool_width_ || size.Height != pool_height_) {
+                    pool_.Recreate(winrt_device_, directx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+                    pool_width_ = size.Width; pool_height_ = size.Height;
+                }
+                if (!gpu_shared) {
+                    std::unique_ptr<webrtc::SharedDesktopFrame> cached;
+                    if (latest_) {
+                        cached = latest_->Share();
+                        cached->set_capturer_id(latest_->capturer_id());
+                    }
+                    callback_->OnCaptureResult(cached ? Result::SUCCESS : Result::ERROR_TEMPORARY,
+                        std::move(cached));
+                    return;
+                }
+                gpu_shared->set_capturer_id(
+                    webrtc::DesktopCapturerId::kWgcCapturerWin | kD3d11TextureDesktopFrameCapturerIdBit);
+                latest_ = std::move(gpu_shared);
+                auto delivered = latest_->Share();
+                delivered->set_capturer_id(latest_->capturer_id());
+                callback_->OnCaptureResult(Result::SUCCESS, std::move(delivered));
+                return;
+            }
+
             if (!staging_ || width != width_ || height != height_) {
                 staging_ = nullptr;
                 description.Width = width;
@@ -151,6 +202,8 @@ private:
         winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
             device_.put(), nullptr, context_.put()));
+        QueryD3d11AdapterLuid(device_.get(), &adapter_luid_);
+        device_context_mutex_ = std::make_shared<std::mutex>();
         auto dxgi = device_.as<IDXGIDevice>();
         winrt::com_ptr<IInspectable> inspectable;
         winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.get(), inspectable.put()));
@@ -185,6 +238,7 @@ private:
         item_ = nullptr;
         latest_.reset();
         buffers_.Clear();
+        gpu_buffers_.Clear();
         staging_ = nullptr;
         if (context_) { context_->ClearState(); context_->Flush(); }
         context_ = nullptr;
@@ -195,6 +249,7 @@ private:
         winrt_device_ = nullptr;
         const bool had_device = static_cast<bool>(device_);
         device_ = nullptr;
+        device_context_mutex_.reset();
         if (had_device) Report(DesktopCaptureProbePhase::D3dReleased);
     }
     HWND window_ = nullptr;
@@ -202,6 +257,7 @@ private:
     Callback* callback_ = nullptr;
     std::function<void(DesktopCaptureProbePhase)> report_;
     bool screen_ = false;
+    bool gpu_only_ = false;
     capture::GraphicsCaptureItem item_{nullptr};
     capture::Direct3D11CaptureFramePool pool_{nullptr};
     capture::GraphicsCaptureSession session_{nullptr};
@@ -209,14 +265,246 @@ private:
     winrt::com_ptr<ID3D11Device> device_;
     winrt::com_ptr<ID3D11DeviceContext> context_;
     winrt::com_ptr<ID3D11Texture2D> staging_;
+    LUID adapter_luid_{};
+    std::shared_ptr<std::mutex> device_context_mutex_;
     std::unique_ptr<webrtc::SharedDesktopFrame> latest_;
     DesktopFrameBufferPool buffers_;
+    D3d11DesktopFrameTexturePool gpu_buffers_;
     int width_ = 0, height_ = 0, pool_width_ = 0, pool_height_ = 0;
+};
+
+// Project-owned DXGI Output Duplication GPU capturer for full-screen capture.
+// Copies the desktop texture on the GPU into a bounded 2-slot GPU texture pool
+// and releases the DXGI desktop frame immediately without staging CPU readback.
+class OwnedDxgiScreenGpuCapturer final : public webrtc::DesktopCapturer {
+public:
+    explicit OwnedDxgiScreenGpuCapturer(std::function<void(DesktopCaptureProbePhase)> report)
+        : report_(std::move(report)) {}
+    ~OwnedDxgiScreenGpuCapturer() override { Close(); }
+
+    bool GetSourceList(SourceList*) override { return false; }
+
+    bool SelectSource(SourceId source) override {
+        if (duplication_) return false;
+        HMONITOR monitor = nullptr;
+        if (!webrtc::GetHmonitorFromDeviceIndex(source, &monitor) || !monitor ||
+            !webrtc::IsMonitorValid(monitor)) {
+            return false;
+        }
+        monitor_ = monitor;
+        source_id_ = source;
+        return OpenDuplication();
+    }
+
+    void Start(Callback* callback) override { callback_ = callback; }
+
+    void CaptureFrame() override {
+        if (!callback_) return;
+        if (!duplication_ && !OpenDuplication()) {
+            callback_->OnCaptureResult(Result::ERROR_PERMANENT, nullptr);
+            return;
+        }
+        const auto start_time = std::chrono::steady_clock::now();
+        DXGI_OUTDUPL_FRAME_INFO frame_info{};
+        Microsoft::WRL::ComPtr<IDXGIResource> resource;
+        HRESULT hr = duplication_->AcquireNextFrame(
+            latest_ ? 0 : 100, &frame_info, resource.GetAddressOf());
+        if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+            if (latest_) {
+                auto shared = latest_->Share();
+                shared->set_capture_time_ms(0);
+                shared->set_capturer_id(latest_->capturer_id());
+                callback_->OnCaptureResult(Result::SUCCESS, std::move(shared));
+            } else {
+                callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+            }
+            return;
+        }
+        if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_INVALID_CALL ||
+            hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+            Close();
+            callback_->OnCaptureResult(Result::ERROR_PERMANENT, nullptr);
+            return;
+        }
+        if (FAILED(hr) || !resource) {
+            std::unique_ptr<webrtc::SharedDesktopFrame> cached;
+            if (latest_) {
+                cached = latest_->Share();
+                cached->set_capturer_id(latest_->capturer_id());
+            }
+            callback_->OnCaptureResult(
+                cached ? Result::SUCCESS : Result::ERROR_TEMPORARY,
+                std::move(cached));
+            return;
+        }
+
+        struct DuplFrameReleaser {
+            IDXGIOutputDuplication* dupl;
+            ~DuplFrameReleaser() {
+                if (dupl) dupl->ReleaseFrame();
+            }
+        } releaser{duplication_.Get()};
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> desktop_tex;
+        if (FAILED(resource.As(&desktop_tex)) || !desktop_tex) {
+            callback_->OnCaptureResult(Result::ERROR_TEMPORARY, nullptr);
+            return;
+        }
+
+        D3D11_TEXTURE2D_DESC desc{};
+        desktop_tex->GetDesc(&desc);
+        const int width = static_cast<int>(desc.Width);
+        const int height = static_cast<int>(desc.Height);
+        if (width <= 0 || height <= 0 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+            Close();
+            callback_->OnCaptureResult(Result::ERROR_PERMANENT, nullptr);
+            return;
+        }
+
+        auto gpu_shared = gpu_buffers_.CaptureTexture(
+            device_.Get(),
+            context_.Get(),
+            adapter_luid_,
+            device_context_mutex_,
+            desktop_tex.Get(),
+            width,
+            height,
+            false);
+        if (!gpu_shared) {
+            std::unique_ptr<webrtc::SharedDesktopFrame> cached;
+            if (latest_) {
+                cached = latest_->Share();
+                cached->set_capturer_id(latest_->capturer_id());
+            }
+            callback_->OnCaptureResult(
+                cached ? Result::SUCCESS : Result::ERROR_TEMPORARY,
+                std::move(cached));
+            return;
+        }
+
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start_time).count();
+        gpu_shared->set_capture_time_ms(elapsed_ms);
+        gpu_shared->set_capturer_id(
+            webrtc::DesktopCapturerId::kScreenCapturerWinDirectx | kD3d11TextureDesktopFrameCapturerIdBit);
+        latest_ = std::move(gpu_shared);
+        auto delivered = latest_->Share();
+        delivered->set_capturer_id(latest_->capturer_id());
+        callback_->OnCaptureResult(Result::SUCCESS, std::move(delivered));
+    }
+
+private:
+    bool OpenDuplication() {
+        Close();
+        if (!monitor_) return false;
+        Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+        if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
+                                      reinterpret_cast<void**>(factory.GetAddressOf()))) ||
+            !factory) {
+            return false;
+        }
+
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> matched_adapter;
+        Microsoft::WRL::ComPtr<IDXGIOutput1> matched_output;
+        for (UINT a = 0;; ++a) {
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+            if (factory->EnumAdapters1(a, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND || !adapter) {
+                break;
+            }
+            for (UINT o = 0;; ++o) {
+                Microsoft::WRL::ComPtr<IDXGIOutput> output;
+                if (adapter->EnumOutputs(o, output.GetAddressOf()) == DXGI_ERROR_NOT_FOUND || !output) {
+                    break;
+                }
+                DXGI_OUTPUT_DESC out_desc{};
+                if (SUCCEEDED(output->GetDesc(&out_desc)) && out_desc.AttachedToDesktop &&
+                    out_desc.Monitor == monitor_) {
+                    // Rotation other than identity falls back to WebRTC's rotation-aware DXGI capturer.
+                    if (out_desc.Rotation != DXGI_MODE_ROTATION_IDENTITY &&
+                        out_desc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED) {
+                        return false;
+                    }
+                    if (SUCCEEDED(output.As(&matched_output)) && matched_output) {
+                        matched_adapter = adapter;
+                        break;
+                    }
+                }
+            }
+            if (matched_output) break;
+        }
+        if (!matched_adapter || !matched_output) {
+            return false;
+        }
+
+        DXGI_ADAPTER_DESC1 adapter_desc{};
+        if (FAILED(matched_adapter->GetDesc1(&adapter_desc))) {
+            return false;
+        }
+        adapter_luid_ = adapter_desc.AdapterLuid;
+
+        D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
+        if (FAILED(D3D11CreateDevice(
+                matched_adapter.Get(),
+                D3D_DRIVER_TYPE_UNKNOWN,
+                nullptr,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                nullptr,
+                0,
+                D3D11_SDK_VERSION,
+                device_.GetAddressOf(),
+                &feature_level,
+                context_.GetAddressOf())) ||
+            !device_ || !context_) {
+            Close();
+            return false;
+        }
+
+        device_context_mutex_ = std::make_shared<std::mutex>();
+        if (FAILED(matched_output->DuplicateOutput(device_.Get(), duplication_.GetAddressOf())) ||
+            !duplication_) {
+            Close();
+            return false;
+        }
+        return true;
+    }
+
+    void Close() noexcept {
+        duplication_.Reset();
+        latest_.reset();
+        gpu_buffers_.Clear();
+        if (context_) {
+            context_->ClearState();
+            context_->Flush();
+        }
+        context_.Reset();
+        const bool had_device = static_cast<bool>(device_);
+        device_.Reset();
+        device_context_mutex_.reset();
+        if (had_device && report_) {
+            try { report_(DesktopCaptureProbePhase::D3dReleased); } catch (...) {}
+        }
+    }
+
+    HMONITOR monitor_ = nullptr;
+    SourceId source_id_ = 0;
+    Callback* callback_ = nullptr;
+    std::function<void(DesktopCaptureProbePhase)> report_;
+    Microsoft::WRL::ComPtr<ID3D11Device> device_;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
+    Microsoft::WRL::ComPtr<IDXGIOutputDuplication> duplication_;
+    LUID adapter_luid_{};
+    std::shared_ptr<std::mutex> device_context_mutex_;
+    std::unique_ptr<webrtc::SharedDesktopFrame> latest_;
+    D3d11DesktopFrameTexturePool gpu_buffers_;
 };
 }
 std::unique_ptr<webrtc::DesktopCapturer> CreateOwnedWgcWindowCapturer(
         std::function<void(DesktopCaptureProbePhase)> report) {
-    return std::make_unique<OwnedWgcWindowCapturer>(std::move(report));
+    return std::make_unique<OwnedWgcWindowCapturer>(std::move(report), false, false);
+}
+std::unique_ptr<webrtc::DesktopCapturer> CreateOwnedWgcWindowGpuCapturer(
+        std::function<void(DesktopCaptureProbePhase)> report) {
+    return std::make_unique<OwnedWgcWindowCapturer>(std::move(report), false, true);
 }
 bool IsOwnedWgcSupported(DesktopSourceKind kind) {
     try {
@@ -237,6 +525,14 @@ bool IsOwnedWgcSupported(DesktopSourceKind kind) {
 }
 std::unique_ptr<webrtc::DesktopCapturer> CreateOwnedWgcScreenCapturer(
         std::function<void(DesktopCaptureProbePhase)> report) {
-    return std::make_unique<OwnedWgcWindowCapturer>(std::move(report), true);
+    return std::make_unique<OwnedWgcWindowCapturer>(std::move(report), true, false);
+}
+std::unique_ptr<webrtc::DesktopCapturer> CreateOwnedWgcScreenGpuCapturer(
+        std::function<void(DesktopCaptureProbePhase)> report) {
+    return std::make_unique<OwnedWgcWindowCapturer>(std::move(report), true, true);
+}
+std::unique_ptr<webrtc::DesktopCapturer> CreateOwnedDxgiScreenGpuCapturer(
+        std::function<void(DesktopCaptureProbePhase)> report) {
+    return std::make_unique<OwnedDxgiScreenGpuCapturer>(std::move(report));
 }
 }

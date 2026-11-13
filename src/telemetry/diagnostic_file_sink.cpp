@@ -662,6 +662,98 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
         attributes["build_id"] = event.build_id.data();
         attributes["symbol_identity"] = event.symbol_identity.data();
         break;
+    case EventKind::HardwareCpu:
+    case EventKind::HardwareMemory:
+    case EventKind::HardwareGpu:
+    case EventKind::HardwareGpuEnumeration:
+    case EventKind::HardwareEncoderCapability: {
+        const auto& hardware = event.hardware;
+        const auto known = [&](HardwareKnownField field) {
+            return (hardware.known_fields & field) != 0;
+        };
+        if (event.kind == EventKind::HardwareCpu || event.kind == EventKind::HardwareGpu) {
+            attributes["model"] = known(HardwareModelKnown)
+                ? json(hardware.model.data()) : json(nullptr);
+            attributes["model_truncated"] = (hardware.flags & HardwareModelTruncated) != 0;
+        }
+        if (event.kind == EventKind::HardwareCpu) {
+            attributes["logical_processors"] = known(HardwareLogicalProcessorsKnown)
+                ? json(hardware.logical_processors) : json(nullptr);
+            attributes["physical_cores"] = known(HardwarePhysicalCoresKnown)
+                ? json(hardware.physical_cores) : json(nullptr);
+        } else if (event.kind == EventKind::HardwareMemory) {
+            attributes["total_physical_bytes"] = known(HardwareMemoryKnown)
+                ? json(hardware.memory_bytes) : json(nullptr);
+            attributes["available_physical_bytes"] = known(HardwareAuxiliaryMemoryKnown)
+                ? json(hardware.auxiliary_memory_bytes) : json(nullptr);
+        } else if (event.kind == EventKind::HardwareGpu) {
+            attributes["vendor_id"] = known(HardwareGpuIdentityKnown)
+                ? json(hardware.vendor_id) : json(nullptr);
+            attributes["device_id"] = known(HardwareGpuIdentityKnown)
+                ? json(hardware.device_id) : json(nullptr);
+            attributes["dedicated_video_memory_bytes"] = known(HardwareMemoryKnown)
+                ? json(hardware.memory_bytes) : json(nullptr);
+            attributes["shared_system_memory_bytes"] = known(HardwareAuxiliaryMemoryKnown)
+                ? json(hardware.auxiliary_memory_bytes) : json(nullptr);
+            if (known(HardwareDriverKnown)) {
+                const auto v = hardware.driver_version;
+                attributes["driver_version"] = std::to_string((v >> 48) & 0xffff) + "." +
+                    std::to_string((v >> 32) & 0xffff) + "." +
+                    std::to_string((v >> 16) & 0xffff) + "." + std::to_string(v & 0xffff);
+            } else attributes["driver_version"] = nullptr;
+            attributes["driver_version_source"] = known(HardwareDriverKnown)
+                ? json((hardware.flags & HardwareDriverVersionFromDxgi)
+                    ? "dxgi_interface" : "display_driver_package") : json(nullptr);
+            attributes["decoder_backend"] = "software";
+        } else if (event.kind == EventKind::HardwareGpuEnumeration) {
+            attributes["hardware_adapter_count"] = event.device_count;
+            attributes["enumeration_complete"] =
+                (hardware.flags & HardwareEnumerationComplete) != 0;
+            attributes["decoder_backend"] = "software";
+        } else if (event.kind == EventKind::HardwareEncoderCapability) {
+            attributes["vendor_id"] = hardware.vendor_id;
+            attributes["h264_available"] = (hardware.encoder_codecs & HardwareEncoderH264) != 0;
+            attributes["h265_available"] = (hardware.encoder_codecs & HardwareEncoderH265) != 0;
+            attributes["scope"] = "creation_probe";
+            attributes["decoder_backend"] = "software";
+        }
+        break;
+    }
+    case EventKind::HardwareEncoderPreflight:
+    case EventKind::HardwareEncoderFailure:
+    case EventKind::VideoLevelRejected:
+        attributes["vendor_id"] = event.hardware.vendor_id;
+        attributes["codec"] = (event.hardware.encoder_codecs & HardwareEncoderH264) ? "h264" : "h265";
+        attributes["phase"] = EncoderFailureStageName(event.encoder.stage);
+        attributes["codec_level"] = event.encoder_level;
+        attributes["width"] = event.encoder.width;
+        attributes["height"] = event.encoder.height;
+        attributes["framerate"] = event.encoder.framerate;
+        attributes["bitrate_bps"] = event.encoder.bitrate_bps;
+        attributes["layer_index"] = event.encoder.layer;
+        attributes["result_code"] = event.encoder.status;
+        attributes["codec_status"] = event.rtc_error_type;
+        break;
+    case EventKind::VideoFormatResolved: {
+        const auto& format = event.video_format;
+        attributes["format_source"] = VideoFormatSourceName(format.source);
+        attributes["media_section_index"] = format.media_section_index;
+        attributes["payload_type"] = format.payload_type;
+        attributes["h264_profile"] = format.profile;
+        attributes["codec_level"] = format.level;
+        attributes["format_valid"] = format.valid;
+        attributes["profile_level_defaulted"] = format.profile_level_defaulted;
+        attributes["packetization_mode"] = format.packetization_mode;
+        attributes["level_asymmetry_allowed"] = format.level_asymmetry;
+        std::string profile_level(6, '0');
+        constexpr char digits[] = "0123456789abcdef";
+        for (std::size_t index = 0; index < profile_level.size(); ++index)
+            profile_level[index] = digits[(format.profile_level_id >> ((5 - index) * 4)) & 15];
+        attributes["profile_level_id"] = profile_level;
+        attributes["sdp_role"] = SdpRoleName(event.sdp_role);
+        attributes["sdp_sequence"] = event.sdp_sequence;
+        break;
+    }
     case EventKind::ProcessStopping:
         attributes["shutdown_reason"] = ShutdownReasonName(event.shutdown_reason); break;
     case EventKind::ProcessTerminal:

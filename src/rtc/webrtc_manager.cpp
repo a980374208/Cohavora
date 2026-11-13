@@ -3,6 +3,9 @@
 #endif
 #include <asio.hpp>
 #include "webrtc_manager.h"
+#include "auto_hardware_video_encoder.h"
+#include "bounded_encoder_worker.h"
+#include "final_h264_level_guard.h"
 #include "retained_vp8_decoder.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include "telemetry/sdp_negotiation_trace.h"
@@ -20,7 +23,10 @@
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/sdp_video_format.h"
+#include "api/video_codecs/h264_profile_level_id.h"
 #include "api/sequence_checker.h"
+#include "api/field_trials_view.h"
+#include "rtc_base/logging.h"
 
 #include "api/environment/environment_factory.h"
 #include "api/audio/audio_device.h"
@@ -32,6 +38,26 @@
 #include "modules/video_coding/codecs/av1/libaom_av1_encoder.h"
 #include "modules/video_coding/svc/scalability_mode_util.h"
 #include "media/engine/simulcast_encoder_adapter.h"
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+#include "d3d11_amf_video_encoder.h"
+#include "media/engine/internal_encoder_factory.h"
+#include "modules/video_coding/codecs/external/backend_video_encoder.h"
+#include "modules/video_coding/codecs/external/hardware_encoder_probe.h"
+#include "modules/video_coding/codecs/external/amf_video_encoder.h"
+#include "modules/video_coding/codecs/external/nvenc_video_encoder.h"
+#include "modules/video_coding/codecs/external/nvenc_video_encoder_backend.h"
+#include "modules/video_coding/codecs/external/qsv_video_encoder.h"
+#include "modules/video_coding/codecs/external/qsv_video_encoder_backend.h"
+#include "modules/video_coding/codecs/external/x265_video_encoder.h"
+#endif
+#if defined(COHAVORA_HAS_H265_DECODER)
+#include "h265_video_decoder.h"
+#endif
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <limits>
 #if defined(_WIN32)
 #include <objbase.h>
 #else
@@ -56,6 +82,173 @@ int CompareCodecName(const char* left, const char* right) {
 #endif
 }
 
+enum class EncoderPreference { kAuto, kSoftware, kAmf, kNvenc, kQsv };
+std::atomic<EncoderPreference> video_encoder_preference{EncoderPreference::kAuto};
+
+enum VideoEncoderCapabilityFlag : unsigned {
+    kCapabilitiesReady = 1u << 0,
+    kAmfH264 = 1u << 1,
+    kAmfH265 = 1u << 2,
+    kNvencH264 = 1u << 3,
+    kNvencH265 = 1u << 4,
+    kQsvH264 = 1u << 5,
+    kQsvH265 = 1u << 6,
+};
+
+std::atomic<unsigned> video_encoder_capability_flags{0};
+std::once_flag video_encoder_capability_probe_once;
+
+const char* PreferenceName(EncoderPreference preference) {
+    switch (preference) {
+    case EncoderPreference::kSoftware: return "software";
+    case EncoderPreference::kAmf: return "amf";
+    case EncoderPreference::kNvenc: return "nvenc";
+    case EncoderPreference::kQsv: return "qsv";
+    default: return "auto";
+    }
+}
+
+bool CodecNameEquals(const webrtc::SdpVideoFormat& format, const char* expected) {
+    return CompareCodecName(format.name.c_str(), expected) == 0;
+}
+
+void EmitEncoderFormat(const webrtc::SdpVideoFormat& format,
+                       diagnostic::VideoFormatSource source) {
+    const auto projected = detail::ProjectH264Format(format.name, format.parameters);
+    if (!projected) return;
+    diagnostic::VideoFormatDiagnosticRow row;
+    row.source = source;
+    row.profile_level_id = projected->profile_level_id;
+    row.profile = projected->profile;
+    row.level = projected->level;
+    row.packetization_mode = projected->packetization_mode;
+    row.level_asymmetry = projected->level_asymmetry;
+    row.valid = projected->valid;
+    row.profile_level_defaulted = projected->profile_level_defaulted;
+    diagnostic::Event event;
+    event.SetVideoFormat(row);
+    event.thread_role = diagnostic::ThreadRole::Rtc;
+    diagnostic::EmitBusinessEvent(event);
+}
+
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+class EncoderPreferenceTrials final : public webrtc::FieldTrialsView {
+public:
+    EncoderPreferenceTrials(const webrtc::Environment& original,
+                            EncoderPreference preference)
+        : original_(original), preference_(preference) {}
+
+    std::string Lookup(absl::string_view key) const override {
+        if (key == "WebRTC-H264-HardwareEncoder" ||
+            key == "WebRTC-H265-HardwareEncoder") {
+            switch (preference_) {
+            case EncoderPreference::kAmf: return "AMF";
+            case EncoderPreference::kNvenc: return "NVENC";
+            case EncoderPreference::kQsv: return "QSV";
+            case EncoderPreference::kSoftware: return "Disabled";
+            default: return "auto";
+            }
+        }
+        if (key == "WebRTC-H265-Encoder") {
+            return preference_ == EncoderPreference::kSoftware ? "x265" : "auto";
+        }
+        return original_.field_trials().Lookup(key);
+    }
+
+    std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
+        return std::make_unique<EncoderPreferenceTrials>(*this);
+    }
+
+private:
+    // Keep every delegated utility alive, including field trials supplied by
+    // the caller. The new environment owns this immutable overlay.
+    webrtc::Environment original_;
+    EncoderPreference preference_;
+};
+
+webrtc::Environment EncoderEnvironment(const webrtc::Environment& original,
+                                      EncoderPreference preference) {
+    webrtc::EnvironmentFactory factory(original);
+    std::unique_ptr<const webrtc::FieldTrialsView> trials =
+        std::make_unique<EncoderPreferenceTrials>(original, preference);
+    factory.Set(std::move(trials));
+    return factory.Create();
+}
+
+bool HardwareRetirementFailed() {
+    return webrtc::external_encoder::HardwareEncoderProbes().CheckAny() ==
+        webrtc::external_encoder::Status::kRetirementFailed;
+}
+
+const std::vector<webrtc::SdpVideoFormat>& CachedBackendFormats() {
+    // Discovery may initialize hardware. Run it once per process, rather than
+    // on every settings/UI capability query. Creation still checks live state.
+    static const auto formats = [] {
+        try {
+            return webrtc::InternalEncoderFactory().GetSupportedFormats();
+        } catch (...) {
+            // Cache failure too: a later UI read must not retry discovery.
+            return std::vector<webrtc::SdpVideoFormat>{};
+        }
+    }();
+    return formats;
+}
+
+const std::vector<webrtc::SdpVideoFormat>& CachedSoftwareFormats() {
+    static const auto formats = [] {
+        try {
+            auto result = webrtc::SupportedH264Codecs(true);
+            // Explicit software intent must not initialize a vendor GPU backend.
+            for (const char* level : {"120", "93"}) {
+                webrtc::SdpVideoFormat h265("H265", {{"profile-id", "1"},
+                    {"tier-flag", "0"}, {"level-id", level}, {"tx-mode", "SRST"}});
+                if (webrtc::IsX265VideoEncoderAvailable(h265)) {
+                    result.push_back(std::move(h265));
+                    break;
+                }
+            }
+            return result;
+        } catch (...) {
+            return std::vector<webrtc::SdpVideoFormat>{};
+        }
+    }();
+    return formats;
+}
+
+std::vector<webrtc::SdpVideoFormat> BackendFormats(EncoderPreference preference) {
+    if (preference == EncoderPreference::kSoftware) return CachedSoftwareFormats();
+    if (HardwareRetirementFailed()) return {};
+    return CachedBackendFormats();
+}
+
+bool H265SendingAvailable() {
+#if defined(COHAVORA_HAS_H265_DECODER)
+    return IsH265DecoderAvailable();
+#else
+    return false;
+#endif
+}
+
+void LogBackendCreation(const webrtc::SdpVideoFormat& format,
+                        EncoderPreference preference,
+                        const webrtc::VideoEncoder* encoder) {
+    if (!encoder) {
+        RTC_LOG(LS_WARNING) << "Product encoder codec=" << format.name
+            << " requested=" << PreferenceName(preference)
+            << " effective=unavailable";
+        return;
+    }
+    const auto info = encoder->GetEncoderInfo();
+    RTC_LOG(LS_INFO) << "Product encoder codec=" << format.name
+        << " requested=" << PreferenceName(preference)
+        << " effective=" << info.implementation_name
+        << " hardware=" << info.is_hardware_accelerated;
+    // This is construction metadata, not an assertion that InitEncode or an
+    // actual hardware frame has succeeded. SDK wrappers log runtime fallback.
+}
+
+#endif
+
 void EmitRtcLifecycle(diagnostic::RtcStatus status) noexcept {
     diagnostic::Event event;
     event.kind = diagnostic::EventKind::RtcLifecycle;
@@ -69,10 +262,24 @@ public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         std::vector<webrtc::SdpVideoFormat> formats{
             webrtc::SdpVideoFormat("VP8")};
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+        const auto preference = video_encoder_preference.load(std::memory_order_relaxed);
+        for (auto format : BackendFormats(preference)) {
+            if (CodecNameEquals(format, "H264")) {
+                formats.push_back(std::move(format));
+            } else if (CodecNameEquals(format, "H265") &&
+                       webrtc::IsBackendH265FormatSupported(format) &&
+                       H265SendingAvailable()) {
+                format.scalability_modes = {webrtc::ScalabilityMode::kL1T1};
+                formats.push_back(std::move(format));
+            }
+        }
+#else
         if (webrtc::H264Encoder::IsSupported()) {
             auto h264 = webrtc::SupportedH264Codecs();
             formats.insert(formats.end(), h264.begin(), h264.end());
         }
+#endif
         const auto vp9 = webrtc::SupportedVP9Codecs(true);
         formats.insert(formats.end(), vp9.begin(), vp9.end());
         return formats;
@@ -82,6 +289,18 @@ public:
         const webrtc::SdpVideoFormat& format,
         std::optional<std::string> scalability_mode) const override {
         CodecSupport support;
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+        if (CodecNameEquals(format, "H264") || CodecNameEquals(format, "H265")) {
+            if (!format.IsCodecInList(GetSupportedFormats())) return {};
+            if (CodecNameEquals(format, "H265")) {
+                return {.is_supported = webrtc::IsBackendH265FormatSupported(format) &&
+                    (!scalability_mode || *scalability_mode == "L1T1")};
+            }
+            if (!scalability_mode) return {.is_supported = true};
+            const auto mode = webrtc::ScalabilityModeFromString(*scalability_mode);
+            return {.is_supported = mode && webrtc::H264Encoder::SupportsScalabilityMode(*mode)};
+        }
+#endif
         if (CompareCodecName(format.name.c_str(), "VP9") == 0) {
             if (!format.IsCodecInList(webrtc::SupportedVP9Codecs(false))) return {};
             if (!scalability_mode) return {.is_supported = true};
@@ -97,14 +316,71 @@ public:
     std::unique_ptr<webrtc::VideoEncoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
+        EmitEncoderFormat(format, diagnostic::VideoFormatSource::EncoderLayerFactory);
         if (CompareCodecName(format.name.c_str(), "VP8") == 0) {
             return webrtc::CreateVp8Encoder(env);
         }
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+        if (CodecNameEquals(format, "H264") || CodecNameEquals(format, "H265")) {
+            const auto preference = video_encoder_preference.load(std::memory_order_relaxed);
+            if (!format.IsCodecInList(BackendFormats(preference)) ||
+                (CodecNameEquals(format, "H265") &&
+                 (!webrtc::IsBackendH265FormatSupported(format) ||
+                  !H265SendingAvailable()))) {
+                RTC_LOG(LS_WARNING) << "Product encoder codec=" << format.name
+                    << " requested=" << PreferenceName(preference)
+                    << " effective=unavailable reason=format_or_capability_unavailable";
+                return nullptr;
+            }
+            const auto selected_env = EncoderEnvironment(env, preference);
+            std::unique_ptr<webrtc::VideoEncoder> encoder;
+            if (CodecNameEquals(format, "H264") &&
+                preference == EncoderPreference::kSoftware) {
+                encoder = webrtc::CreateH264Encoder(
+                    selected_env, webrtc::H264EncoderSettings::Parse(format));
+            } else {
+                const auto capabilities = GetVideoEncoderCapabilities();
+                const bool use_d3d11_amf =
+                    !HardwareRetirementFailed() &&
+                    (preference == EncoderPreference::kAmf ||
+                     (preference == EncoderPreference::kAuto &&
+                      ((CodecNameEquals(format, "H264") &&
+                        !capabilities.nvenc.h264 && !capabilities.qsv.h264 &&
+                        capabilities.amf.h264) ||
+                       (CodecNameEquals(format, "H265") &&
+                        !capabilities.nvenc.h265 && !capabilities.qsv.h265 &&
+                        capabilities.amf.h265))));
+                if (use_d3d11_amf) {
+                    webrtc::external_encoder::Status probe_status =
+                        webrtc::external_encoder::Status::kUnavailable;
+                    encoder = CreateD3d11AmfVideoEncoder(
+                        selected_env, format, &probe_status);
+                    if (probe_status ==
+                            webrtc::external_encoder::Status::kRetirementFailed ||
+                        HardwareRetirementFailed()) {
+                        encoder.reset();
+                    } else if (!encoder && preference == EncoderPreference::kAuto) {
+                        encoder = webrtc::InternalEncoderFactory().Create(
+                            selected_env, format);
+                    }
+                } else {
+                    // InternalEncoderFactory returns one encoder, without another
+                    // SimulcastEncoderAdapter. SDK policy owns vendor and fallback.
+                    encoder = webrtc::InternalEncoderFactory().Create(selected_env, format);
+                }
+            }
+            LogBackendCreation(format, preference, encoder.get());
+            if (encoder && CodecNameEquals(format, "H264"))
+                return std::make_unique<detail::FinalH264LevelGuard>(std::move(encoder), format, true);
+            return encoder;
+        }
+#else
         if (CompareCodecName(format.name.c_str(), "H264") == 0 &&
             webrtc::H264Encoder::IsSupported()) {
-            return webrtc::CreateH264Encoder(
-                env, webrtc::H264EncoderSettings::Parse(format));
+            return std::make_unique<detail::FinalH264LevelGuard>(webrtc::CreateH264Encoder(
+                env, webrtc::H264EncoderSettings::Parse(format)), format, true);
         }
+#endif
         if (CompareCodecName(format.name.c_str(), "VP9") == 0 &&
             format.IsCodecInList(webrtc::SupportedVP9Codecs(false))) {
             const auto profile = webrtc::ParseSdpForVP9Profile(format.parameters)
@@ -129,6 +405,7 @@ public:
         const auto legacy_formats = simulcast_factory_->GetSupportedFormats();
         AppendFormatsNamed(formats, legacy_formats, "VP8");
         AppendFormatsNamed(formats, legacy_formats, "H264");
+        AppendFormatsNamed(formats, legacy_formats, "H265");
         const auto vp9_formats = webrtc::SupportedVP9Codecs(true);
         formats.insert(formats.end(), vp9_formats.begin(), vp9_formats.end());
         // SetParameters validates an explicit mode against the advertised RTP
@@ -139,10 +416,17 @@ public:
         return formats;
     }
 
+    std::vector<webrtc::SdpVideoFormat> GetImplementations() const override {
+        // Create() owns hardware selection and same-codec software fallback.
+        // Keep the RTP codec consistent with the publication's SFU metadata.
+        return GetSupportedFormats();
+    }
+
     CodecSupport QueryCodecSupport(
         const webrtc::SdpVideoFormat& format,
         std::optional<std::string> scalability_mode) const override {
-        if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264")) {
+        if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264") ||
+            CodecNameEquals(format, "H265")) {
             return simulcast_factory_->QueryCodecSupport(format, scalability_mode);
         }
         if (CodecNameEquals(format, "VP9")) {
@@ -166,9 +450,18 @@ public:
     std::unique_ptr<webrtc::VideoEncoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
+        if (CodecNameEquals(format, "H265")) {
+            // HEVC backend contract is SRST/L1T1. Do not wrap it in simulcast.
+            return simulcast_factory_->Create(env, format);
+        }
         if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264")) {
-            return std::make_unique<webrtc::SimulcastEncoderAdapter>(
+            auto encoder = std::make_unique<webrtc::SimulcastEncoderAdapter>(
                 env, simulcast_factory_.get(), nullptr, format);
+            if (CodecNameEquals(format, "H264")) {
+                EmitEncoderFormat(format, diagnostic::VideoFormatSource::EncoderFactory);
+                return std::make_unique<detail::FinalH264LevelGuard>(std::move(encoder), format);
+            }
+            return encoder;
         }
         if (CodecNameEquals(format, "AV1")) {
             const std::vector<webrtc::SdpVideoFormat> supported{
@@ -221,6 +514,13 @@ public:
         }
         formats.push_back(webrtc::SdpVideoFormat::AV1Profile0());
         formats.push_back(webrtc::SdpVideoFormat::AV1Profile1());
+#if defined(COHAVORA_HAS_H265_DECODER)
+        if (IsH265DecoderAvailable()) {
+            formats.emplace_back("H265", webrtc::CodecParameterMap{
+                {"profile-id", "1"}, {"tier-flag", "0"},
+                {"level-id", "120"}, {"tx-mode", "SRST"}});
+        }
+#endif
         return formats;
     }
 
@@ -245,6 +545,11 @@ public:
         if (CompareCodecName(format.name.c_str(), "H264") == 0) {
             return observed(webrtc::H264Decoder::Create());
         }
+#if defined(COHAVORA_HAS_H265_DECODER)
+        if (CodecNameEquals(format, "H265")) {
+            return observed(CreateH265VideoDecoder(env, format));
+        }
+#endif
         if (CompareCodecName(format.name.c_str(), "AV1") == 0) {
             const std::vector<webrtc::SdpVideoFormat> supported{
                 webrtc::SdpVideoFormat::AV1Profile0(),
@@ -704,8 +1009,523 @@ std::optional<std::string> AudioDeviceIdentityAtIndex(
 
 } // namespace
 
+void SetVideoEncoderPreference(const std::string& preference) {
+    auto selected = EncoderPreference::kAuto;
+    if (CompareCodecName(preference.c_str(), "software") == 0) selected = EncoderPreference::kSoftware;
+    else if (CompareCodecName(preference.c_str(), "amf") == 0) selected = EncoderPreference::kAmf;
+    else if (CompareCodecName(preference.c_str(), "nvenc") == 0) selected = EncoderPreference::kNvenc;
+    else if (CompareCodecName(preference.c_str(), "qsv") == 0) selected = EncoderPreference::kQsv;
+    const auto previous = video_encoder_preference.exchange(selected, std::memory_order_relaxed);
+    if (previous != selected) {
+        RTC_LOG(LS_INFO) << "Product video encoder preference=" << PreferenceName(selected)
+            << " appliesTo=new_encoders";
+    }
+}
+
+std::string GetVideoEncoderPreference() {
+    return PreferenceName(video_encoder_preference.load(std::memory_order_relaxed));
+}
+
+VideoEncoderCapabilities GetVideoEncoderCapabilities() {
+    VideoEncoderCapabilities result;
+    const auto flags = video_encoder_capability_flags.load(std::memory_order_acquire);
+    result.ready = (flags & kCapabilitiesReady) != 0;
+    if (!result.ready) return result;
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+    // Match the factory's fail-closed rule after unresolved SDK cleanup.
+    // This only reads coordinator state; it never waits for probe completion.
+    if (HardwareRetirementFailed()) return result;
+#endif
+    result.amf = {(flags & kAmfH264) != 0, (flags & kAmfH265) != 0};
+    result.nvenc = {(flags & kNvencH264) != 0, (flags & kNvencH265) != 0};
+    result.qsv = {(flags & kQsvH264) != 0, (flags & kQsvH265) != 0};
+    return result;
+}
+
+void ProbeVideoEncoderCapabilities() {
+    std::call_once(video_encoder_capability_probe_once, [] {
+        unsigned flags = kCapabilitiesReady;
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+        try {
+            // Settings also reads these capability caches. Initialize both here
+            // so rebuilding the codec choices never starts discovery on the UI.
+            (void)CachedBackendFormats();
+            (void)CachedSoftwareFormats();
+            const webrtc::SdpVideoFormat h264("H264", {
+                {"level-asymmetry-allowed", "1"},
+                {"packetization-mode", "1"},
+                {"profile-level-id", "42001f"}});
+            const webrtc::SdpVideoFormat h265("H265", {
+                {"profile-id", "1"}, {"tier-flag", "0"},
+                {"level-id", "93"}, {"tx-mode", "SRST"}});
+            const bool h265_sending = H265SendingAvailable();
+            const auto probe = [&](auto probe_backend, unsigned h264_flag, unsigned h265_flag) {
+                // Probe APIs initialize only the named vendor, without software or
+                // another vendor as fallback. Coordinator calls are serialized.
+                if (HardwareRetirementFailed()) return;
+                if (probe_backend(h264, nullptr) == webrtc::external_encoder::Status::kOk) {
+                    flags |= h264_flag;
+                }
+                if (h265_sending && !HardwareRetirementFailed() &&
+                    probe_backend(h265, nullptr) == webrtc::external_encoder::Status::kOk) {
+                    flags |= h265_flag;
+                }
+            };
+            probe(webrtc::ProbeAmfVideoEncoderAvailability, kAmfH264, kAmfH265);
+            probe(webrtc::ProbeNvencVideoEncoderAvailability, kNvencH264, kNvencH265);
+            probe(webrtc::ProbeQsvVideoEncoderAvailability, kQsvH264, kQsvH265);
+            if (HardwareRetirementFailed()) flags = kCapabilitiesReady;
+        } catch (...) {
+            // Complete pending UI requests even if discovery could not finish.
+            flags = kCapabilitiesReady;
+        }
+#endif
+        // Publish a complete snapshot. UI readers keep seeing ready=false
+        // while initialization or driver cleanup is in progress.
+        video_encoder_capability_flags.store(flags, std::memory_order_release);
+    });
+}
+
+namespace {
+
+using PreflightStatus = VideoEncoderPreflightStatus;
+
+bool PreflightCancelled(const std::shared_ptr<std::atomic<bool>>& cancelled) {
+    return cancelled && cancelled->load(std::memory_order_acquire);
+}
+
+std::optional<std::size_t> InvalidPreflightLayer(
+        const VideoEncoderPreflightRequest& request) {
+    if (request.layers.empty() || request.layers.size() > webrtc::kMaxSimulcastStreams) {
+        return 0;
+    }
+    for (std::size_t index = 0; index < request.layers.size(); ++index) {
+        const auto& layer = request.layers[index];
+        if (layer.width <= 0 || layer.height <= 0 || layer.width % 2 || layer.height % 2 ||
+            layer.width > std::numeric_limits<std::uint16_t>::max() ||
+            layer.height > std::numeric_limits<std::uint16_t>::max() ||
+            std::int64_t(layer.width) * layer.height > std::numeric_limits<int>::max() ||
+            layer.max_fps <= 0 || layer.max_bitrate_bps <= 0) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+bool IsPreflightH264Format(const webrtc::SdpVideoFormat& format) {
+    if (!CodecNameEquals(format, "H264")) return false;
+    const auto mode = format.parameters.find("packetization-mode");
+    const auto profile = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+    return mode != format.parameters.end() && mode->second == "1" && profile &&
+        profile->profile == webrtc::H264Profile::kProfileBaseline &&
+        profile->level != webrtc::H264Level::kLevel1_b;
+}
+
+struct PreflightEncoderProgress {
+    // A request has at most three layers and int-valued positive bitrate caps.
+    // Their rounded-up kbps values fit 22 bits. Keep the complete codec status,
+    // actual tested bitrate, layer and phase in one coherent timeout snapshot.
+    static constexpr std::uint64_t kBitrateMask = (std::uint64_t{1} << 22) - 1;
+    std::atomic<std::uint64_t> snapshot{0};
+
+    void Publish(std::size_t layer, int status, VideoEncoderPreflightPhase phase,
+                 std::uint32_t bitrate_bps) noexcept {
+        snapshot.store(static_cast<std::uint32_t>(status) |
+            (std::uint64_t(bitrate_bps / 1000) << 32) |
+            (std::uint64_t(layer) << 54) |
+            (std::uint64_t(phase == VideoEncoderPreflightPhase::Ceiling) << 56),
+            std::memory_order_release);
+    }
+
+    void ApplyTo(VideoEncoderPreflightResult& result) const noexcept {
+        const auto value = snapshot.load(std::memory_order_acquire);
+        result.codec_status = static_cast<std::int32_t>(static_cast<std::uint32_t>(value));
+        result.tested_bitrate_bps =
+            static_cast<std::uint32_t>((value >> 32) & kBitrateMask) * 1000;
+        result.failed_layer = static_cast<std::size_t>((value >> 54) & 3);
+        result.phase = (value >> 56) & 1 ? VideoEncoderPreflightPhase::Ceiling
+                                        : VideoEncoderPreflightPhase::Startup;
+    }
+};
+
+// Constructed empty on the caller, then only accessed by the worker. In
+// particular, a blocked InitEncode/Release retains all of its sibling sessions
+// here until that same owner can finish retirement and destroy the group.
+class PreflightEncoderGroup final {
+public:
+    explicit PreflightEncoderGroup(
+            std::shared_ptr<PreflightEncoderProgress> progress = {})
+        : progress_(std::move(progress)) {}
+    ~PreflightEncoderGroup() { Retire(); }
+
+    VideoEncoderPreflightResult Check(
+            const VideoEncoderPreflightRequest& request,
+            const webrtc::SdpVideoFormat& format,
+            const std::string& backend,
+            const detail::VideoEncoderPreflightFactory& factory,
+            const std::shared_ptr<std::atomic<bool>>& cancelled) {
+        Retire();
+        if (result_.status == PreflightStatus::RetirementFailed) return result_;
+        result_ = {};
+        result_.backend = backend;
+        if (PreflightCancelled(cancelled)) {
+            result_.status = PreflightStatus::Cancelled;
+            return result_;
+        }
+        if (const auto invalid = InvalidPreflightLayer(request)) {
+            result_.status = PreflightStatus::InvalidParameters;
+            result_.failed_layer = *invalid;
+            return result_;
+        }
+        if (!IsPreflightH264Format(format)) {
+            result_.status = PreflightStatus::UnsupportedFormat;
+            return result_;
+        }
+        if (!factory) return result_;
+
+        try {
+            encoders_.reserve(request.layers.size());
+            result_.status = PreflightStatus::Ready;
+            for (const auto phase : {VideoEncoderPreflightPhase::Startup,
+                                     VideoEncoderPreflightPhase::Ceiling}) {
+                result_.phase = phase;
+                for (std::size_t index = 0; index < request.layers.size(); ++index) {
+                    result_.failed_layer = index;
+                    const auto& layer = request.layers[index];
+                    const auto ceiling_kbps = static_cast<unsigned>(
+                        (std::uint64_t(layer.max_bitrate_bps) + 999) / 1000);
+                    const auto startup_bps = std::min(30000, layer.max_bitrate_bps);
+                    const auto start_kbps = phase == VideoEncoderPreflightPhase::Startup
+                        ? static_cast<unsigned>((std::uint64_t(startup_bps) + 999) / 1000)
+                        : ceiling_kbps;
+                    result_.tested_bitrate_bps = start_kbps * 1000;
+                    PublishProgress(index, WEBRTC_VIDEO_CODEC_OK, phase,
+                                    result_.tested_bitrate_bps);
+                    if (PreflightCancelled(cancelled)) {
+                        result_.status = PreflightStatus::Cancelled;
+                        break;
+                    }
+                    auto encoder = factory(format);
+                    if (!encoder) {
+                        result_.status = PreflightStatus::Unavailable;
+                        break;
+                    }
+                    encoders_.push_back({std::move(encoder), result_.tested_bitrate_bps});
+                    webrtc::VideoCodec codec;
+                    codec.codecType = webrtc::kVideoCodecH264;
+                    codec.width = static_cast<std::uint16_t>(layer.width);
+                    codec.height = static_cast<std::uint16_t>(layer.height);
+                    codec.maxFramerate = static_cast<std::uint32_t>(layer.max_fps);
+                    // Each group uses a fresh InitEncode, with the real ceiling
+                    // retained while separately checking the startup floor.
+                    codec.startBitrate = start_kbps;
+                    codec.maxBitrate = ceiling_kbps;
+                    codec.minBitrate = 1;
+                    codec.active = true;
+                    codec.numberOfSimulcastStreams = 0;
+                    codec.simulcastStream[0].numberOfTemporalLayers = 1;
+                    codec.mode = request.screenshare ? webrtc::VideoCodecMode::kScreensharing
+                                                     : webrtc::VideoCodecMode::kRealtimeVideo;
+                    codec.SetScalabilityMode(webrtc::ScalabilityMode::kL1T1);
+                    *codec.H264() = webrtc::VideoEncoder::GetDefaultH264Settings();
+                    codec.H264()->numberOfTemporalLayers = 1;
+                    const webrtc::VideoEncoder::Settings settings(
+                        webrtc::VideoEncoder::Capabilities(false), 1, 1200);
+                    result_.codec_status = encoders_.back().encoder->InitEncode(&codec, settings);
+                    PublishProgress(index, result_.codec_status, phase,
+                                    result_.tested_bitrate_bps);
+                    if (result_.codec_status != WEBRTC_VIDEO_CODEC_OK) {
+                        result_.status = PreflightStatus::InitializationFailed;
+                        break;
+                    }
+                    if (!encoders_.back().encoder->GetEncoderInfo().is_hardware_accelerated) {
+                        result_.status = PreflightStatus::NotHardware;
+                        break;
+                    }
+                }
+                // Retain the complete concurrent group through its last Init,
+                // then retire every session before the next group is created.
+                Retire();
+                if (result_.status != PreflightStatus::RetirementFailed &&
+                    PreflightCancelled(cancelled)) {
+                    result_.status = PreflightStatus::Cancelled;
+                }
+                if (!result_.ok()) break;
+            }
+        } catch (...) {
+            result_.status = PreflightStatus::InitializationFailed;
+        }
+
+        // An exception during creation/initialization still retires the partial
+        // group, including an encoder whose InitEncode did not succeed.
+        Retire();
+        if (result_.status != PreflightStatus::RetirementFailed &&
+            PreflightCancelled(cancelled)) {
+            result_.status = PreflightStatus::Cancelled;
+        }
+        if (result_.ok()) result_.formats = {format};
+        return result_;
+    }
+
+    VideoEncoderPreflightResult Close() {
+        Retire();
+        return result_;
+    }
+
+private:
+    void PublishProgress(std::size_t layer, int status,
+                         VideoEncoderPreflightPhase phase,
+                         std::uint32_t bitrate_bps) noexcept {
+        if (!progress_) return;
+        progress_->Publish(layer, status, phase, bitrate_bps);
+    }
+
+    void Retire() noexcept {
+        for (std::size_t index = 0; index < encoders_.size(); ++index) {
+            int status = WEBRTC_VIDEO_CODEC_ERROR;
+            const auto bitrate_bps = encoders_[index].bitrate_bps;
+            PublishProgress(index, WEBRTC_VIDEO_CODEC_OK, result_.phase, bitrate_bps);
+            try { status = encoders_[index].encoder->Release(); } catch (...) {}
+            PublishProgress(index, status, result_.phase, bitrate_bps);
+            if (status != WEBRTC_VIDEO_CODEC_OK &&
+                result_.status != PreflightStatus::RetirementFailed) {
+                result_.status = PreflightStatus::RetirementFailed;
+                result_.failed_layer = index;
+                result_.codec_status = status;
+                result_.tested_bitrate_bps = bitrate_bps;
+                result_.formats.clear();
+            }
+        }
+        encoders_.clear();
+    }
+
+    struct OwnedEncoder {
+        std::unique_ptr<webrtc::VideoEncoder> encoder;
+        std::uint32_t bitrate_bps;
+    };
+    std::vector<OwnedEncoder> encoders_;
+    VideoEncoderPreflightResult result_;
+    std::shared_ptr<PreflightEncoderProgress> progress_;
+};
+
+} // namespace
+
+VideoEncoderPreflightResult detail::CheckVideoEncoderPreflightFormat(
+        const VideoEncoderPreflightRequest& request,
+        const webrtc::SdpVideoFormat& format,
+        const std::string& backend,
+        const VideoEncoderPreflightFactory& factory,
+        std::shared_ptr<std::atomic<bool>> cancelled) {
+    PreflightEncoderGroup group;
+    return group.Check(request, format, backend, factory, cancelled);
+}
+
+VideoEncoderPreflightResult PreflightVideoEncoder(
+        const VideoEncoderPreflightRequest& request,
+        std::shared_ptr<std::atomic<bool>> cancelled) {
+    VideoEncoderPreflightResult result;
+    if (PreflightCancelled(cancelled)) {
+        result.status = PreflightStatus::Cancelled;
+        return result;
+    }
+    if (const auto invalid = InvalidPreflightLayer(request)) {
+        result.status = PreflightStatus::InvalidParameters;
+        result.failed_layer = *invalid;
+        return result;
+    }
+    std::vector<webrtc::SdpVideoFormat> formats;
+    for (const auto& format : request.formats) {
+        if (IsPreflightH264Format(format)) formats.push_back(format);
+    }
+    if (formats.empty()) {
+        result.status = PreflightStatus::UnsupportedFormat;
+        return result;
+    }
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+    if (HardwareRetirementFailed()) {
+        result.status = PreflightStatus::RetirementFailed;
+        return result;
+    }
+    const auto capabilities = GetVideoEncoderCapabilities();
+    if (!capabilities.ready) return result;
+    using Vendor = webrtc::external_encoder::HardwareEncoderVendor;
+    struct Candidate {
+        Vendor vendor;
+        const char* name;
+        bool available;
+        detail::VideoEncoderPreflightFactory factory;
+    };
+    const std::vector<Candidate> candidates{
+        {Vendor::kNvenc, "nvenc", capabilities.nvenc.h264,
+         [](const webrtc::SdpVideoFormat& format) {
+             return webrtc::CreateBackendVideoEncoder(
+                 format, webrtc::external_encoder::CreateNvencH264Backend());
+         }},
+        {Vendor::kQsv, "qsv", capabilities.qsv.h264,
+         [](const webrtc::SdpVideoFormat& format) {
+             return webrtc::CreateBackendVideoEncoder(
+                 format, webrtc::external_encoder::CreateQsvH264Backend());
+         }},
+        {Vendor::kAmf, "amf", capabilities.amf.h264,
+         [](const webrtc::SdpVideoFormat& format) {
+             return CreateD3d11AmfHardwareEncoder(format);
+         }}
+    };
+    const bool automatic = request.preference.empty() ||
+        CompareCodecName(request.preference.c_str(), "auto") == 0;
+    if (!automatic &&
+        std::none_of(candidates.begin(), candidates.end(), [&](const auto& candidate) {
+            return CompareCodecName(request.preference.c_str(), candidate.name) == 0;
+        })) {
+        return result;
+    }
+
+    using Worker = detail::BoundedEncoderWorker<PreflightEncoderGroup,
+                                               VideoEncoderPreflightResult>;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    const auto remaining = [&] {
+        return std::max(std::chrono::milliseconds::zero(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now()));
+    };
+    const auto quarantine = [](const Candidate& candidate) {
+        webrtc::external_encoder::HardwareEncoderProbes().RecordRetirementFailure(
+            candidate.vendor, "hardware parameter preflight retirement unconfirmed");
+    };
+    try {
+        const auto progress = std::make_shared<PreflightEncoderProgress>();
+        Worker worker(std::make_unique<PreflightEncoderGroup>(progress),
+            [](PreflightEncoderGroup& group) { return group.Close(); });
+        const Candidate* attempted = nullptr;
+        for (const auto& candidate : candidates) {
+            if (!candidate.available || (!automatic &&
+                CompareCodecName(request.preference.c_str(), candidate.name) != 0)) {
+                continue;
+            }
+            for (const auto& format : formats) {
+                if (PreflightCancelled(cancelled)) {
+                    result.status = PreflightStatus::Cancelled;
+                    return result;
+                }
+                if (HardwareRetirementFailed()) {
+                    result.status = PreflightStatus::RetirementFailed;
+                    return result;
+                }
+                if (remaining() <= std::chrono::milliseconds::zero()) {
+                    if (attempted) quarantine(*attempted);
+                    result.status = PreflightStatus::TimedOut;
+                    return result;
+                }
+                // Every capture is owned; a deadline cannot leave references to
+                // the caller's request, cancellation state, or stack frame.
+                attempted = &candidate;
+                progress->snapshot.store(0, std::memory_order_release);
+                auto reply = worker.Invoke(
+                    [request, format, backend = std::string(candidate.name),
+                     vendor = candidate.vendor, factory = candidate.factory,
+                     cancelled](PreflightEncoderGroup& group) {
+                        // Serialize the complete real-parameter session group
+                        // with discovery probes, including its final cleanup.
+                        // Run is called only here, never inside a backend.
+                        VideoEncoderPreflightResult checked;
+                        const auto status =
+                            webrtc::external_encoder::HardwareEncoderProbes().Run(
+                                vendor, nullptr, [&](std::string*) {
+                                    checked = group.Check(
+                                        request, format, backend, factory, cancelled);
+                                    using Status = webrtc::external_encoder::Status;
+                                    return checked.status == PreflightStatus::RetirementFailed
+                                        ? Status::kRetirementFailed
+                                        : (checked.ok() ? Status::kOk : Status::kUnavailable);
+                                });
+                        if (status == webrtc::external_encoder::Status::kRetirementFailed) {
+                            checked.status = PreflightStatus::RetirementFailed;
+                            checked.backend = backend;
+                            checked.formats.clear();
+                        }
+                        return checked;
+                    }, remaining());
+                if (reply.wait != Worker::Wait::kCompleted || !reply.value) {
+                    quarantine(candidate);
+                    result.backend = candidate.name;
+                    progress->ApplyTo(result);
+                    result.status = reply.wait == Worker::Wait::kTimedOut
+                        ? PreflightStatus::TimedOut : PreflightStatus::RetirementFailed;
+                    return result;
+                }
+                result = std::move(*reply.value);
+                if (result.status == PreflightStatus::RetirementFailed) {
+                    quarantine(candidate);
+                    return result;
+                }
+                if (HardwareRetirementFailed()) {
+                    result.status = PreflightStatus::RetirementFailed;
+                    result.formats.clear();
+                    return result;
+                }
+                if (result.ok() || result.status == PreflightStatus::Cancelled) {
+                    const auto closed = worker.Close(remaining());
+                    if (closed.wait != Worker::Wait::kCompleted || !closed.value ||
+                        closed.value->status == PreflightStatus::RetirementFailed) {
+                        quarantine(candidate);
+                        result.status = closed.wait == Worker::Wait::kTimedOut
+                            ? PreflightStatus::TimedOut : PreflightStatus::RetirementFailed;
+                        result.formats.clear();
+                    } else if (HardwareRetirementFailed()) {
+                        result.status = PreflightStatus::RetirementFailed;
+                        result.formats.clear();
+                    } else if (PreflightCancelled(cancelled)) {
+                        result.status = PreflightStatus::Cancelled;
+                        result.formats.clear();
+                    }
+                    return result;
+                }
+            }
+            // Mirror the backend selected by the runtime's cached capability
+            // order. Trying another vendor here could approve AMF/QSV while
+            // the actual Auto factory still creates NVENC. The caller owns
+            // the codec fallback after this selected backend's formats fail.
+            break;
+        }
+        // Ordinary failures already retired their complete encoder group. Also
+        // await worker destruction before returning an exhausted-candidate result.
+        const auto closed = worker.Close(remaining());
+        if (closed.wait != Worker::Wait::kCompleted || !closed.value ||
+            closed.value->status == PreflightStatus::RetirementFailed) {
+            if (attempted) quarantine(*attempted);
+            result.status = closed.wait == Worker::Wait::kTimedOut
+                ? PreflightStatus::TimedOut : PreflightStatus::RetirementFailed;
+            result.formats.clear();
+        } else if (HardwareRetirementFailed()) {
+            result.status = PreflightStatus::RetirementFailed;
+            result.formats.clear();
+        } else if (PreflightCancelled(cancelled)) {
+            result.status = PreflightStatus::Cancelled;
+            result.formats.clear();
+        }
+    } catch (...) {
+        result.status = PreflightStatus::Unavailable;
+        result.formats.clear();
+    }
+#endif
+    return result;
+}
+
 std::unique_ptr<webrtc::VideoEncoderFactory> CreateVideoEncoderFactory() {
     return std::make_unique<CustomVideoEncoderFactory>();
+}
+
+bool IsHardwareH264FormatSupported(const webrtc::SdpVideoFormat& format) {
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+    return webrtc::IsBackendH264FormatSupported(format);
+#else
+    return false;
+#endif
+}
+
+std::unique_ptr<webrtc::VideoEncoderFactory::EncoderSelectorInterface>
+CreateAutoHardwareH264EncoderSelector(bool allow_vp8_fallback) {
+    return std::make_unique<detail::AutoHardwareH264EncoderSelector>(allow_vp8_fallback);
 }
 
 std::unique_ptr<webrtc::VideoDecoderFactory> CreateVideoDecoderFactory() {

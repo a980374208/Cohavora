@@ -7,6 +7,7 @@
 #include <array>
 #include <deque>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string_view>
 
@@ -103,6 +104,20 @@ std::string Token(const nlohmann::json& value, const char* key) {
     return SafeToken(text) ? text : std::string{};
 }
 
+std::uint64_t RetainedEntryBytes(const OperationTimelineEntry& entry) noexcept {
+    // Account for both the deque and the final vector during their move, plus
+    // all string capacities (conservatively including their inline storage).
+    std::uint64_t bytes = 2 * sizeof(OperationTimelineEntry);
+    for (const auto* text : {&entry.event_name, &entry.process_run_id,
+            &entry.operation_id, &entry.parent_operation_id, &entry.request_id,
+            &entry.stage, &entry.outcome, &entry.error_code, &entry.error_layer,
+            &entry.leave_reason, &entry.media_kind, &entry.measurement_point,
+            &entry.endpoint_id, &entry.previous_endpoint_id, &entry.boundary}) {
+        bytes += text->capacity() + 1;
+    }
+    return bytes;
+}
+
 } // namespace
 
 std::optional<OperationTimelineEntry> ProjectTimelineEvent(const diagnostic::Event& e) {
@@ -150,15 +165,20 @@ std::optional<OperationTimelineEntry> ProjectTimelineEvent(const diagnostic::Eve
     return r;
 }
 
-OperationTimeline ReadOperationTimeline(
+namespace {
+
+OperationTimeline ReadOperationTimelineImpl(
     const std::filesystem::path& root,
     const std::string& session_id,
     std::size_t maximum_entries,
-    const std::string& expected_run_id) {
+    std::uint64_t maximum_retained_bytes,
+    const std::string& expected_run_id,
+    std::int64_t first_utc_ms,
+    std::int64_t last_utc_ms) {
     OperationTimeline result;
-    if (!IsHexId(session_id) || maximum_entries == 0 ||
+    if (!IsHexId(session_id) ||
         (!expected_run_id.empty() && !IsHexId(expected_run_id))) return result;
-    maximum_entries = (std::min)(maximum_entries, std::size_t{1024});
+    const bool complete = maximum_retained_bytes != 0;
     try {
         std::error_code error;
         if (std::filesystem::is_symlink(root, error) || error ||
@@ -214,6 +234,7 @@ OperationTimeline ReadOperationTimeline(
                 a.modified < b.modified;
         });
         std::deque<OperationTimelineEntry> recent;
+        std::uint64_t retained_bytes = 0;
         std::array<char, kMaximumLineBytes + 1> line{};
         for (const auto& file : files) {
             std::ifstream input(file.path, std::ios::binary);
@@ -419,15 +440,29 @@ OperationTimeline ReadOperationTimeline(
                         value.at("attributes").is_object())
                         entry.attempt = value.at("attributes").value(
                             "attempt", std::uint32_t{0});
+                    if (complete) {
+                        if ((first_utc_ms && entry.occurred_at_utc_ms < first_utc_ms) ||
+                            (last_utc_ms && entry.occurred_at_utc_ms > last_utc_ms)) {
+                            ++result.omitted_by_selected_range;
+                            continue;
+                        }
+                        const auto bytes = RetainedEntryBytes(entry);
+                        if (bytes > maximum_retained_bytes - retained_bytes) {
+                            result.budget_exceeded = true;
+                            return result;
+                        }
+                        retained_bytes += bytes;
+                    }
                     recent.push_back(std::move(entry));
-                    if (recent.size() > maximum_entries) {
+                    if (!complete && recent.size() > maximum_entries) {
                         recent.pop_front();
                         ++result.omitted;
                     }
                 } catch (...) { ++result.invalid_lines; }
             }
         }
-        result.entries.assign(recent.begin(), recent.end());
+        result.entries.assign(std::make_move_iterator(recent.begin()),
+            std::make_move_iterator(recent.end()));
         std::sort(result.entries.begin(), result.entries.end(),
             [](const auto& a, const auto& b) {
                 if (a.process_run_id == b.process_run_id)
@@ -439,6 +474,37 @@ OperationTimeline ReadOperationTimeline(
             });
     } catch (...) { ++result.skipped_files; }
     return result;
+}
+
+} // namespace
+
+OperationTimeline ReadOperationTimeline(
+    const std::filesystem::path& root,
+    const std::string& session_id,
+    std::size_t maximum_entries,
+    const std::string& expected_run_id) {
+    if (maximum_entries == 0) return {};
+    return ReadOperationTimelineImpl(root, session_id,
+        (std::min)(maximum_entries, std::size_t{1024}), 0, expected_run_id, 0, 0);
+}
+
+OperationTimeline ReadOperationTimelineForExport(
+    const std::filesystem::path& root,
+    const std::string& session_id,
+    std::uint64_t maximum_retained_bytes,
+    const std::string& expected_run_id,
+    std::int64_t first_utc_ms,
+    std::int64_t last_utc_ms) {
+    if (first_utc_ms < 0 || last_utc_ms < 0 ||
+        (first_utc_ms && last_utc_ms && first_utc_ms > last_utc_ms)) return {};
+    if (maximum_retained_bytes == 0) {
+        OperationTimeline result;
+        result.budget_exceeded = true;
+        return result;
+    }
+    return ReadOperationTimelineImpl(root, session_id, 0,
+        (std::min)(maximum_retained_bytes, kMaximumInputBytes), expected_run_id,
+        first_utc_ms, last_utc_ms);
 }
 
 } // namespace livekit::telemetry

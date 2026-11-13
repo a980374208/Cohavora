@@ -685,7 +685,33 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                     std::lock_guard lock(run->delivery);
                     if (!run->accepting || run->capture_phase == DesktopCapturePhase::AwaitingPermission) return;
                     run->source->captureFrame(frame);
-                    if (frame.type() == VideoBufferType::I420) {
+                    if (frame.hasNativeBuffer()) {
+                        run->preview->SubmitLazy("screen", run->id, [captured = frame]() -> render::OwnedI420Frame::Ptr {
+                            const auto planes = captured.planeInfos();
+                            if (captured.type() == VideoBufferType::NV12 && planes.size() >= 2) {
+                                return render::OwnedI420Frame::CopyFromNV12(
+                                    captured.width(), captured.height(),
+                                    reinterpret_cast<const uint8_t*>(planes[0].data_ptr), planes[0].stride,
+                                    reinterpret_cast<const uint8_t*>(planes[1].data_ptr), planes[1].stride);
+                            }
+                            if (planes.size() >= 3) {
+                                return render::OwnedI420Frame::CopyFromPlanes(
+                                    captured.width(), captured.height(),
+                                    reinterpret_cast<const uint8_t*>(planes[0].data_ptr), planes[0].stride,
+                                    reinterpret_cast<const uint8_t*>(planes[1].data_ptr), planes[1].stride,
+                                    reinterpret_cast<const uint8_t*>(planes[2].data_ptr), planes[2].stride);
+                            }
+                            return nullptr;
+                        });
+                    } else if (frame.type() == VideoBufferType::NV12) {
+                        const auto planes = frame.planeInfos();
+                        if (planes.size() >= 2) {
+                            run->preview->Submit("screen", run->id, render::OwnedI420Frame::CopyFromNV12(
+                                frame.width(), frame.height(),
+                                reinterpret_cast<const uint8_t*>(planes[0].data_ptr), planes[0].stride,
+                                reinterpret_cast<const uint8_t*>(planes[1].data_ptr), planes[1].stride));
+                        }
+                    } else if (frame.type() == VideoBufferType::I420) {
                         const auto planes = frame.planeInfos();
                         if (planes.size() >= 3) {
                             run->preview->Submit("screen", run->id, render::OwnedI420Frame::CopyFromPlanes(

@@ -293,6 +293,8 @@ set(LIVEKIT_SOURCES
     src/media/dshow_enumerator.cpp
     src/media/dshow_capture.cpp
     src/media/desktop_capture.cpp
+    src/media/d3d11_nv12_frame_buffer.cpp
+    src/media/d3d11_nv12_frame_buffer.h
     src/media/wgc_window_capture.cpp
     src/media/camera_source_manager.cpp
     src/media/audio_vad.cpp
@@ -302,6 +304,7 @@ set(LIVEKIT_SOURCES
     src/telemetry/crash_handler.cpp
     src/telemetry/crash_evidence_provider.cpp
     src/telemetry/build_identity.cpp
+    src/platform/system_hardware_info.cpp
     src/telemetry/diagnostic_event.cpp
     src/telemetry/diagnostic_file_sink.cpp
     src/telemetry/diagnostic_pipeline.cpp
@@ -411,6 +414,7 @@ set(LIVEKIT_HEADERS
     src/telemetry/crash_handler.h
     src/telemetry/crash_evidence_provider.h
     src/telemetry/build_identity.h
+    src/platform/system_hardware_info.h
     src/telemetry/bounded_callback.h
     src/telemetry/diagnostic_event.h
     src/telemetry/diagnostic_file_sink.h
@@ -578,7 +582,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED)
             "Select Release dependency ABI or disable COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED.")
     endif()
 endif()
-if(retained_vp8_sdk_hash STREQUAL "5f0cf912e593c9a279ee61a7e41400e38d633d0a8921216bed76cfd00d8b9022")
+# These exact Release archives use the audited VP8 pool/refcount ownership.
+if(retained_vp8_sdk_hash STREQUAL "5f0cf912e593c9a279ee61a7e41400e38d633d0a8921216bed76cfd00d8b9022"
+        OR retained_vp8_sdk_hash STREQUAL "e137514da1b5a61cb42657c11a66c2c65174900e6a1876dcf42a5d04a9127968"
+        OR retained_vp8_sdk_hash STREQUAL "6a625fc50e05e4845ac3fe2fe69d2570c23b6df99b592abbf739f3b5d85db533")
     if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
         set_property(SOURCE src/rtc/retained_vp8_decoder.cpp APPEND PROPERTY COMPILE_DEFINITIONS
             "$<$<NOT:$<CONFIG:Debug>>:COHAVORA_CERTIFIED_VP8=1>")
@@ -593,7 +600,20 @@ endif()
 # ASIO SSL objects cross target boundaries. The prefix kit remains a required
 # package artifact for rebuilding WebRTC, but is not a consumer compile option.
 add_library(cohavora_webrtc_sdk INTERFACE)
+set(COHAVORA_WEBRTC_PACKAGE_PROFILE "" CACHE FILEPATH
+    "Reviewed profile for a separately built WebRTC SDK")
+include(cmake/CohavoraWebRtcPackage.cmake)
+if(COHAVORA_WEBRTC_HAS_BACKEND_ENCODERS)
+    # The default SDK has no external encoder API. Add AMF only after the
+    # reviewed codec package and its linked archives have been verified.
+    target_sources(cohavora_core PRIVATE
+        src/rtc/d3d11_amf_video_encoder.cpp
+        src/rtc/d3d11_amf_video_encoder.h)
+endif()
+include(cmake/CohavoraH265Decoder.cmake)
 set(COHAVORA_E2EE_BACKEND_PACKAGE_DIR "" CACHE PATH "Reviewed native E2EE overlay package directory")
+set(COHAVORA_E2EE_BACKEND_PROFILE "" CACHE FILEPATH
+    "Reviewed profile for a separately paired native E2EE overlay")
 set(COHAVORA_E2EE_PATCH_DIR "" CACHE PATH "Isolated, fingerprinted E2EE backend repair for validation")
 set(COHAVORA_E2EE_MEDIA_GUARD_DIR "" CACHE PATH "Pinned native required-encryption channel guards")
 if(NOT WIN32 AND (COHAVORA_E2EE_BACKEND_PACKAGE_DIR OR COHAVORA_E2EE_PATCH_DIR

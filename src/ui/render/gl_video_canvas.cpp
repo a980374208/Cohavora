@@ -88,7 +88,7 @@ struct GlVideoCanvas::Worker {
     std::shared_ptr<OwnerActivity> activity = std::make_shared<OwnerActivity>();
     std::atomic<uint64_t> presented{0};
     std::atomic<uint64_t> presentedScene{0};
-    int64_t started = Now();
+    int64_t started = Now(); // GUI-owned first-presentation deadline.
     void failed(const char* reason, lk_render_result result = LK_RENDER_OK) {
         std::lock_guard<std::mutex> lock(mutex);
         failure = QString::fromLatin1(reason);
@@ -103,7 +103,8 @@ struct GlVideoCanvas::Worker {
         QOpenGLContext context;
         context.setFormat(format);
         activity->busySince.store(Now());
-        if (!context.create() || !context.makeCurrent(surface)) { failed("context-create-failed"); return; }
+        if (!context.create()) { failed("context-create-failed"); return; }
+        if (!context.makeCurrent(surface)) { failed("make-current-failed"); return; }
         static std::atomic<uint64_t> generation{1};
         const auto contextGeneration = generation.fetch_add(1);
         auto* gl = context.extraFunctions();
@@ -158,7 +159,7 @@ struct GlVideoCanvas::Worker {
                 const lk_render_create_info info{sizeof(info), LK_RENDER_SURFACE_HOST_GL, &binding, sizeof(binding), uint32_t(kMaxResources), target.surface_generation};
                 lk_render_result result;
                 device = module->Create(info, result);
-                if (!device) { lost = true; failed("device-create-failed"); break; }
+                if (!device) { lost = true; failed("device-create-failed", result); break; }
             }
             auto result = device->Resize(target);
             if (result != LK_RENDER_OK) {
@@ -428,7 +429,16 @@ void GlVideoCanvas::resizeEvent(QResizeEvent* e) {
 void GlVideoCanvas::requestRender() {
     if (failed_ || !surface_) return;
     startWorker();
-    if (worker_) { worker_->exposed.store(isVisible() && surface_->isExposed()); render(); }
+    if (worker_) {
+        const bool exposed = isVisible() && surface_->isExposed();
+        const bool previously_exposed = worker_->exposed.exchange(exposed);
+        if (exposed && !previously_exposed && !initialized_) {
+            // A hidden surface deliberately cannot present. Start a fresh
+            // first-frame deadline when it becomes presentable again.
+            worker_->started = Now();
+        }
+        render();
+    }
 }
 void GlVideoCanvas::pollWorker() {
     if (failed_) return;
@@ -447,13 +457,18 @@ void GlVideoCanvas::pollWorker() {
         moduleVersion = worker_->moduleVersion;
     }
     const auto busy = worker_->activity->busySince.load(std::memory_order_acquire);
+    const auto frames = worker_->presented.load(std::memory_order_acquire);
     if (!failure.isEmpty()) { fail(FailureFromCode(failure, failureResult)); return; }
     if (busy && Now() - busy > (initialized_ ? kPresentTimeoutMs : kStartupTimeoutMs)) {
         presentationQuarantined.store(true);
         fail(RenderGpuFailure::PresentationTimeout); return;
     }
-    if (!initialized_ && Now() - worker_->started > kStartupTimeoutMs) { fail(RenderGpuFailure::RendererStartupTimeout); return; }
-    const auto frames = worker_->presented.load();
+    // The first swap may already have completed while the GUI dispatcher was
+    // busy. Its published frame wins over an expired first-frame deadline.
+    if (!initialized_ && !frames && worker_->exposed.load() &&
+        Now() - worker_->started > kStartupTimeoutMs) {
+        fail(RenderGpuFailure::RendererStartupTimeout); return;
+    }
     if (frames > presented_) {
         presented_ = frames;
         if (!initialized_) {

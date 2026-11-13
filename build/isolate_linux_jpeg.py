@@ -12,7 +12,9 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import uuid
 
 
 RENAMES = {
@@ -48,6 +50,47 @@ def definitions(table: Counter) -> set[str]:
     return {entry[0] for entry in table if entry[1] not in {"U", "w", "v"}}
 
 
+def publish_pair(archive: Path, manifest: Path, output: Path) -> None:
+    """Publish the completion manifest last, restoring old files on failure.
+
+    Two filesystem renames are not an atomic pair. Callers must only consume
+    this result after the command succeeds, using the manifest's output hash.
+    """
+    targets = ((archive, output), (manifest, output.with_suffix(".json")))
+    backups = []
+    published = []
+    try:
+        for _, target in targets:
+            if target.exists():
+                backup = output.parent / f".{target.name}.backup-{uuid.uuid4().hex}"
+                target.replace(backup)
+                backups.append((backup, target))
+        for staged, target in targets:
+            staged.replace(target)
+            published.append(target)
+    except Exception as exception:
+        failures = []
+        saved_targets = {target for _, target in backups}
+        for target in reversed(published):
+            if target not in saved_targets:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError as exc:
+                    failures.append(str(exc))
+        for backup, target in reversed(backups):
+            try:
+                backup.replace(target)
+            except OSError as exc:
+                failures.append(f"Restore {backup} to {target}: {exc}")
+        if failures:
+            raise RuntimeError("JPEG output rollback needs manual recovery; "
+                               + "; ".join(failures)) from exception
+        raise
+    else:
+        for backup, _ in backups:
+            backup.unlink()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--archive", type=Path, required=True)
@@ -58,7 +101,7 @@ def main() -> None:
     args = parser.parse_args()
     source = args.archive.resolve(strict=True)
     output = args.output.resolve()
-    if source == output:
+    if source in (output, output.with_suffix(".json")):
         raise RuntimeError("The SDK archive must never be overwritten")
     source_hash = digest(source)
     original = symbols(args.nm, source)
@@ -104,11 +147,16 @@ def main() -> None:
             "other_global_symbols_unchanged": True,
             "remaining_qt_collisions": [],
         }
-        temporary.replace(output)
         manifest_path = Path(work) / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        manifest_path.replace(output.with_suffix(".json"))
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        publish_pair(temporary, manifest_path, output)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exception:
+        print(f"[ERROR] JPEG isolation failed: {exception}", file=sys.stderr)
+        if isinstance(exception, subprocess.CalledProcessError) and exception.stderr:
+            print(exception.stderr.strip(), file=sys.stderr)
+        raise SystemExit(1) from exception

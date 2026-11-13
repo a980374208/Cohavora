@@ -116,6 +116,17 @@ public:
                               RenderColorSpace color_space = {},
                               RenderFrameMetadata render_metadata = {});
 
+    static Ptr CopyFromNV12(int width,
+                            int height,
+                            const uint8_t* data_y,
+                            int stride_y,
+                            const uint8_t* data_uv,
+                            int stride_uv,
+                            int64_t timestamp_us = 0,
+                            VideoRotation rotation = VideoRotation::VIDEO_ROTATION_0,
+                            RenderColorSpace color_space = {},
+                            RenderFrameMetadata render_metadata = {});
+
     int width() const noexcept { return width_; }
     int height() const noexcept { return height_; }
     int chroma_width() const noexcept { return chroma_width_; }

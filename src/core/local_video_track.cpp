@@ -26,6 +26,7 @@ LocalVideoTrack::~LocalVideoTrack() = default;
 
 void LocalVideoTrack::set_publish_options(const VideoPublishOptions& options) {
     std::lock_guard lock(options_mutex_);
+    ++publish_options_revision_;
     requested_publish_options_ = options;
     requested_publish_options_.source = Track::source();
     const auto [width, height] = source_ ? source_->dimensions() : std::pair{1280,720};
@@ -37,6 +38,7 @@ void LocalVideoTrack::SetScreenShareProfile(ScreenShareFrameProfile profile) {
     if (Track::source() != TrackSource::ScreenShareVideo || !profile.quality.valid() ||
         profile.width < 2 || profile.height < 2) throw std::invalid_argument("invalid screen profile");
     std::lock_guard lock(options_mutex_);
+    ++publish_options_revision_;
     screen_profile_ = profile;
     requested_publish_options_.screen_share_fps = profile.quality.fps;
     publish_options_ = ComputeMultiCodecSimulcastOptions(profile.width, profile.height, requested_publish_options_);
@@ -136,6 +138,16 @@ std::set<std::string> CodecSet(const std::vector<std::string>& codecs) {
 
 VideoPublishOptions LocalVideoTrack::ComputeSimulcastOptions(int width, int height, const VideoPublishOptions& input_options) {
     VideoPublishOptions opts = input_options;
+    const auto codec = CodecName(opts.video_codec);
+    if (codec == "h265") {
+        if (!opts.scalability_mode.empty() && opts.scalability_mode != "L1T1")
+            throw std::invalid_argument("H265 supports only SRST/L1T1");
+        // The HEVC backend accepts one spatial/temporal stream. Converge the
+        // RTP topology before Room creates its send encodings, including calls
+        // made before the local/server codec intersection is known.
+        opts.simulcast = false;
+        opts.scalability_mode = "L1T1";
+    }
     if (width <= 0 || height <= 0) {
         width = 1280;
         height = 720;
@@ -169,7 +181,6 @@ VideoPublishOptions LocalVideoTrack::ComputeSimulcastOptions(int width, int heig
         original.max_bitrate_bps = int(std::min<int64_t>(12000000, bitrate * opts.screen_share_fps / 15));
         original.max_fps = opts.screen_share_fps;
     }
-    const auto codec = CodecName(opts.video_codec);
     // VP8 ScreenshareLayers caches its target FPS at construction. Reserve
     // the supported ceiling so a same-size 15/20 -> 30 change does not remain
     // capped at the old rate. Capture cadence still enforces the user target.
@@ -204,7 +215,10 @@ VideoPublishOptions LocalVideoTrack::ComputeSimulcastOptions(int width, int heig
         const auto& preset = presets[i];
         const double scale = std::max(1.0,
             static_cast<double>(min_size) / std::min(preset.width, preset.height));
-        opts.layers.push_back({static_cast<int>(width / scale), static_cast<int>(height / scale),
+        // Match WebRTC's ScaleResolutionDownBy rounding: truncation can hide
+        // an odd runtime dimension from the hardware parameter preflight.
+        opts.layers.push_back({static_cast<int>(std::round(width / scale)),
+            static_cast<int>(std::round(height / scale)),
             preset.max_bitrate_bps, preset.max_fps, std::string(1, kRids[i]), scale});
     }
     // Match Rust into_rtp_encodings: f/h/q for three, h/q for two, q for one.
@@ -281,9 +295,11 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
     int height,
     const VideoPublishOptions& requested_options,
     const std::vector<std::string>& local_sender_codecs,
-    const std::vector<std::string>& server_enabled_codecs) {
+    const std::vector<std::string>& server_enabled_codecs,
+    bool prefer_hardware_h264) {
     ResolvedVideoPublishPlan plan;
     plan.requested = requested_options;
+    plan.requested.preflight_h264_formats.clear();
     plan.requested_codec = CodecName(requested_options.video_codec);
     if (plan.requested_codec.empty()) plan.requested_codec = "auto";
 
@@ -296,8 +312,12 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
 
     constexpr std::array<const char*, 4> kFallbackOrder{
         "vp8", "h264", "vp9", "av1"};
+    const bool auto_hardware_h264 = plan.requested_codec == "auto" &&
+        prefer_hardware_h264 && allowed("h264");
     plan.effective_codec = plan.requested_codec;
-    if (plan.requested_codec == "auto") {
+    if (auto_hardware_h264) {
+        plan.effective_codec = "h264";
+    } else if (plan.requested_codec == "auto") {
         const auto selected = std::find_if(
             kFallbackOrder.begin(), kFallbackOrder.end(),
             [&](const char* codec) { return allowed(codec); });
@@ -321,11 +341,28 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
 
     plan.effective = requested_options;
     plan.effective.video_codec = plan.effective_codec;
+    // These flags are derived from the current plan, never inherited from
+    // caller input or a previous resolution after reconnect.
+    plan.effective.auto_hardware_h264 = auto_hardware_h264;
+    plan.effective.preflight_h264_formats.clear();
+    // After publication the negotiated H264 codec keeps its software fallback;
+    // preflight may instead resolve VP8 before any SFU metadata is sent.
+    plan.effective.allow_vp8_fallback = false;
     if (plan.requested_codec != "auto" && plan.used_fallback()) {
         plan.effective.scalability_mode.clear();
     }
 
-    if (!plan.effective.scalability_mode.empty()) {
+    if (plan.effective_codec == "h265") {
+        if (!plan.effective.scalability_mode.empty() &&
+            plan.effective.scalability_mode != "L1T1") {
+            plan.error = "H265 supports only SRST/L1T1";
+            return plan;
+        }
+        // Apply the HEVC contract only after codec resolution, so a server
+        // fallback to VP8/H264 keeps the requested simulcast topology.
+        plan.effective.simulcast = false;
+        plan.effective.scalability_mode = "L1T1";
+    } else if (!plan.effective.scalability_mode.empty()) {
         const bool svc_codec = plan.effective_codec == "vp9" ||
             plan.effective_codec == "av1";
         if (!svc_codec || !IsVideoEncoderFormatSupported(
@@ -374,6 +411,37 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
     }
     plan.effective.auto_backup_codec = requested_options.auto_backup_codec;
     return plan;
+}
+
+ResolvedVideoPublishPlan LocalVideoTrack::ResolveHardwarePreflightFallback(
+    int width,
+    int height,
+    const ResolvedVideoPublishPlan& original_plan,
+    const std::vector<std::string>& local_sender_codecs,
+    const std::vector<std::string>& server_enabled_codecs) {
+    const auto local = CodecSet(local_sender_codecs);
+    const auto server = CodecSet(server_enabled_codecs);
+    auto failed = original_plan;
+    failed.effective.auto_hardware_h264 = false;
+    failed.effective.allow_vp8_fallback = false;
+    failed.effective.preflight_h264_formats.clear();
+    failed.requested.preflight_h264_formats.clear();
+    if (!local.contains("vp8") ||
+        (!server_enabled_codecs.empty() && !server.contains("vp8"))) {
+        failed.error = "hardware H264 preflight failed and VP8 is unavailable in the local/server publish intersection";
+        return failed;
+    }
+    auto options = original_plan.requested;
+    options.video_codec = "vp8";
+    options.scalability_mode.clear();
+    options.backup_codec.reset();
+    options.auto_backup_codec = false;
+    auto fallback = ResolvePublishPlan(width, height, options,
+        local_sender_codecs, server_enabled_codecs, false);
+    fallback.requested = failed.requested;
+    fallback.requested_codec = original_plan.requested_codec;
+    fallback.fallback_reason = "hardware H264 preflight failed before publication";
+    return fallback;
 }
 
 VideoPublishOptions LocalVideoTrack::DefaultVp8SimulcastOptions(int width, int height) {

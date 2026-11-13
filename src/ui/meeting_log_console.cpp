@@ -542,6 +542,49 @@ MeetingLogConsoleWindow::diagnosticMirror() {
 		switch (event.kind) {
 		case livekit::diagnostic::EventKind::ProcessStarted:
 			entry.message = QStringLiteral("build=%1").arg(event.build_id.data()); break;
+		case EventKind::HardwareCpu:
+		case EventKind::HardwareMemory:
+		case EventKind::HardwareGpu:
+		case EventKind::HardwareGpuEnumeration:
+		case EventKind::HardwareEncoderCapability: {
+			const auto &hardware = event.hardware;
+			const auto number = [&](HardwareKnownField field, std::uint64_t value) {
+				return (hardware.known_fields & field) ? QString::number(value) : QStringLiteral("unknown");
+			};
+			const auto model = (hardware.known_fields & HardwareModelKnown)
+				? QString::fromLatin1(hardware.model.data()) : QStringLiteral("unknown");
+			if (event.kind == EventKind::HardwareCpu) {
+				entry.message = QStringLiteral("CPU=%1 physical_cores=%2 logical_processors=%3")
+					.arg(model, number(HardwarePhysicalCoresKnown, hardware.physical_cores),
+						number(HardwareLogicalProcessorsKnown, hardware.logical_processors));
+			} else if (event.kind == EventKind::HardwareMemory) {
+				entry.message = QStringLiteral("total_physical_bytes=%1 available_physical_bytes=%2")
+					.arg(number(HardwareMemoryKnown, hardware.memory_bytes),
+						number(HardwareAuxiliaryMemoryKnown, hardware.auxiliary_memory_bytes));
+			} else if (event.kind == EventKind::HardwareGpu) {
+				const auto version = hardware.driver_version;
+				const auto driver = (hardware.known_fields & HardwareDriverKnown)
+					? QStringLiteral("%1.%2.%3.%4").arg((version >> 48) & 0xffff)
+						.arg((version >> 32) & 0xffff).arg((version >> 16) & 0xffff).arg(version & 0xffff)
+					: QStringLiteral("unknown");
+				entry.message = QStringLiteral("GPU=%1 vendor_id=%2 device_id=%3 dedicated_video_memory_bytes=%4 shared_system_memory_bytes=%5 driver=%6 decoder_backend=software")
+					.arg(model, number(HardwareGpuIdentityKnown, hardware.vendor_id),
+						number(HardwareGpuIdentityKnown, hardware.device_id),
+						number(HardwareMemoryKnown, hardware.memory_bytes),
+						number(HardwareAuxiliaryMemoryKnown, hardware.auxiliary_memory_bytes), driver);
+			} else if (event.kind == EventKind::HardwareGpuEnumeration) {
+				entry.message = QStringLiteral("hardware_adapters=%1 enumeration_complete=%2 decoder_backend=software")
+					.arg(event.device_count).arg((hardware.flags & HardwareEnumerationComplete) != 0);
+			} else {
+				const auto backend = hardware.vendor_id == 0x1002 ? QStringLiteral("AMF") :
+					hardware.vendor_id == 0x10de ? QStringLiteral("NVENC") : QStringLiteral("QSV");
+				entry.message = QStringLiteral("backend=%1 h264_available=%2 h265_available=%3 scope=creation_probe decoder_backend=software")
+					.arg(backend).arg((hardware.encoder_codecs & HardwareEncoderH264) != 0)
+					.arg((hardware.encoder_codecs & HardwareEncoderH265) != 0);
+			}
+			if (hardware.flags & HardwareModelTruncated) entry.message += QStringLiteral(" model_truncated=true");
+			break;
+		}
 		case livekit::diagnostic::EventKind::ProcessStopping:
 			entry.message = QString::fromLatin1(livekit::diagnostic::ShutdownReasonName(
 				event.shutdown_reason).data()); break;

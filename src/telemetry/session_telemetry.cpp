@@ -69,7 +69,7 @@ std::string LowerAscii(std::string value) {
 
 std::string VideoCodecName(const std::string& value) {
     return ControlledValue(LowerAscii(value),
-        {"video/vp8", "video/vp9", "video/h264", "video/av1"});
+        {"video/vp8", "video/vp9", "video/h264", "video/h265", "video/av1"});
 }
 
 std::string VideoImplementationName(const std::string& value) {
@@ -77,6 +77,10 @@ std::string VideoImplementationName(const std::string& value) {
     if (lower.empty()) return {};
     if (lower.find("libvpx") != std::string::npos) return "libvpx";
     if (lower.find("openh264") != std::string::npos) return "openh264";
+    if (lower.find("amf") != std::string::npos) return "amf";
+    if (lower.find("nvenc") != std::string::npos) return "nvenc";
+    if (lower.find("qsv") != std::string::npos) return "qsv";
+    if (lower.find("x265") != std::string::npos) return "x265";
     if (lower.find("ffmpeg") != std::string::npos) return "ffmpeg";
     if (lower.find("intel") != std::string::npos) return "intel";
     if (lower.find("nvidia") != std::string::npos) return "nvidia";
@@ -5412,6 +5416,33 @@ void SessionTelemetry::CompleteStatsOnStrand(
     completed.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - request_started).count();
     if (!provider_failed) {
+        // Produce one bounded per-stream copy from this actual stats completion.
+        // Later probe/history reads retain this sequence and timestamp unchanged.
+        std::array<CodecSenderPublicationView, kMaxSeries> publications;
+        std::size_t publication_count = 0;
+        bool publication_overflow = false;
+        for (const auto& [_, publication] : local_publications_) {
+            if (!publication.active || publication.media_kind != LocalMediaKind::Video) continue;
+            if (publication_count == publications.size()) { publication_overflow = true; continue; }
+            const auto& descriptor = publication.video_publish;
+            auto& view = publications[publication_count++];
+            view.track_sid = descriptor.publication_sid;
+            view.rtc_track_id = publication.rtc_track_id;
+            view.sender_track_ids = descriptor.sender_track_ids;
+            view.source = descriptor.source_kind == LocalVideoSourceKind::Camera ? CodecSenderSource::Camera :
+                (descriptor.source_kind == LocalVideoSourceKind::Screen ? CodecSenderSource::ScreenShare : CodecSenderSource::Unknown);
+            view.room_generation = publication.room_generation;
+            view.publication_epoch = publication.publication_epoch;
+            view.requested_codec = descriptor.requested_codec;
+            view.reported_codec_fallback = !descriptor.fallback_reason.empty() && descriptor.fallback_reason != "none";
+        }
+        const auto capture_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        auto sender = BuildCodecSenderSnapshot(report,
+            std::span<const CodecSenderPublicationView>(publications.data(), publication_count),
+            state_.codec_sender.sequence + 1, capture_unix_ms);
+        sender.overflow = sender.overflow || publication_overflow;
+        state_.codec_sender = std::move(sender);
         UpdateLocalPublishStatsOnStrand(report, now);
         UpdateVideoStatsOnStrand(report, now);
         UpdateNetworkStatsOnStrand(report, now);

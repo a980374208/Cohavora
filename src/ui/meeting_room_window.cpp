@@ -1230,6 +1230,7 @@ void VideoTileWidget::enterEventHook(QEnterEvent *e) {
 	if (_pinBtn) _pinBtn->show();
 	if (_volBtn) _volBtn->show();
 	Ui::RpWidget::enterEventHook(e);
+	invalidatePresentation();
 }
 
 void VideoTileWidget::leaveEventHook(QEvent *e) {
@@ -1238,6 +1239,7 @@ void VideoTileWidget::leaveEventHook(QEvent *e) {
 		_volBtn->hide();
 	}
 	Ui::RpWidget::leaveEventHook(e);
+	invalidatePresentation();
 }
 
 void VideoTileWidget::resizeEvent(QResizeEvent *e) {
@@ -1271,6 +1273,24 @@ void VideoTileWidget::setDisplayName(const QString &name) {
 	_displayName = name;
 	setToolTip(QStringLiteral("<qt>%1</qt>").arg(_displayName.toHtmlEscaped()));
 	invalidatePresentation();
+}
+
+void VideoTileWidget::setNameDisplayMode(OpenMeeting::ParticipantNameDisplayMode mode) {
+	if (_nameDisplayMode == mode) return;
+	_nameDisplayMode = mode;
+	invalidatePresentation();
+}
+
+bool VideoTileWidget::nameVisible(bool hovered) const {
+	switch (_nameDisplayMode) {
+	case OpenMeeting::ParticipantNameDisplayMode::Always:
+		return true;
+	case OpenMeeting::ParticipantNameDisplayMode::OnHover:
+		return hovered;
+	default:
+		// The threshold follows the tile's logical size, independent of display DPI.
+		return hovered || qint64(width()) * height() > 250000;
+	}
 }
 
 void VideoTileWidget::setVideoActive(bool active) {
@@ -1485,6 +1505,7 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 	p.setRenderHint(QPainter::TextAntialiasing);
 
 	const QRect r = rect();
+	const bool showName = nameVisible(hovered);
 
 	if (_isPip && !decorationOnly) {
 		QPainterPath path;
@@ -1499,11 +1520,11 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 		if (!decorationOnly) drawVideoFrame(p, r);
 		else if (_isVideoStreamPaused || !hasFrame) drawVideoPlaceholder(p, r);
 	} else {
-		drawAvatarPlaceholder(p, r);
+		drawAvatarPlaceholder(p, r, showName);
 	}
 
 	if (_remoteInputEnabled && !decorationOnly) return;
-	drawBottomNameTag(p, r);
+	if (showName) drawBottomNameTag(p, r);
 	drawNetworkQualityBadge(p, r);
 	if (decorationOnly && hovered) {
 		p.save();
@@ -1563,7 +1584,7 @@ static std::pair<QColor, QColor> GenerateAvatarGradient(const QString &str) {
 	return gradients[hash % gradients.size()];
 }
 
-void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
+void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r, bool showName) {
 	p.fillRect(r, themeColor(ColorRole::Tile));
 
 	const int cx = r.center().x();
@@ -1614,7 +1635,7 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	p.drawText(avatarRect, Qt::AlignCenter, initial);
 	p.restore();
 	// Small avatar and video cards share the compact bottom tag.
-	if (nameTag.compact) return;
+	if (nameTag.compact || !showName) return;
 
 	// 昵称与麦克风指示
 	QFont font("Microsoft YaHei", std::clamp(minDim * 6 / 100, 9, 12), QFont::Bold);
@@ -4491,11 +4512,25 @@ void MeetingRoomWindow::setupAudioPreferencesBinding(
 		});
 }
 
+void MeetingRoomWindow::applyParticipantNameDisplayPreferences(
+		const OpenMeeting::MediaPreferences &preferences) {
+	const auto apply = [mode = preferences.participantNameDisplay](VideoTileWidget *tile) {
+		if (tile) tile->setNameDisplayMode(mode);
+	};
+	apply(_localTile);
+	apply(_localScreenTile.get());
+	for (const auto &[identity, tile] : _remoteTiles) apply(tile.get());
+	for (const auto &[sid, tile] : _remoteScreenTiles) apply(tile.get());
+}
+
 void MeetingRoomWindow::setupCameraCompletionOwner(
 		OpenMeeting::SessionManager &sessionManager) {
 	Q_ASSERT(thread() == QThread::currentThread());
 	Q_ASSERT(sessionManager.thread() == thread());
 	_cameraSessionManager = &sessionManager;
+	applyParticipantNameDisplayPreferences(sessionManager.mediaPreferences());
+	connect(&sessionManager, &OpenMeeting::SessionManager::preferencesChanged, this,
+		&MeetingRoomWindow::applyParticipantNameDisplayPreferences);
 	if (!_cameraLogEffect) {
 		_cameraLogEffect = [](bool error, const QString &tag, const QString &message) {
 			LogToConsole(error ? LogCategory::Error : LogCategory::Media, tag, message);
@@ -4747,19 +4782,15 @@ void MeetingRoomWindow::onRemoteRenderTick() {
 			}
 		}
 	}
-	if (_localScreenTile && _localScreenPreview &&
-        ((isVideoStageVisible() && (_acceptedVideoPlan.coordinator_session == 0 ||
-          _acceptedVideoPlan.show_local_screen_share)) ||
-         (isSharedScreenVisible() && _acceptedVideoPlan.show_detached_local))) {
+	if (_localScreenPreview && localScreenPreviewVisible()) {
 		auto frame = _localScreenPreview->TakeLatest("screen", _localScreenPreview->generation());
 		if (!frame) return;
 		_localScreenTile->setVideoActive(true);
         if (_remoteRenderSession) _remoteRenderSession->RenderFrame(
             _localScreenTile->renderKey().toStdString(),
             livekit::render::VideoRenderFrame::FromI420(std::move(frame)));
-	} else if (_localScreenPreview) {
-		(void)_localScreenPreview->TakeLatest(
-			"screen", _localScreenPreview->generation());
+	} else {
+		updateLocalScreenPreviewDemand();
 	}
 }
 
@@ -5317,6 +5348,9 @@ void MeetingRoomWindow::setupVideoCanvasInteractions() {
 }
 
 void MeetingRoomWindow::bindTileInteractions(VideoTileWidget *tile) {
+	if (_cameraSessionManager) {
+		tile->setNameDisplayMode(_cameraSessionManager->mediaPreferences().participantNameDisplay);
+	}
     connect(tile, &VideoTileWidget::moreRequested, this, [this, tile] { showVideoTileMenu(tile->renderKey()); });
 	connect(tile, &VideoTileWidget::tileDoubleClicked, this, [this, tile] {
 		setPinnedTile(tile->renderKey(), !tile->isPinned());
@@ -5755,7 +5789,10 @@ void MeetingRoomWindow::detachSharedScreen(std::optional<livekit::TrackKey> key,
         connect(_sharedWindow.get(), &SharedScreenWindow::returnRequested,
             this, &MeetingRoomWindow::returnSharedScreen, Qt::QueuedConnection);
         connect(_sharedWindow.get(), &SharedScreenWindow::viewportChanged,
-            this, [this] { scheduleViewportIntent(); });
+            this, [this] {
+                updateLocalScreenPreviewDemand();
+                scheduleViewportIntent();
+            });
         connect(_sharedWindow.get(), &SharedScreenWindow::rendererUnavailable,
             this, &MeetingRoomWindow::fallBackToQtCpuBackend, Qt::QueuedConnection);
         connect(_sharedWindow.get(), &SharedScreenWindow::shareQualityRequested, this, [this] {
@@ -5858,7 +5895,21 @@ bool MeetingRoomWindow::isVideoStageVisible() const {
 		_stageContainer->height() > 0;
 }
 
+bool MeetingRoomWindow::localScreenPreviewVisible() const {
+    return _localScreenTile &&
+        ((isVideoStageVisible() && (_acceptedVideoPlan.coordinator_session == 0 ||
+          _acceptedVideoPlan.show_local_screen_share)) ||
+         (isSharedScreenVisible() && _acceptedVideoPlan.show_detached_local));
+}
+
+void MeetingRoomWindow::updateLocalScreenPreviewDemand() {
+    if (_localScreenPreview && !localScreenPreviewVisible()) {
+        _localScreenPreview->DiscardLatest("screen", _localScreenPreview->generation());
+    }
+}
+
 void MeetingRoomWindow::updateVideoLayout() {
+    updateLocalScreenPreviewDemand();
 	const bool stageVisible = isVideoStageVisible();
 	const bool awaitingPlan = _acceptedVideoPlan.coordinator_session == 0;
 	const bool showLocal = stageVisible &&
@@ -7069,7 +7120,11 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 #endif
 	setAnnotationInteractionEnabled(
 		_coordinator && _coordinator->state() == OpenMeeting::MeetingState::InMeeting);
-	_localScreenPreview = active ? snapshot.preview : nullptr;
+    auto nextPreview = active ? snapshot.preview : nullptr;
+    if (_localScreenPreview && _localScreenPreview != nextPreview) {
+        _localScreenPreview->DiscardLatest("screen", _localScreenPreview->generation());
+    }
+    _localScreenPreview = std::move(nextPreview);
 	if (active && !_localScreenTile) {
 		_localScreenTile = std::make_unique<VideoTileWidget>(QCoreApplication::translate("MeetingUI", "My Screen Share"), true, _stageContainer, true);
 		_localScreenTile->setIdentity(QStringLiteral("local-screen"));
@@ -7791,6 +7846,9 @@ void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	cancelDeviceSwitchTelemetry();
 	closeAnnotationOverlay();
 	_annotationBinding.reset();
+    if (_localScreenPreview) {
+        _localScreenPreview->DiscardLatest("screen", _localScreenPreview->generation());
+    }
 	_localScreenPreview.reset();
 	if (_remoteRenderSession) _remoteRenderSession->Deactivate();
 	if (_meetingTimer) _meetingTimer->stop();

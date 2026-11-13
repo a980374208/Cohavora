@@ -5,6 +5,7 @@
 #include <QtCore/QTimer>
 #include <QtGui/QAccessible>
 #include <QtGui/QHelpEvent>
+#include <QtGui/QShowEvent>
 #include <QtGui/QTextDocument>
 #include <QtWidgets/QAccessibleWidget>
 #include <QtWidgets/QComboBox>
@@ -46,6 +47,17 @@ public:
             if (target) emit target->activated(text);
         });
         return true;
+    }
+
+protected:
+    void showEvent(QShowEvent *event) override {
+        QListView::showEvent(event);
+        doItemsLayout();
+        // QComboBox temporarily disables popup updates while opening it.
+        // Refresh the rebuilt list after that scope ends, without waiting for hover.
+        QTimer::singleShot(0, this, [this] {
+            if (isVisible()) viewport()->update();
+        });
     }
 };
 

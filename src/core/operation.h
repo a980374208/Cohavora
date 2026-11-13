@@ -45,6 +45,7 @@ enum class OperationErrorCode {
     EncryptionFailed,
     EncryptionCodecUnsupported,
     EncryptionKeyUnavailable,
+    CodecUnsupported,
 };
 
 enum class OperationRecoveryAction { None, SelectSupportedCodec, InstallEncryptionKey, Rejoin };

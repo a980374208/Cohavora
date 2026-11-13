@@ -2,6 +2,7 @@
 
 #include <string>
 #include <memory>
+#include <array>
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -86,6 +87,7 @@ private:
     int actual_height_{0};
     bool flip_vertically_{false};
     DShowPixelFormat negotiated_format_{DShowPixelFormat::RGB24};
+    std::array<webrtc::scoped_refptr<webrtc::NV12Buffer>, 4> nv12_pool_;
 
     Microsoft::WRL::ComPtr<DShowSampleGrabberCallback> grabber_callback_;
 

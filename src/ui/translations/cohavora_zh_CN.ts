@@ -4,6 +4,54 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Participant names in meetings</source>
+        <translation>会议中名称显示</translation>
+    </message>
+    <message>
+        <source>Auto (default)</source>
+        <translation>自动（默认）</translation>
+    </message>
+    <message>
+        <source>Always show</source>
+        <translation>一直显示</translation>
+    </message>
+    <message>
+        <source>Show on hover</source>
+        <translation>鼠标悬停时显示</translation>
+    </message>
+    <message>
+        <source>Auto shows names when the participant window's width × height is greater than 250000; otherwise, names appear on hover.</source>
+        <translation>自动模式下，单个用户窗口的宽×高大于 250000 时显示名称；小于或等于时，仅在鼠标悬停到对应用户时显示。</translation>
+    </message>
+    <message>
+        <source>Detecting available video encoders...</source>
+        <translation>正在检测本机可用的视频编码器…</translation>
+    </message>
+    <message>
+        <source>Video encoder</source>
+        <translation>视频编码方式</translation>
+    </message>
+    <message>
+        <source>Auto (prefer hardware)</source>
+        <translation>自动（优先硬件编码）</translation>
+    </message>
+    <message>
+        <source>Software</source>
+        <translation>软件编码</translation>
+    </message>
+    <message>
+        <source>Applies to camera and screen sharing when a new encoder is created. Auto prefers available hardware. Software fallback for the same codec depends on the selected encoder and codec; unsupported combinations may fail to start.</source>
+        <translation>摄像头和屏幕共享共用此偏好，在之后创建编码器时生效。自动模式优先使用可用硬件。能否回退到同一编解码格式的软件编码取决于所选编码器和格式；不支持的组合可能无法启动。</translation>
+    </message>
+    <message>
+        <source>Camera codec</source>
+        <translation>摄像头编解码格式</translation>
+    </message>
+    <message>
+        <source>Screen share codec</source>
+        <translation>屏幕共享编解码格式</translation>
+    </message>
+    <message>
         <source>Share system audio</source>
         <translation>共享系统音频</translation>
     </message>
@@ -3952,8 +4000,8 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>每页视频数</translation>
     </message>
     <message>
-        <source>Auto (VP8 preferred)</source>
-        <translation>自动（优先 VP8）</translation>
+        <source>Auto (prefer hardware H.264)</source>
+        <translation>自动（优先硬件 H.264）</translation>
     </message>
     <message>
         <source>This codec is unavailable in the current WebRTC package.</source>
@@ -4373,7 +4421,7 @@ Sign in with your own account in a client configured for the same meeting servic
     <message><source>Verification pending</source><translation>等待验证</translation></message>
     <message><source>Receiving</source><translation>接收</translation></message>
     <message><source>Sending</source><translation>发送</translation></message>
-    <message><source>Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing.</source><translation>加密会议支持 VP8 和 H264，自动模式使用 VP8。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
+    <message><source>Encrypted meetings support VP8 and H264. Auto prefers hardware H264, then VP8; select a supported codec in Settings for camera and screen sharing.</source><translation>加密会议支持 VP8 和 H264，自动模式优先硬件 H264，失败后回退 VP8。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
     <message><source>Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings.</source><translation>加密会议支持 VP8 和 H264。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
 </context>
 <context>

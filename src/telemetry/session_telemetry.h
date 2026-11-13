@@ -1,6 +1,7 @@
 #pragma once
 
 #include "stats.h"
+#include "codec_sender_witness.h"
 #include "diagnostic_event.h"
 #include "render/canvas_render_timing.h"
 
@@ -294,6 +295,8 @@ struct LocalVideoPipelineSample {
 
 struct LocalVideoPublishDescriptor {
     LocalVideoSourceKind source_kind = LocalVideoSourceKind::Unknown;
+    // Actual LiveKit publication SID, supplied after publication is committed.
+    std::string publication_sid;
     std::string requested_codec;
     std::string effective_codec;
     std::string fallback_reason;
@@ -432,6 +435,9 @@ struct ProcessResourceSample {
 
 struct Snapshot {
     using Clock = std::chrono::steady_clock;
+
+    // Fixed storage is charged by sizeof(Snapshot); no unbounded retained IDs.
+    CodecSenderSnapshot codec_sender;
 
     std::uint64_t session_generation = 0;
     std::uint64_t revision = 0;

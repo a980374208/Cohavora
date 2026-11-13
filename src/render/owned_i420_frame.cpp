@@ -8,6 +8,7 @@
 
 #include "api/video/color_space.h"
 #include "api/video/video_frame.h"
+#include "libyuv/convert.h"
 
 namespace livekit::render {
 namespace {
@@ -226,6 +227,67 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
     copy_plane(result->storage_->bytes.get() + result->u_offset_, data_u, chroma_width, chroma_height, stride_u);
     telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::UEnd);
     copy_plane(result->storage_->bytes.get() + result->v_offset_, data_v, chroma_width, chroma_height, stride_v);
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::VEnd);
+    return result;
+}
+
+OwnedI420Frame::Ptr OwnedI420Frame::CopyFromNV12(int width,
+                                                 int height,
+                                                 const uint8_t* data_y,
+                                                 int stride_y,
+                                                 const uint8_t* data_uv,
+                                                 int stride_uv,
+                                                 int64_t timestamp_us,
+                                                 VideoRotation rotation,
+                                                 RenderColorSpace color_space,
+                                                 RenderFrameMetadata render_metadata) {
+    if (width <= 0 || height <= 0 || !data_y || !data_uv) {
+        return nullptr;
+    }
+
+    const int chroma_width = (width + 1) / 2;
+    const int chroma_height = (height + 1) / 2;
+    if (stride_y < width || stride_uv < chroma_width * 2) {
+        return nullptr;
+    }
+
+    size_t y_size = 0;
+    size_t chroma_size = 0;
+    if (!CheckedMultiply(static_cast<size_t>(width), static_cast<size_t>(height), &y_size) ||
+        !CheckedMultiply(static_cast<size_t>(chroma_width), static_cast<size_t>(chroma_height), &chroma_size) ||
+        y_size > std::numeric_limits<size_t>::max() - chroma_size ||
+        y_size + chroma_size > std::numeric_limits<size_t>::max() - chroma_size) {
+        return nullptr;
+    }
+
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::AllocateBegin);
+    auto result = std::shared_ptr<OwnedI420Frame>(new OwnedI420Frame(width,
+                                                                     height,
+                                                                     chroma_width,
+                                                                     chroma_height,
+                                                                     y_size,
+                                                                     chroma_size,
+                                                                     timestamp_us,
+                                                                     rotation,
+                                                                     color_space,
+                                                                     std::move(render_metadata)));
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::AllocateEnd);
+
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::PlanesBegin);
+    if (libyuv::NV12ToI420(data_y,
+                           stride_y,
+                           data_uv,
+                           stride_uv,
+                           result->storage_->bytes.get(),
+                           result->stride_y_,
+                           result->storage_->bytes.get() + result->u_offset_,
+                           result->stride_u_,
+                           result->storage_->bytes.get() + result->v_offset_,
+                           result->stride_v_,
+                           width,
+                           height) != 0) {
+        return nullptr;
+    }
     telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::VEnd);
     return result;
 }

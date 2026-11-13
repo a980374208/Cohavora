@@ -5,6 +5,8 @@
 #include "session_telemetry.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include "webrtc_manager.h"
+#include "rtc/video_format_diagnostics.h"
+#include "rtc/h264_level_constraints.h"
 #include "stats_collector.h"
 #include "local_audio_track.h"
 #include "local_video_track.h"
@@ -24,6 +26,7 @@
 #include <limits>
 #include <algorithm>
 #include "api/jsep.h"
+#include "api/video_codecs/sdp_video_format.h"
 #include "api/video/video_sink_interface.h"
 #if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
 #include "api/make_ref_counted.h"
@@ -114,6 +117,7 @@ void ProjectOperationError(std::exception_ptr error,
         using D = diagnostic::ErrorCode;
         switch (native.code()) {
         case N::InvalidState: event.error_code = D::InvalidState; break;
+        case N::CodecUnsupported: event.error_code = D::CodecUnsupported; break;
         case N::Cancelled: event.error_code = D::Cancelled; break;
         case N::SignalConnectFailed: event.error_code = D::SignalConnectFailed; break;
         case N::JoinTimeout: event.error_code = D::JoinTimeout; break;
@@ -217,6 +221,71 @@ std::vector<std::string> LocalVideoSenderCodecs() {
     return result;
 }
 
+std::vector<webrtc::SdpVideoFormat> LocalHardwareH264Formats() {
+    std::vector<webrtc::SdpVideoFormat> formats;
+    const auto factory = WebRTCManager::Instance().factory();
+    if (!factory) return formats;
+    const auto capabilities = factory->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO);
+    for (const auto& codec : capabilities.codecs) {
+        if (!codec.IsMediaCodec() || _stricmp(codec.name.c_str(), "h264") != 0) continue;
+        webrtc::SdpVideoFormat format(codec.name, codec.parameters);
+        if (IsHardwareH264FormatSupported(format)) formats.push_back(std::move(format));
+    }
+    return formats;
+}
+
+bool ExactH264Format(const webrtc::SdpVideoFormat& left,
+                     const webrtc::SdpVideoFormat& right) {
+    return _stricmp(left.name.c_str(), right.name.c_str()) == 0 &&
+        left.parameters == right.parameters;
+}
+
+std::optional<diagnostic::VideoFormatDiagnosticRow> VideoFormatRow(
+    std::string_view name, const webrtc::CodecParameterMap& parameters,
+    diagnostic::VideoFormatSource source, int payload_type = -1,
+    std::size_t media_section_index = 65535) {
+    const auto projection = detail::ProjectH264Format(name, parameters);
+    if (!projection) return std::nullopt;
+    diagnostic::VideoFormatDiagnosticRow row;
+    row.source = source;
+    row.media_section_index = static_cast<std::uint16_t>(std::min<std::size_t>(media_section_index, 65535));
+    row.payload_type = payload_type >= 0 && payload_type <= 127 ? static_cast<std::int16_t>(payload_type) : -1;
+    row.profile_level_id = projection->profile_level_id;
+    row.profile = projection->profile;
+    row.level = projection->level;
+    row.packetization_mode = projection->packetization_mode;
+    row.level_asymmetry = projection->level_asymmetry;
+    row.valid = projection->valid;
+    row.profile_level_defaulted = projection->profile_level_defaulted;
+    return row;
+}
+
+std::set<std::string> NormalizedVideoCodecs(const std::vector<std::string>& codecs) {
+    std::set<std::string> result;
+    for (auto name : codecs) {
+        std::transform(name.begin(), name.end(), name.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (name.rfind("video/", 0) == 0) name.erase(0, 6);
+        result.insert(std::move(name));
+    }
+    return result;
+}
+
+const char* VideoPreflightStatusName(VideoEncoderPreflightStatus status) {
+    switch (status) {
+    case VideoEncoderPreflightStatus::Ready: return "ready";
+    case VideoEncoderPreflightStatus::InvalidParameters: return "invalid_parameters";
+    case VideoEncoderPreflightStatus::UnsupportedFormat: return "unsupported_format";
+    case VideoEncoderPreflightStatus::Unavailable: return "unavailable";
+    case VideoEncoderPreflightStatus::InitializationFailed: return "initialization_failed";
+    case VideoEncoderPreflightStatus::NotHardware: return "not_hardware";
+    case VideoEncoderPreflightStatus::Cancelled: return "cancelled";
+    case VideoEncoderPreflightStatus::TimedOut: return "timed_out";
+    case VideoEncoderPreflightStatus::RetirementFailed: return "retirement_failed";
+    }
+    return "unavailable";
+}
+
 std::vector<std::string> LocalAudioSenderCodecs() {
     std::vector<std::string> result;
     const auto factory = WebRTCManager::Instance().factory();
@@ -231,17 +300,33 @@ std::vector<std::string> LocalAudioSenderCodecs() {
 
 ResolvedVideoPublishPlan ResolveVideoPublishPlan(
     const std::shared_ptr<LocalVideoTrack>& track,
-    const std::vector<std::string>& enabled_codecs) {
+    const std::vector<std::string>& enabled_codecs,
+    bool encrypted_auto = false) {
     const auto source = track ? track->source() : nullptr;
     const auto profile = track ? track->screen_share_profile() : std::nullopt;
     const auto [width, height] = profile ? std::pair{profile->width, profile->height}
         : source ? source->dimensions() : std::pair{1280,720};
+    const auto requested = track->requested_publish_options();
+    auto sender_codecs = LocalVideoSenderCodecs();
+    if (encrypted_auto && (requested.video_codec.empty() ||
+        _stricmp(requested.video_codec.c_str(), "auto") == 0)) {
+        // Preserve the automatic choice until hardware policy is resolved,
+        // while retaining the application's VP8/H264 encrypted profile.
+        std::erase_if(sender_codecs, [](const std::string& codec) {
+            return _stricmp(codec.c_str(), "vp8") != 0 &&
+                _stricmp(codec.c_str(), "h264") != 0;
+        });
+    }
+    const auto hardware = GetVideoEncoderCapabilities();
+    const bool prefer_hardware_h264 = GetVideoEncoderPreference() == "auto" &&
+        hardware.ready && (hardware.amf.h264 || hardware.nvenc.h264 || hardware.qsv.h264);
     return LocalVideoTrack::ResolvePublishPlan(
         width,
         height,
-        track->requested_publish_options(),
-        LocalVideoSenderCodecs(),
-        enabled_codecs);
+        requested,
+        sender_codecs,
+        enabled_codecs,
+        prefer_hardware_h264);
 }
 
 ResolvedAudioPublishPlan ResolveAudioPublishPlan(
@@ -1574,6 +1659,146 @@ void Room::EmitDiagnostic(diagnostic::Event event) const noexcept {
     }
     event.thread_role = diagnostic::ThreadRole::Session;
     diagnostic::EmitBusinessEvent(event);
+}
+
+void Room::EmitPublisherVideoFormat(
+    diagnostic::VideoFormatDiagnosticRow format,
+    uint64_t generation,
+    const std::shared_ptr<diagnostic::SdpNegotiationTrace>& trace,
+    diagnostic::ThreadRole thread) const noexcept {
+    diagnostic::Context context;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            (trace && publisher_sdp_trace_ != trace)) return;
+        context = diagnostic_context_;
+    }
+    if (trace) {
+        trace->RecordVideoFormat(format, thread);
+        return;
+    }
+    // Preferences and preflight precede CreateOffer, so there is no SDP round
+    // yet. Zero sequence deliberately avoids inventing a negotiation round.
+    diagnostic::Event event;
+    event.SetVideoFormat(format);
+    event.context = context;
+    event.context.room_generation = generation;
+    event.context.has_room_generation = true;
+    event.sdp_role = diagnostic::SdpRole::Publisher;
+    event.thread_role = thread;
+    event.media_kind = diagnostic::MediaKind::Video;
+    event.outcome = format.valid ? diagnostic::Outcome::Success : diagnostic::Outcome::Failure;
+    diagnostic::EmitBusinessEvent(event);
+}
+
+void Room::TracePublisherSdpFormats(
+    const std::string& sdp,
+    bool answer,
+    uint64_t generation,
+    const std::shared_ptr<diagnostic::SdpNegotiationTrace>& trace) const noexcept {
+    try {
+        webrtc::SdpParseError ignored;
+        const auto description = webrtc::CreateSessionDescription(
+            answer ? webrtc::SdpType::kAnswer : webrtc::SdpType::kOffer, sdp, &ignored);
+        if (!description || !description->description()) return;
+        const auto& contents = description->description()->contents();
+        for (std::size_t index = 0; index < contents.size(); ++index) {
+            const auto& content = contents[index];
+            const auto* media = content.media_description();
+            if (content.rejected || !media || !media->as_video()) continue;
+            const auto direction = media->direction();
+            // An answer's recv direction describes the publisher's sending
+            // section. Single-PC incoming-only video belongs to subscribers.
+            const bool sending = direction == webrtc::RtpTransceiverDirection::kSendRecv ||
+                direction == (answer ? webrtc::RtpTransceiverDirection::kRecvOnly
+                                     : webrtc::RtpTransceiverDirection::kSendOnly);
+            if (!sending) continue;
+            for (const auto& codec : media->codecs()) {
+                if (auto row = VideoFormatRow(codec.name, codec.params,
+                    answer ? diagnostic::VideoFormatSource::RemoteAnswer : diagnostic::VideoFormatSource::LocalOffer,
+                    codec.id, index)) {
+                    EmitPublisherVideoFormat(*row, generation, trace);
+                }
+            }
+        }
+    } catch (...) {
+        // Diagnostic extraction cannot reject or mutate a business SDP.
+    }
+}
+
+void Room::TracePublisherSenderFormats(
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+    uint64_t generation,
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) noexcept {
+    try {
+        auto* signaling = WebRTCManager::Instance().signaling_thread();
+        auto ticket = callback_gate_->Enter();
+        if (!pc || !signaling || signaling->IsQuitting() || !ticket) return;
+        struct Task {
+            std::shared_ptr<Room> room;
+            webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+            std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
+            uint64_t generation;
+            ExecutorCallbackGate::Ticket ticket;
+        };
+        auto* task = new Task{shared_from_this(), std::move(pc), std::move(trace), generation, std::move(ticket)};
+        try {
+            // Trivial closure: the owned task is destroyed in this translation
+            // unit across the product/WebRTC CRT boundary.
+            signaling->PostTask([task] {
+                std::unique_ptr<Task> owned(task);
+                try {
+                    {
+                        std::lock_guard lock(task->room->room_mutex_);
+                        if (!task->room->IsNativeGenerationCurrentLocked(task->generation) ||
+                            task->room->publisher_pc_ != task->pc ||
+                            task->room->publisher_sdp_trace_ != task->trace) return;
+                    }
+                    const auto* remote = task->pc->remote_description();
+                    for (const auto& transceiver : task->pc->GetTransceivers()) {
+                        if (!transceiver) continue;
+                        const auto sender = transceiver->sender();
+                        const auto track = sender ? sender->track() : nullptr;
+                        const auto direction = transceiver->current_direction();
+                        if (!track || track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind ||
+                            !direction || (*direction != webrtc::RtpTransceiverDirection::kSendOnly &&
+                                           *direction != webrtc::RtpTransceiverDirection::kSendRecv)) continue;
+                        std::size_t media_index = 65535;
+                        const auto mid = transceiver->mid();
+                        if (mid && remote && remote->description()) {
+                            const auto& contents = remote->description()->contents();
+                            for (std::size_t index = 0; index < contents.size(); ++index) {
+                                if (contents[index].mid() == *mid) { media_index = index; break; }
+                            }
+                        }
+                        // Follow the same configured selection as the final
+                        // Level check; actual emitted RTP still requires stats.
+                        const auto parameters = sender->GetParameters();
+                        std::set<std::tuple<int, std::uint32_t, int, int>> emitted;
+                        for (const auto& encoding : parameters.encodings) {
+                            const webrtc::RtpCodec* selected = encoding.codec ? &*encoding.codec :
+                                (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
+                            if (!selected) continue;
+                            int payload = -1;
+                            for (const auto& codec : parameters.codecs) {
+                                if (_stricmp(codec.name.c_str(), selected->name.c_str()) == 0 &&
+                                    codec.parameters == selected->parameters) { payload = codec.payload_type; break; }
+                            }
+                            if (auto row = VideoFormatRow(selected->name, selected->parameters,
+                                diagnostic::VideoFormatSource::SenderParameters, payload, media_index)) {
+                                if (!emitted.emplace(row->payload_type, row->profile_level_id,
+                                    row->packetization_mode, row->level_asymmetry).second) continue;
+                                task->room->EmitPublisherVideoFormat(*row, task->generation,
+                                    task->trace, diagnostic::ThreadRole::Rtc);
+                            }
+                        }
+                    }
+                } catch (...) {}
+            });
+        } catch (...) {
+            delete task;
+        }
+    } catch (...) {}
 }
 
 std::shared_ptr<MembershipState> Room::EnsureMembershipLocked(
@@ -6153,7 +6378,7 @@ Room::AddTrackToPublisherAsync(
             if (transceiver &&
                 task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind &&
                 !task.publish_options.video_codec.empty()) {
-                auto get_prefs = [](const std::string& codec_name) {
+                auto get_prefs = [&](const std::string& codec_name) {
                     std::string selected = codec_name;
                     std::transform(selected.begin(), selected.end(), selected.begin(),
                                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
@@ -6166,6 +6391,19 @@ Room::AddTrackToPublisherAsync(
                         std::transform(name.begin(), name.end(), name.begin(),
                                        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
                         if (name == selected) {
+                            if (name == "h264" && !task.publish_options.preflight_h264_formats.empty() &&
+                                std::none_of(task.publish_options.preflight_h264_formats.begin(),
+                                    task.publish_options.preflight_h264_formats.end(), [&](const auto& approved) {
+                                        return ExactH264Format(approved,
+                                            webrtc::SdpVideoFormat(codec.name, codec.parameters));
+                                    })) {
+                                continue;
+                            }
+                            if (task.publish_options.auto_hardware_h264 &&
+                                name == "h264" && !IsHardwareH264FormatSupported(
+                                    webrtc::SdpVideoFormat(codec.name, codec.parameters))) {
+                                continue;
+                            }
                             preferences.push_back(codec);
                             if (codec.preferred_payload_type) {
                                 selected_payload_types.insert(*codec.preferred_payload_type);
@@ -6201,13 +6439,8 @@ Room::AddTrackToPublisherAsync(
                         "resolved primary codec has no sender preference")));
                     return;
                 }
-                // LiveKit derives the potential upstream codecs from the
-                // primary receiver's negotiated codec list. Keep the primary
-                // first, but also advertise the resolved backup codecs here:
-                // a subscriber can bind before the backup RTP arrives and
-                // must still be able to map a later codec regression.
-                for (size_t index = 1; index < task.publish_options.simulcast_codecs.size(); ++index) {
-                    for (const auto& codec : get_prefs(task.publish_options.simulcast_codecs[index].codec)) {
+                const auto append_prefs = [&](const std::string& codec_name) {
+                    for (const auto& codec : get_prefs(codec_name)) {
                         const auto duplicate = std::any_of(preferences.begin(), preferences.end(),
                             [&codec](const auto& current) {
                                 return current.name == codec.name &&
@@ -6216,6 +6449,14 @@ Room::AddTrackToPublisherAsync(
                             });
                         if (!duplicate) preferences.push_back(codec);
                     }
+                };
+                // LiveKit derives the potential upstream codecs from the
+                // primary receiver's negotiated codec list. Keep the primary
+                // first, but also advertise the resolved backup codecs here:
+                // a subscriber can bind before the backup RTP arrives and
+                // must still be able to map a later codec regression.
+                for (size_t index = 1; index < task.publish_options.simulcast_codecs.size(); ++index) {
+                    append_prefs(task.publish_options.simulcast_codecs[index].codec);
                 }
                 auto codec_status = transceiver->SetCodecPreferences(preferences);
                 if (!codec_status.ok()) {
@@ -6228,6 +6469,14 @@ Room::AddTrackToPublisherAsync(
                         true)));
                     return;
                 }
+                try {
+                    for (const auto& codec : preferences) {
+                        if (auto row = VideoFormatRow(codec.name, codec.parameters,
+                            diagnostic::VideoFormatSource::CodecPreference, codec.preferred_payload_type.value_or(-1))) {
+                            task.room->EmitPublisherVideoFormat(*row, task.generation, {}, diagnostic::ThreadRole::Rtc);
+                        }
+                    }
+                } catch (...) {}
                 // GAP-03: Multi-Codec Simulcast & Backup Codecs Transceiver
                 if (task.publish_options.simulcast_codecs.size() > 1) {
                     for (size_t c_idx = 1; c_idx < task.publish_options.simulcast_codecs.size(); ++c_idx) {
@@ -6332,6 +6581,14 @@ Room::AddTrackToPublisherAsync(
                                 true)));
                             return;
                         }
+                        try {
+                            for (const auto& codec : backup_prefs) {
+                                if (auto row = VideoFormatRow(codec.name, codec.parameters,
+                                    diagnostic::VideoFormatSource::CodecPreference, codec.preferred_payload_type.value_or(-1))) {
+                                    task.room->EmitPublisherVideoFormat(*row, task.generation, {}, diagnostic::ThreadRole::Rtc);
+                                }
+                            }
+                        } catch (...) {}
                         task.room->Log("TRACK", "BACKUP_CODEC_ATTACH",
                                        "Attached backup codec transceiver to video track: Codec=" + backup_spec.codec +
                                        ", Layers=" + std::to_string(backup_spec.layers.size()) +
@@ -6354,7 +6611,9 @@ Room::AddTrackToPublisherAsync(
                         auto cryptor = task.encryption->CreateSenderCryptor(
                             WebRTCManager::Instance().signaling_thread(), task.encryption_identity,
                             protected_sender->track()->id(), task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind ? task.publish_options.video_codec : "opus",
-                            task.generation);
+                            task.generation, protected_sender == bundle.primary &&
+                                task.publish_options.auto_hardware_h264 &&
+                                task.publish_options.allow_vp8_fallback);
                         if (!cryptor) throw std::runtime_error("media cryptor unavailable");
                         protected_sender->SetFrameTransformer(std::move(cryptor));
                     }
@@ -6635,6 +6894,402 @@ asio::awaitable<void> Room::ApplyPublishedSenderScalabilityModesAsync(
         "apply_scalability_mode");
 }
 
+asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
+    PublishedSenderBundle bundle,
+    VideoPublishOptions options,
+    uint64_t generation,
+    std::shared_ptr<LocalVideoTrack> track) {
+    const bool may_use_h264 = _stricmp(options.video_codec.c_str(), "h264") == 0 ||
+        std::any_of(options.simulcast_codecs.begin(), options.simulcast_codecs.end(),
+            [](const auto& spec) { return _stricmp(spec.codec.c_str(), "h264") == 0; });
+    if (!may_use_h264) co_return;
+    auto admission = AdmitOperation(OperationKind::PublishTrack, "validate_video_level");
+    const auto source = track ? track->source() : nullptr;
+    const auto profile = track ? track->screen_share_profile() : std::nullopt;
+    const auto source_dimensions = profile ? std::pair{profile->width, profile->height}
+        : source ? source->dimensions() : std::pair{0, 0};
+    const auto revision = track ? track->publish_options_revision() : 0;
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    const auto gate = callback_gate_;
+    auto cancel = gate->CancelWhenClosed(
+        [weak = std::weak_ptr(completion), weak_gate = std::weak_ptr(gate)] {
+            if (auto live_gate = weak_gate.lock()) live_gate->PostCompletion([weak] {
+                if (auto pending = weak.lock()) FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                    "validate_video_level", "room retired before final video format validation")));
+            });
+        });
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::chrono::milliseconds timeout;
+    {
+        std::lock_guard lock(room_mutex_);
+        pc = publisher_pc_;
+        timeout = operation_timeouts_.publish;
+    }
+    auto* signaling = WebRTCManager::Instance().signaling_thread();
+    if (!pc || !signaling || signaling->IsQuitting()) {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "validate_video_level", "publisher is unavailable for final video format validation");
+    }
+    struct Task {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<void>> completion;
+        std::shared_ptr<ExecutorCallbackGate> gate;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        PublishedSenderBundle bundle;
+        VideoPublishOptions options;
+        std::pair<int, int> source_dimensions;
+        uint64_t generation;
+        ExecutorCallbackGate::Ticket ticket;
+    };
+    auto background_admission = AdmitOperation(OperationKind::PublishTrack, "validate_video_level");
+    auto* task = new Task{shared_from_this(), completion, gate, pc, std::move(bundle),
+        std::move(options), source_dimensions, generation, std::move(background_admission)};
+    try {
+        signaling->PostTask([task] {
+            std::unique_ptr<Task> owned(task);
+            const auto finish = [&](std::exception_ptr error = {}) {
+                task->gate->PostCompletion([completion = task->completion, error] {
+                    if (error) FailAwaitable(completion, error);
+                    else CompleteAwaitable(completion);
+                });
+            };
+            try {
+                {
+                    std::lock_guard lock(task->completion->mutex);
+                    if (task->completion->completed) return;
+                }
+                {
+                    std::lock_guard lock(task->room->room_mutex_);
+                    if (!task->room->IsNativeGenerationCurrentLocked(task->generation) ||
+                        task->room->publisher_pc_ != task->pc) {
+                        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                            "validate_video_level", "session changed before final video format validation");
+                    }
+                }
+                const auto reject = [&](std::size_t layer, int width = 0, int height = 0,
+                    std::uint32_t fps = 0, detail::H264LevelConstraintStatus status = detail::H264LevelConstraintStatus::InvalidParameters,
+                    std::uint8_t level = 255) {
+                    diagnostic::Event event;
+                    event.kind = diagnostic::EventKind::VideoLevelRejected;
+                    {
+                        std::lock_guard lock(task->room->room_mutex_);
+                        event.context = task->room->diagnostic_context_;
+                    }
+                    event.context.room_generation = task->generation;
+                    event.context.has_room_generation = true;
+                    event.sdp_role = diagnostic::SdpRole::Publisher;
+                    event.thread_role = diagnostic::ThreadRole::Rtc;
+                    event.media_kind = diagnostic::MediaKind::Video;
+                    event.outcome = diagnostic::Outcome::Failure;
+                    event.hardware.encoder_codecs = diagnostic::HardwareEncoderH264;
+                    event.encoder.stage = diagnostic::EncoderFailureStage::InitLevelConstraints;
+                    event.encoder_level = level;
+                    event.encoder.layer = static_cast<std::uint8_t>(std::min<std::size_t>(layer, 255));
+                    event.encoder.width = static_cast<std::uint16_t>(std::clamp(width, 0, 65535));
+                    event.encoder.height = static_cast<std::uint16_t>(std::clamp(height, 0, 65535));
+                    event.encoder.framerate = static_cast<std::uint16_t>(std::min<std::uint32_t>(fps, 65535));
+                    event.encoder.status = static_cast<std::int32_t>(status);
+                    diagnostic::EmitBusinessEvent(event);
+                    throw OperationError(OperationKind::PublishTrack, OperationErrorCode::CodecUnsupported,
+                        "validate_video_level", "the final H264 format cannot support the current video parameters", false,
+                        "h264", OperationRecoveryAction::SelectSupportedCodec);
+                };
+                const bool expects_h264 = task->options.video_codec == "h264" ||
+                    std::any_of(task->options.simulcast_codecs.begin(), task->options.simulcast_codecs.end(),
+                        [](const auto& spec) { return _stricmp(spec.codec.c_str(), "h264") == 0; });
+                if (task->bundle.senders.empty() && expects_h264) reject(0);
+                for (std::size_t sender_index = 0; sender_index < task->bundle.senders.size(); ++sender_index) {
+                    const auto& sender = task->bundle.senders[sender_index];
+                    const auto& specs = task->options.simulcast_codecs;
+                    const auto& layers = sender_index > 0 && sender_index < specs.size()
+                        ? specs[sender_index].layers : task->options.layers;
+                    const auto& expected_codec = sender_index > 0 && sender_index < specs.size()
+                        ? specs[sender_index].codec : task->options.video_codec;
+                    const bool expected_h264 = _stricmp(expected_codec.c_str(), "h264") == 0;
+                    if (!sender) { if (expected_h264) reject(0); else continue; }
+                    const auto parameters = sender->GetParameters();
+                    if (parameters.encodings.empty()) { if (expected_h264) reject(0); else continue; }
+                    for (std::size_t index = 0; index < parameters.encodings.size(); ++index) {
+                        const auto& encoding = parameters.encodings[index];
+                        const webrtc::RtpCodec* codec = encoding.codec ? &*encoding.codec :
+                            (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
+                        if (!codec) { if (expected_h264) reject(index); else continue; }
+                        if (_stricmp(codec->name.c_str(), "h264") != 0) {
+                            if (expected_h264 && _stricmp(codec->name.c_str(), "vp8") != 0 &&
+                                _stricmp(codec->name.c_str(), "vp9") != 0 && _stricmp(codec->name.c_str(), "av1") != 0 &&
+                                _stricmp(codec->name.c_str(), "h265") != 0) reject(index);
+                            continue;
+                        }
+                        const auto format = detail::ProjectH264Format(codec->name, codec->parameters);
+                        if (!format || !format->valid) reject(index);
+                        auto planned = layers.end();
+                        if (!encoding.rid.empty()) planned = std::find_if(layers.begin(), layers.end(),
+                            [&](const auto& layer) { return layer.rid == encoding.rid; });
+                        if (planned == layers.end() && encoding.rid.empty() && layers.size() == parameters.encodings.size())
+                            planned = layers.begin() + index;
+                        if (planned == layers.end()) reject(index);
+                        int width = task->source_dimensions.first, height = task->source_dimensions.second;
+                        if (width <= 0 || height <= 0) reject(index);
+                        if (encoding.scale_resolution_down_to) {
+                            auto bound = *encoding.scale_resolution_down_to;
+                            if (bound.width <= 0 || bound.height <= 0) reject(index);
+                            if ((width < height) != (bound.width < bound.height)) std::swap(bound.width, bound.height);
+                            const auto scale = std::min({1.0, double(bound.width) / width, double(bound.height) / height});
+                            width = static_cast<int>(std::round(width * scale));
+                            height = static_cast<int>(std::round(height * scale));
+                        } else {
+                            const double scale = encoding.scale_resolution_down_by.value_or(planned->scale_resolution_down_by);
+                            if (!std::isfinite(scale) || scale < 1.0) reject(index);
+                            width = static_cast<int>(std::round(width / scale));
+                            height = static_cast<int>(std::round(height / scale));
+                        }
+                        const double fps = encoding.max_framerate.value_or(planned->max_fps);
+                        if (!std::isfinite(fps) || fps <= 0 || fps > std::numeric_limits<std::uint32_t>::max()) reject(index);
+                        const auto framerate = static_cast<std::uint32_t>(std::ceil(fps));
+                        const auto status = detail::CheckH264LevelConstraints(
+                            static_cast<webrtc::H264Level>(format->level), width, height, framerate);
+                        if (status != detail::H264LevelConstraintStatus::Supported)
+                            reject(index, width, height, framerate, status, format->level);
+                    }
+                }
+                finish();
+            } catch (const OperationError&) {
+                finish(std::current_exception());
+            } catch (...) {
+                finish(std::make_exception_ptr(OperationError(OperationKind::PublishTrack,
+                    OperationErrorCode::CodecUnsupported, "validate_video_level",
+                    "the final H264 sender parameters could not be validated", false,
+                    "h264", OperationRecoveryAction::SelectSupportedCodec)));
+            }
+        });
+    } catch (...) {
+        delete task;
+        throw;
+    }
+    co_await WaitAwaitable<void>(completion, timeout, OperationKind::PublishTrack,
+        OperationErrorCode::TrackPublishTimeout, "validate_video_level");
+    const auto current_profile = track ? track->screen_share_profile() : std::nullopt;
+    const auto current_dimensions = current_profile ? std::pair{current_profile->width, current_profile->height}
+        : source ? source->dimensions() : std::pair{0, 0};
+    if (!track || revision != track->publish_options_revision() || profile != current_profile ||
+        source_dimensions != current_dimensions) {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "validate_video_level", "video parameters changed before final format validation completed", true);
+    }
+}
+
+asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPlanAsync(
+    std::shared_ptr<LocalVideoTrack> track,
+    ResolvedVideoPublishPlan plan,
+    std::vector<std::string> enabled_codecs,
+    uint64_t generation) {
+    const auto preference = GetVideoEncoderPreference();
+    const auto hardware = GetVideoEncoderCapabilities();
+    const bool explicit_hardware = preference == "amf" || preference == "nvenc" || preference == "qsv";
+    const bool hardware_available = hardware.ready &&
+        (hardware.amf.h264 || hardware.nvenc.h264 || hardware.qsv.h264);
+    if (!plan.ok() || plan.effective_codec != "h264" || preference == "software" ||
+        (!plan.effective.auto_hardware_h264 && !explicit_hardware && !hardware_available)) {
+        co_return PreflightedVideoPublishPlan{std::move(plan), {}};
+    }
+
+    auto stale = [] {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "hardware_preflight", "video publication parameters changed during hardware preflight", true);
+    };
+    const auto revision = track->publish_options_revision();
+    const auto source = track->source();
+    const auto dimensions = source ? source->dimensions() : std::pair{1280, 720};
+    const auto profile = track->screen_share_profile();
+    const auto source_type = track->Track::source();
+    std::shared_ptr<LocalParticipant> local;
+    std::shared_ptr<E2eeManager> encryption;
+    std::chrono::milliseconds wait_timeout;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected ||
+            NormalizedVideoCodecs(enabled_publish_codecs_) != NormalizedVideoCodecs(enabled_codecs)) stale();
+        local = local_participant_;
+        encryption = e2ee_manager_;
+        wait_timeout = std::max(std::chrono::milliseconds(1),
+            std::min(operation_timeouts_.publish, std::chrono::milliseconds(5000)));
+    }
+    const bool encrypted = encryption && encryption->enabled();
+    // The caller's plan may already be stale before this coroutine starts.
+    // Resolve again between the same revision/geometry reads before admitting
+    // any driver work; comparing only the post-resolution snapshot is unsafe.
+    const auto current_plan = ResolveVideoPublishPlan(track, enabled_codecs, encrypted);
+    if (current_plan.requested != plan.requested || current_plan.effective != plan.effective ||
+        revision != track->publish_options_revision() || source != track->source() ||
+        dimensions != (source ? source->dimensions() : std::pair{1280, 720}) ||
+        profile != track->screen_share_profile() || preference != GetVideoEncoderPreference()) stale();
+
+    VideoEncoderPreflightRequest request;
+    request.preference = preference;
+    request.screenshare = source_type == TrackSource::ScreenShareVideo;
+    request.formats = LocalHardwareH264Formats();
+    for (const auto& layer : plan.effective.layers) {
+        request.layers.push_back({layer.width, layer.height, layer.max_fps, layer.max_bitrate_bps});
+    }
+    const auto candidate_formats = request.formats;
+    auto completion = std::make_shared<AwaitableState<VideoEncoderPreflightResult>>(executor_);
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    const auto gate = callback_gate_;
+    auto cancel = gate->CancelWhenClosed(
+        [cancelled, weak = std::weak_ptr(completion), weak_gate = std::weak_ptr(gate)] {
+            cancelled->store(true, std::memory_order_release);
+            if (auto live_gate = weak_gate.lock()) {
+                live_gate->PostCompletion([weak] {
+                    if (auto pending = weak.lock()) {
+                        FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                            OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                            "hardware_preflight", "room retired during hardware preflight")));
+                    }
+                });
+            }
+        });
+    auto background_admission = AdmitOperation(OperationKind::PublishTrack, "hardware_preflight");
+    VideoEncoderPreflightResult result;
+    try {
+        // Only the supervisor runs here. The RTC preflight owns the bounded
+        // driver sequence, including retirement after cancellation/timeouts.
+        asio::post(asio::system_executor(),
+            [room = shared_from_this(), gate, ticket = std::move(background_admission),
+             completion, cancelled, request = std::move(request)]() mutable {
+                VideoEncoderPreflightResult result;
+                try {
+                    result = PreflightVideoEncoder(request, cancelled);
+                } catch (...) {
+                    result.status = VideoEncoderPreflightStatus::InitializationFailed;
+                }
+                // Keep the Room, execution-context lease and in-flight ticket
+                // until the supervisor and its single completion have finished.
+                gate->PostCompletion([room = std::move(room), completion, result = std::move(result)]() mutable {
+                    CompleteAwaitable(completion, std::move(result));
+                });
+            });
+        result = co_await WaitAwaitable<VideoEncoderPreflightResult>(completion, wait_timeout,
+            OperationKind::PublishTrack, OperationErrorCode::TrackPublishTimeout, "hardware_preflight");
+    } catch (const OperationError& error) {
+        cancelled->store(true, std::memory_order_release);
+        if (error.code() != OperationErrorCode::TrackPublishTimeout) throw;
+        result.status = VideoEncoderPreflightStatus::TimedOut;
+    } catch (...) {
+        cancelled->store(true, std::memory_order_release);
+        throw;
+    }
+
+    // Only formats actually offered to the probe can become negotiation policy.
+    if (result.ok() && (result.formats.empty() ||
+        std::any_of(result.formats.begin(), result.formats.end(), [&](const auto& format) {
+            return std::none_of(candidate_formats.begin(), candidate_formats.end(),
+                [&](const auto& candidate) { return ExactH264Format(candidate, format); });
+        }))) {
+        result.status = VideoEncoderPreflightStatus::UnsupportedFormat;
+        result.formats.clear();
+    }
+    auto validate_current = [weak_room = weak_from_this(), weak_track = std::weak_ptr(track),
+        local, encryption, encrypted, enabled_codecs, revision, source, dimensions, profile,
+        source_type, generation, preference, requested = plan.requested,
+        approved = result.ok() ? result.formats : std::vector<webrtc::SdpVideoFormat>{},
+        approved_backend = result.backend, stale] {
+        const auto room = weak_room.lock();
+        const auto track = weak_track.lock();
+        if (!room || !track) stale();
+        {
+            std::lock_guard lock(room->room_mutex_);
+            if (!room->IsNativeGenerationCurrentLocked(generation) ||
+                room->connection_state_ != ConnectionState::Connected ||
+                room->local_participant_ != local || room->e2ee_manager_ != encryption ||
+                NormalizedVideoCodecs(room->enabled_publish_codecs_) != NormalizedVideoCodecs(enabled_codecs)) stale();
+        }
+        auto current_requested = track->requested_publish_options();
+        current_requested.preflight_h264_formats.clear();
+        if (revision != track->publish_options_revision() || requested != current_requested ||
+            source != track->source() || source_type != track->Track::source() ||
+            dimensions != (source ? source->dimensions() : std::pair{1280, 720}) ||
+            profile != track->screen_share_profile() || preference != GetVideoEncoderPreference() ||
+            encrypted != (encryption && encryption->enabled())) stale();
+        if (!approved.empty()) {
+            const auto hardware = GetVideoEncoderCapabilities();
+            const bool available = hardware.ready &&
+                ((approved_backend == "amf" && hardware.amf.h264) ||
+                 (approved_backend == "nvenc" && hardware.nvenc.h264) ||
+                 (approved_backend == "qsv" && hardware.qsv.h264));
+            if (!available) stale();
+            const auto formats = LocalHardwareH264Formats();
+            for (const auto& format : approved) {
+                if (std::none_of(formats.begin(), formats.end(),
+                    [&](const auto& candidate) { return ExactH264Format(candidate, format); })) stale();
+            }
+        }
+    };
+    validate_current();
+    const auto backend = result.backend == "amf" || result.backend == "nvenc" || result.backend == "qsv"
+        ? result.backend : std::string("none");
+    Log("SIGNAL", "PUBLISH_HW_PREFLIGHT", std::string("status=") + VideoPreflightStatusName(result.status) +
+        "; backend=" + backend + "; layer=" + std::to_string(result.failed_layer));
+    const auto emit_preflight = [&](std::size_t layer_index) {
+        diagnostic::Event event;
+        event.kind = diagnostic::EventKind::HardwareEncoderPreflight;
+        event.context.room_generation = generation;
+        event.context.has_room_generation = true;
+        event.media_kind = diagnostic::MediaKind::Video;
+        event.outcome = result.ok() ? diagnostic::Outcome::Success : diagnostic::Outcome::Failure;
+        event.hardware.vendor_id = backend == "amf" ? 0x1002 :
+            (backend == "nvenc" ? 0x10de : (backend == "qsv" ? 0x8086 : 0));
+        event.hardware.encoder_codecs = diagnostic::HardwareEncoderH264;
+        event.rtc_error_type = result.codec_status;
+        event.encoder.stage = diagnostic::EncoderFailureStage::Preflight;
+        event.encoder.status = static_cast<std::int32_t>(result.status);
+        event.encoder.layer = static_cast<std::uint8_t>(std::min<std::size_t>(layer_index, 255));
+        if (layer_index < plan.effective.layers.size()) {
+            const auto& layer = plan.effective.layers[layer_index];
+            event.encoder.width = static_cast<std::uint16_t>(std::clamp(layer.width, 0, 65535));
+            event.encoder.height = static_cast<std::uint16_t>(std::clamp(layer.height, 0, 65535));
+            event.encoder.framerate = static_cast<std::uint16_t>(std::clamp(layer.max_fps, 0, 65535));
+            event.encoder.bitrate_bps = static_cast<std::uint32_t>(std::max(layer.max_bitrate_bps, 0));
+            if (!result.ok() && result.tested_bitrate_bps > 0) {
+                event.encoder.bitrate_bps = result.tested_bitrate_bps;
+            }
+        }
+        EmitDiagnostic(event);
+    };
+    if (result.ok()) {
+        for (std::size_t layer_index = 0; layer_index < plan.effective.layers.size(); ++layer_index) {
+            emit_preflight(layer_index);
+        }
+    } else {
+        emit_preflight(result.failed_layer);
+    }
+    if (result.status == VideoEncoderPreflightStatus::Cancelled) {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "hardware_preflight", "video hardware preflight was cancelled");
+    }
+    if (result.ok()) {
+        try {
+            for (const auto& format : result.formats) {
+                if (auto row = VideoFormatRow(format.name, format.parameters,
+                    diagnostic::VideoFormatSource::PreflightApproved)) {
+                    EmitPublisherVideoFormat(*row, generation);
+                }
+            }
+        } catch (...) {}
+        plan.effective.preflight_h264_formats = std::move(result.formats);
+    } else {
+        const auto [width, height] = profile ? std::pair{profile->width, profile->height} : dimensions;
+        plan = LocalVideoTrack::ResolveHardwarePreflightFallback(
+            width, height, plan, LocalVideoSenderCodecs(), enabled_codecs);
+        if (!plan.ok()) {
+            throw OperationError(OperationKind::PublishTrack, OperationErrorCode::TrackPublishRejected,
+                "hardware_preflight", plan.error);
+        }
+    }
+    co_return PreflightedVideoPublishPlan{std::move(plan), std::move(validate_current)};
+}
+
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::shared_ptr<Track> track,
     const proto::SignalRequest& request) {
@@ -6657,13 +7312,16 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     proto::SignalRequest effective_request(request);
     std::optional<ResolvedVideoPublishPlan> video_plan;
     std::optional<ResolvedAudioPublishPlan> audio_plan;
+    std::function<void()> validate_video_preflight;
     if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
         std::vector<std::string> enabled_codecs;
         std::shared_ptr<LocalParticipant> planning_local;
+        std::shared_ptr<E2eeManager> planning_e2ee;
         {
             std::lock_guard lock(room_mutex_);
             enabled_codecs = enabled_publish_codecs_;
             planning_local = local_participant_;
+            planning_e2ee = e2ee_manager_;
         }
         if (!planning_local) {
             throw OperationError(OperationKind::PublishTrack,
@@ -6671,16 +7329,21 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
                                  "resolve_publish_plan",
                                  "local participant is unavailable");
         }
-        video_plan = ResolveVideoPublishPlan(video, enabled_codecs);
+        video_plan = ResolveVideoPublishPlan(video, enabled_codecs,
+            planning_e2ee && planning_e2ee->enabled());
         if (!video_plan->ok()) {
             throw OperationError(OperationKind::PublishTrack,
                                  OperationErrorCode::TrackPublishRejected,
                                  "resolve_publish_plan",
                                  video_plan->error);
         }
+        auto preflight = co_await PreflightVideoPublishPlanAsync(
+            video, std::move(*video_plan), enabled_codecs, generation);
+        video_plan = std::move(preflight.plan);
+        validate_video_preflight = std::move(preflight.validate_current);
         effective_request = planning_local->BuildTrackPublishRequest(
             track, &video_plan->effective);
-        if (video_plan->used_fallback()) {
+        if (video_plan->used_fallback() || !video_plan->fallback_reason.empty()) {
             Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
                 video_plan->fallback_reason + "; using " +
                     video_plan->effective_codec);
@@ -6756,6 +7419,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::uint64_t local_publication_epoch = 0;
     const auto publish_accepted_at = std::chrono::steady_clock::now();
     auto ack = std::make_shared<AwaitableState<proto::TrackPublishedResponse>>(executor_);
+    if (validate_video_preflight) validate_video_preflight();
     {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ != ConnectionState::Connected ||
@@ -6845,6 +7509,11 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         co_await NegotiatePublisherAsync(timeouts.negotiation, generation);
         co_await ApplyPublishedSenderScalabilityModesAsync(
             sender_bundle, generation);
+        if (video_plan) {
+            if (validate_video_preflight) validate_video_preflight();
+            co_await ValidateFinalVideoSendersAsync(sender_bundle, video_plan->effective,
+                generation, std::dynamic_pointer_cast<LocalVideoTrack>(track));
+        }
 
         if (generation != session_generation_.load(std::memory_order_acquire)) {
             throw OperationError(OperationKind::PublishTrack,
@@ -6873,6 +7542,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             const auto rtc_track = track->rtc_track();
             const auto rtc_track_id = rtc_track ? rtc_track->id() : std::string{};
             telemetry::LocalVideoPublishDescriptor video_publish;
+            video_publish.publication_sid = publication->sid();
             video_publish.source_kind = track->source() == TrackSource::Camera
                 ? telemetry::LocalVideoSourceKind::Camera
                 : (track->source() == TrackSource::ScreenShareVideo
@@ -6962,6 +7632,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
     if (items.empty()) {
         co_return std::vector<std::shared_ptr<TrackPublication>>{};
     }
+    const auto generation = session_generation_.load(std::memory_order_acquire);
 
     std::vector<proto::SignalRequest> effective_requests;
     effective_requests.reserve(items.size());
@@ -6969,6 +7640,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         items.size());
     std::vector<std::optional<ResolvedAudioPublishPlan>> audio_plans(
         items.size());
+    std::vector<std::function<void()>> validate_video_preflights(items.size());
     std::vector<std::string> enabled_codecs;
     std::shared_ptr<LocalParticipant> planning_local;
     std::shared_ptr<E2eeManager> planning_e2ee;
@@ -6995,16 +7667,21 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                                      "resolve_publish_plan",
                                      "local participant is unavailable");
             }
-            video_plans[index] = ResolveVideoPublishPlan(video, enabled_codecs);
+            video_plans[index] = ResolveVideoPublishPlan(video, enabled_codecs,
+                planning_e2ee && planning_e2ee->enabled());
             if (!video_plans[index]->ok()) {
                 throw OperationError(OperationKind::PublishTrack,
                                      OperationErrorCode::TrackPublishRejected,
                                      "resolve_publish_plan",
                                      video_plans[index]->error);
             }
+            auto preflight = co_await PreflightVideoPublishPlanAsync(
+                video, std::move(*video_plans[index]), enabled_codecs, generation);
+            video_plans[index] = std::move(preflight.plan);
+            validate_video_preflights[index] = std::move(preflight.validate_current);
             eff_req = planning_local->BuildTrackPublishRequest(
                 item.track, &video_plans[index]->effective);
-            if (video_plans[index]->used_fallback()) {
+            if (video_plans[index]->used_fallback() || !video_plans[index]->fallback_reason.empty()) {
                 Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
                     video_plans[index]->fallback_reason + "; using " +
                         video_plans[index]->effective_codec);
@@ -7057,7 +7734,11 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         effective_requests.push_back(std::move(eff_req));
     }
 
-    const auto generation = session_generation_.load(std::memory_order_acquire);
+    // A later item can await another preflight after an earlier item passed.
+    // Recheck every receipt before registering or sending any batch AddTrack.
+    for (const auto& validate : validate_video_preflights) {
+        if (validate) validate();
+    }
     std::shared_ptr<SignalClient> signal;
     std::shared_ptr<LocalParticipant> local;
     struct PendingAckInfo {
@@ -7146,10 +7827,15 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
     std::vector<proto::TrackPublishedResponse> responses;
     responses.reserve(items.size());
     bool server_acknowledged_any = false;
+    bool add_track_dispatched_any = false;
 
     try {
-        for (const auto& eff_req : effective_requests) {
-            co_await signal->SendAsync(eff_req);
+        for (std::size_t index = 0; index < effective_requests.size(); ++index) {
+            // SendAsync itself can suspend: do not let a later member reuse a
+            // receipt invalidated while an earlier member was being sent.
+            if (validate_video_preflights[index]) validate_video_preflights[index]();
+            co_await signal->SendAsync(effective_requests[index]);
+            add_track_dispatched_any = true;
         }
 
         for (const auto& pa : pending_acks) {
@@ -7187,9 +7873,14 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
 
         // 单次全量 SDP 重协商
         co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
-        for (const auto& bundle : sender_bundles) {
+        for (std::size_t index = 0; index < sender_bundles.size(); ++index) {
             co_await ApplyPublishedSenderScalabilityModesAsync(
-                bundle, generation);
+                sender_bundles[index], generation);
+            if (video_plans[index]) {
+                if (validate_video_preflights[index]) validate_video_preflights[index]();
+                co_await ValidateFinalVideoSendersAsync(sender_bundles[index], video_plans[index]->effective,
+                    generation, std::dynamic_pointer_cast<LocalVideoTrack>(items[index].track));
+            }
         }
 
         if (generation != session_generation_.load(std::memory_order_acquire)) {
@@ -7229,6 +7920,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 const auto rtc_track_id = rtc_track
                     ? rtc_track->id() : std::string{};
                 telemetry::LocalVideoPublishDescriptor video_publish;
+                video_publish.publication_sid = publications[index]->sid();
                 video_publish.source_kind = items[index].track->source() == TrackSource::Camera
                     ? telemetry::LocalVideoSourceKind::Camera
                     : (items[index].track->source() == TrackSource::ScreenShareVideo
@@ -7321,10 +8013,10 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 }
             });
         }
-        if (server_acknowledged_any) {
+        if (server_acknowledged_any || add_track_dispatched_any) {
             Log("ERROR", "PUBLISH_BATCH_ROLLBACK",
                 "Batch publication failed; rolled back local senders and requested Publisher SDP renegotiation to reconcile server tracks");
-            NegotiatePublisher();
+            NegotiatePublisher(generation);
         }
         for (auto& operation : member_operations) {
             operation.Finish(operation_outcome);
@@ -7967,6 +8659,7 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                 return;
             }
 
+            self->TracePublisherSdpFormats(sdp, false, generation, trace);
             WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp, self->executor_,
                 [self, client, pub_pc, sdp, generation, trace](const std::string& set_local_err) {
                     {
@@ -10472,6 +11165,7 @@ void Room::HandleAnswerSignal(
             trace = SdpTraceLocked(diagnostic::SdpRole::Publisher, event_generation);
             trace->Record(diagnostic::SdpAction::ReceiveAnswer, diagnostic::SdpPhase::Completed);
         }
+        TracePublisherSdpFormats(answer.sdp(), true, event_generation, trace);
         WebRTCManager::Instance().SetRemoteDescription(pub_pc, "answer", answer.sdp(), executor_,
             [self, pub_pc, event_generation, trace](const std::string& err) {
                 {
@@ -10489,6 +11183,7 @@ void Room::HandleAnswerSignal(
                               secure_log::OpaqueSummary("set_publisher_remote_answer"));
                     self->CompleteNegotiation(err, event_generation);
                 } else {
+                    self->TracePublisherSenderFormats(pub_pc, event_generation, trace);
                     self->Log("SIGNAL", "PUB_STABLE", "Publisher PC negotiation completed (Answer applied)");
                     self->ReconcileRemoteReceivers(pub_pc, event_generation);
                     std::vector<PendingIceCandidate> pending_cands;
@@ -10681,6 +11376,7 @@ void Room::HandleAnswerSignal(
         trace = SdpTraceLocked(diagnostic::SdpRole::Publisher, event_generation);
         trace->Record(diagnostic::SdpAction::ReceiveAnswer, diagnostic::SdpPhase::Completed);
     }
+    TracePublisherSdpFormats(answer.sdp(), true, event_generation, trace);
     WebRTCManager::Instance().SetRemoteDescription(pub_pc, answer.type(), answer.sdp(), executor_,
         [self, pub_pc, event_generation, trace](const std::string& err) {
             bool need_retry = false;
@@ -10710,6 +11406,7 @@ void Room::HandleAnswerSignal(
                           secure_log::OpaqueSummary("set_publisher_remote_answer"));
                 self->CompleteNegotiation(err, event_generation);
             } else {
+                self->TracePublisherSenderFormats(pub_pc, event_generation, trace);
                 self->Log("WEBRTC", "PUB_STABLE", "Publisher RemoteDescription applied; signaling state is STABLE");
 
                 // 在锁外部安全重放早期候选

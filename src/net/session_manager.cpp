@@ -3,12 +3,15 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/e2ee/meeting_encryption_key.h"
 #include "src/media/screen_share_quality.h"
+#include "src/rtc/webrtc_manager.h"
 #include <QtCore/QCoreApplication>
 #include <QtCore/QUuid>
 #include <QtCore/QDebug>
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
+#ifdef Q_OS_LINUX
 #include <QtCore/QTimer>
+#endif
 #include <algorithm>
 #include <array>
 #include <stdexcept>
@@ -41,6 +44,7 @@ constexpr auto kMigratedSettingsKeys = std::to_array<const char *>({
     "media/speakerDeviceId",
     "media/cameraVideoCodec",
     "media/screenShareVideoCodec",
+    "media/videoEncoderPreference",
     "media/screenShareResolution",
     "media/screenShareFps",
     "media/receiveResolutionMatch",
@@ -49,6 +53,7 @@ constexpr auto kMigratedSettingsKeys = std::to_array<const char *>({
     "media/videoCaptureFps",
     "general/quitOnMainWindowClose",
     "general/showActiveSpeaker",
+    "general/participantNameDisplay",
     "general/stayInMeetingWhenLocked",
     "auth/account",
 #if !defined(__linux__)
@@ -63,6 +68,20 @@ constexpr std::array<const char *, 5> kLegacyCredentialKeys = {
     "auth/rememberPassword",
     "auth/autoLogin",
 };
+
+QString participantNameDisplayId(ParticipantNameDisplayMode mode) {
+    switch (mode) {
+    case ParticipantNameDisplayMode::Always: return QStringLiteral("always");
+    case ParticipantNameDisplayMode::OnHover: return QStringLiteral("hover");
+    default: return QStringLiteral("auto");
+    }
+}
+
+ParticipantNameDisplayMode participantNameDisplayFromId(const QString &id) {
+    if (id == QStringLiteral("always")) return ParticipantNameDisplayMode::Always;
+    if (id == QStringLiteral("hover")) return ParticipantNameDisplayMode::OnHover;
+    return ParticipantNameDisplayMode::Auto;
+}
 
 bool clearLegacyCredentials(QSettings &legacy) {
 #if defined(__linux__)
@@ -91,10 +110,19 @@ std::unique_ptr<QSettings> makeApplicationSettings() {
 
 QString normalizeVideoCodecPreference(const QString &codec) {
     const auto normalized = codec.trimmed().toLower();
-    static const std::array<QString, 5> supported{
+    static const std::array<QString, 6> supported{
         QStringLiteral("auto"), QStringLiteral("vp8"),
         QStringLiteral("h264"), QStringLiteral("vp9"),
-        QStringLiteral("av1")};
+        QStringLiteral("av1"), QStringLiteral("h265")};
+    return std::find(supported.begin(), supported.end(), normalized) != supported.end()
+        ? normalized : QStringLiteral("auto");
+}
+
+QString normalizeVideoEncoderPreference(const QString &encoder) {
+    const auto normalized = encoder.trimmed().toLower();
+    static const std::array<QString, 5> supported{
+        QStringLiteral("auto"), QStringLiteral("software"),
+        QStringLiteral("amf"), QStringLiteral("nvenc"), QStringLiteral("qsv")};
     return std::find(supported.begin(), supported.end(), normalized) != supported.end()
         ? normalized : QStringLiteral("auto");
 }
@@ -193,9 +221,11 @@ SessionManager &SessionManager::instance() {
 }
 
 SessionManager::~SessionManager() {
+#ifdef Q_OS_LINUX
     // main drains shutdownCredentialsAsync while its Qt dispatcher is alive.
     // No late credential result may project into an owner being destroyed.
     invalidateCredentialOperation();
+#endif
 }
 
 OpenMeetingHttpClient &SessionManager::httpClient() {
@@ -235,12 +265,17 @@ QString SessionManager::nickname() const {
 
 void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
     _mediaPrefs = prefs;
+    _mediaPrefs.participantNameDisplay = participantNameDisplayFromId(
+        participantNameDisplayId(_mediaPrefs.participantNameDisplay));
     _mediaPrefs.receiveResolutionMatch = livekit::ParseVideoResolutionMatch(
         livekit::VideoResolutionMatchName(_mediaPrefs.receiveResolutionMatch));
     _mediaPrefs.cameraVideoCodec = normalizeVideoCodecPreference(
         _mediaPrefs.cameraVideoCodec);
     _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
         _mediaPrefs.screenShareVideoCodec);
+    _mediaPrefs.videoEncoderPreference = normalizeVideoEncoderPreference(
+        _mediaPrefs.videoEncoderPreference);
+    livekit::SetVideoEncoderPreference(_mediaPrefs.videoEncoderPreference.toStdString());
     _mediaPrefs.screenShareResolution = std::clamp(_mediaPrefs.screenShareResolution,
         static_cast<int>(livekit::ScreenShareResolution::Auto),
         static_cast<int>(livekit::ScreenShareResolution::P2160));
@@ -378,7 +413,9 @@ bool SessionManager::setRegistrationServerBaseUrl(const QString &url) {
 }
 
 bool SessionManager::setServerBaseUrl(const QString &url) {
+#ifdef Q_OS_LINUX
     if (_credentialShutdown) return false;
+#endif
     const auto policy = evaluateServiceEndpoint(url);
     if (!policy.requestAllowed()) return false;
     const auto &service = policy.canonicalUrl;
@@ -395,7 +432,9 @@ bool SessionManager::setServerBaseUrl(const QString &url) {
 void SessionManager::resetAuthentication() {
     Q_ASSERT(QThread::currentThread() == thread());
     ++_authGeneration;
+#ifdef Q_OS_LINUX
     invalidateCredentialOperation();
+#endif
     _loginPending = false;
     _currentUser = {};
     const bool clearedMeetingKey = static_cast<bool>(_meetingEncryptionKey);
@@ -415,11 +454,16 @@ void SessionManager::cancelPendingLogin() {
 }
 
 bool SessionManager::forgetSavedSession() {
-#if defined(__linux__)
+#ifdef Q_OS_LINUX
     forgetSavedSessionAsync();
     return false; // The deletion has not completed synchronously.
 #else
-    if (_loginPending) resetAuthentication();
+    if (_loginPending) {
+        const QPointer<SessionManager> self(this);
+        const auto generation = _authGeneration + 1;
+        resetAuthentication();
+        if (!self || self->_authGeneration != generation) return false;
+    }
     _savedSession.reset();
     _rememberSession = false;
     _autoLogin = false;
@@ -438,8 +482,8 @@ bool SessionManager::announceLogin(quint64 generation) {
 }
 
 bool SessionManager::resumeSavedSession(bool automatic, std::optional<bool> autoLoginChoice) {
+#ifdef Q_OS_LINUX
     if (_credentialShutdown) return false;
-#if defined(__linux__)
     Q_UNUSED(automatic);
     Q_UNUSED(autoLoginChoice);
     return false; // Callers must wait for resumeSavedSessionAsync's actual result.
@@ -453,7 +497,10 @@ bool SessionManager::resumeSavedSession(bool automatic, std::optional<bool> auto
         _rememberSession = _autoLogin = false;
         return false;
     }
+    const QPointer<SessionManager> self(this);
+    const auto generation = _authGeneration + 1;
     resetAuthentication();
+    if (!self || self->_authGeneration != generation) return false;
     _sessionInvalidating = false;
     _savedSession = std::move(loaded.session);
     _currentUser = _savedSession->user;
@@ -470,10 +517,11 @@ bool SessionManager::resumeSavedSession(bool automatic, std::optional<bool> auto
         }
     }
     httpClient().setCurrentUser(_currentUser);
-    return announceLogin(_authGeneration);
+    return announceLogin(generation);
 #endif
 }
 
+#ifdef Q_OS_LINUX
 void SessionManager::invalidateCredentialOperation() {
     Q_ASSERT(QThread::currentThread() == thread());
     ++_credentialGeneration;
@@ -701,16 +749,19 @@ void SessionManager::shutdownCredentialsAsync(std::function<void()> completion) 
     });
     emit persistenceStateChanged();
 }
+#endif
 
 void SessionManager::loginWithPassword(const QString &account,
                                        const QString &password,
                                        bool remember,
                                        bool autoLogin,
                                        std::function<void(bool success, const QString &errMsg)> callback) {
+#ifdef Q_OS_LINUX
     if (_credentialShutdown) {
         if (callback) callback(false, QCoreApplication::translate("MeetingUI", "The application is closing."));
         return;
     }
+#endif
     const auto validation = validateAccountCredentials(account, password);
     if (validation != CredentialValidationError::None) {
         if (callback) callback(false, credentialValidationMessage(validation));
@@ -750,7 +801,7 @@ void SessionManager::loginWithPassword(const QString &account,
             self->_currentUser = info;
             self->_savedAccount = account;
             self->saveToSettings();
-#if defined(__linux__)
+#ifdef Q_OS_LINUX
             if (persist) {
                 // The identity is usable while the keyring request is pending,
                 // but keep this login transaction open until its save result.
@@ -806,7 +857,9 @@ void SessionManager::registerUser(const QString &account,
 }
 
 void SessionManager::loginAsGuest(const QString &nickname, const QString &customUserId) {
+#ifdef Q_OS_LINUX
     if (_credentialShutdown) return;
+#endif
     resetAuthentication();
     forgetSavedSession();
     _sessionInvalidating = false;
@@ -891,6 +944,8 @@ void SessionManager::loadFromSettings() {
         _settings->value("general/quitOnMainWindowClose", true).toBool();
     _mediaPrefs.showActiveSpeaker =
         _settings->value("general/showActiveSpeaker", true).toBool();
+    _mediaPrefs.participantNameDisplay = participantNameDisplayFromId(
+        _settings->value("general/participantNameDisplay", QStringLiteral("auto")).toString());
     _mediaPrefs.stayInMeetingWhenLocked =
         _settings->value("general/stayInMeetingWhenLocked", true).toBool();
     _mediaPrefs.pushToTalkWhenMuted =
@@ -908,6 +963,9 @@ void SessionManager::loadFromSettings() {
         _settings->value("media/cameraVideoCodec", QStringLiteral("auto")).toString());
     _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
         _settings->value("media/screenShareVideoCodec", QStringLiteral("auto")).toString());
+    _mediaPrefs.videoEncoderPreference = normalizeVideoEncoderPreference(
+        _settings->value("media/videoEncoderPreference", QStringLiteral("auto")).toString());
+    livekit::SetVideoEncoderPreference(_mediaPrefs.videoEncoderPreference.toStdString());
     _mediaPrefs.videoCaptureWidth =
         std::max(0, _settings->value("media/videoCaptureWidth", 0).toInt());
     _mediaPrefs.videoCaptureHeight =
@@ -940,7 +998,7 @@ void SessionManager::loadFromSettings() {
 
     httpClient().setBaseUrl(_serverBaseUrl);
     resetAuthentication();
-#if defined(__linux__)
+#ifdef Q_OS_LINUX
     _credentialRestoreComplete = false;
     _savedSession.reset();
     _rememberSession = _autoLogin = false;
@@ -957,7 +1015,6 @@ void SessionManager::loadFromSettings() {
     } else {
         _credentialStatus = CredentialStatus::Empty;
     }
-    _credentialRestoreComplete = true;
 #endif
     if (!recognizedEndpoint) {
         _settings->setValue("network/serverBaseUrl", QString());
@@ -978,6 +1035,8 @@ void SessionManager::saveToSettings() {
     _settings->remove("media/videoMirroring");
     _settings->setValue("general/quitOnMainWindowClose", _mediaPrefs.quitOnMainWindowClose);
     _settings->setValue("general/showActiveSpeaker", _mediaPrefs.showActiveSpeaker);
+    _settings->setValue("general/participantNameDisplay",
+        participantNameDisplayId(_mediaPrefs.participantNameDisplay));
     _settings->setValue("general/stayInMeetingWhenLocked", _mediaPrefs.stayInMeetingWhenLocked);
     _settings->setValue("media/pushToTalkWhenMuted", _mediaPrefs.pushToTalkWhenMuted);
     _settings->setValue("media/echoCancellation", _mediaPrefs.echoCancellation);
@@ -988,6 +1047,7 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/speakerDeviceId", _mediaPrefs.speakerDeviceId);
     _settings->setValue("media/cameraVideoCodec", _mediaPrefs.cameraVideoCodec);
     _settings->setValue("media/screenShareVideoCodec", _mediaPrefs.screenShareVideoCodec);
+    _settings->setValue("media/videoEncoderPreference", _mediaPrefs.videoEncoderPreference);
     _settings->setValue("media/screenShareResolution", _mediaPrefs.screenShareResolution);
     _settings->setValue("media/screenShareFps", _mediaPrefs.screenShareFps);
     _settings->setValue("media/receiveResolutionMatch",

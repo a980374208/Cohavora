@@ -94,6 +94,7 @@ public:
 
 	void setDisplayName(const QString &name);
 	QString displayName() const { return _displayName; }
+	void setNameDisplayMode(OpenMeeting::ParticipantNameDisplayMode mode);
 
 	bool isLocal() const { return _isLocal; }
 	bool isVideoActive() const { return _isVideoActive; }
@@ -176,7 +177,8 @@ private:
 		bool compact = false;
 	};
 	NameTagPresentation bottomNameTag(const QRect &r) const;
-	void drawAvatarPlaceholder(QPainter &p, const QRect &r);
+	bool nameVisible(bool hovered) const;
+	void drawAvatarPlaceholder(QPainter &p, const QRect &r, bool showName);
 	void drawVideoFrame(QPainter &p, const QRect &r);
 	void drawBottomNameTag(QPainter &p, const QRect &r);
 	void drawNetworkQualityBadge(QPainter &p, const QRect &r);
@@ -190,6 +192,7 @@ private:
 	QString _renderKey;
 	bool _isScreenShare = false;
 	QString _displayName;
+	OpenMeeting::ParticipantNameDisplayMode _nameDisplayMode = OpenMeeting::ParticipantNameDisplayMode::Auto;
 	bool _isLocal = false;
 	bool _isVideoActive = false;
 	bool _isAudioMuted = false;
@@ -582,6 +585,8 @@ private:
 	void syncVisibleRemoteTiles();
 	void reconcileRemoteRenderSelection();
 	bool isVideoStageVisible() const;
+    bool localScreenPreviewVisible() const;
+    void updateLocalScreenPreviewDemand();
 	bool isTrackVisible(const livekit::TrackKey &key) const;
 	std::optional<livekit::TrackKey> trackKeyForRenderKey(const QString &renderKey) const;
 	VideoTileWidget *ensureRemoteCameraTile(const QString &identity, const QString &name);
@@ -627,6 +632,7 @@ private:
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
 	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
+	void applyParticipantNameDisplayPreferences(const OpenMeeting::MediaPreferences &preferences);
 	void setupAudioPreferencesBinding(OpenMeeting::SessionManager &sessionManager);
 	void applyAudioProcessingPreferences(const OpenMeeting::MediaPreferences &preferences);
 #ifdef Q_OS_LINUX

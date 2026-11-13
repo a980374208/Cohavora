@@ -44,7 +44,14 @@ enum class VideoMirrorMode {
     LocalAndRemote = 2,
 };
 
+enum class ParticipantNameDisplayMode {
+    Auto,
+    Always,
+    OnHover,
+};
+
 QString normalizeVideoCodecPreference(const QString &codec);
+QString normalizeVideoEncoderPreference(const QString &encoder);
 
 struct MediaPreferences {
     livekit::VideoResolutionMatch receiveResolutionMatch = livekit::VideoResolutionMatch::Auto;
@@ -54,6 +61,7 @@ struct MediaPreferences {
     VideoMirrorMode mirrorMode = VideoMirrorMode::Off;
     bool quitOnMainWindowClose = true;
     bool showActiveSpeaker = true;
+    ParticipantNameDisplayMode participantNameDisplay = ParticipantNameDisplayMode::Auto;
     bool stayInMeetingWhenLocked = true;
     bool pushToTalkWhenMuted = false;
     bool echoCancellation = true;
@@ -64,6 +72,8 @@ struct MediaPreferences {
     QString speakerDeviceId;
     QString cameraVideoCodec = QStringLiteral("auto");
     QString screenShareVideoCodec = QStringLiteral("auto");
+    // Shared by camera and screen share; applies to subsequently created encoders.
+    QString videoEncoderPreference = QStringLiteral("auto");
     int screenShareResolution = 0; // Auto=0, 720p=1, 1080p=2, 1440p=3, Native=4, 2160p=5
     int screenShareFps = 20;
     // A zero size means "choose the best device mode around 1080p".
@@ -121,22 +131,34 @@ public:
     // A locked store may permit a user-initiated retry without exposing a
     // decoded session. Automatic login still requires hasSavedSession().
     bool canResumeSavedSession() const {
+#ifdef Q_OS_LINUX
         return !_credentialShutdown && (_savedSession.has_value() || _savedSessionRetryAvailable);
+#else
+        return _savedSession.has_value();
+#endif
     }
     bool resumeSavedSession(bool automatic = false, std::optional<bool> autoLoginChoice = std::nullopt);
     bool forgetSavedSession();
     void cancelPendingLogin();
+#ifdef Q_OS_LINUX
     // Async completion reports a finished operation, never request admission.
-    // The legacy bool resume remains synchronous on Windows and returns false
-    // on Linux; Linux callers must use the explicit async boundary below.
+    // Linux callers must wait at this boundary rather than use the synchronous
+    // Windows resume entry point above.
     void restoreSavedSessionAsync(std::function<void()> completion);
     void resumeSavedSessionAsync(bool automatic, std::optional<bool> autoLoginChoice,
                                  std::function<void(bool)> completion);
     void forgetSavedSessionAsync(std::function<void(bool)> completion = {});
     void shutdownCredentialsAsync(std::function<void()> completion);
+#endif
+    // Shared UI projections; Windows completes DPAPI operations synchronously.
+#ifdef Q_OS_LINUX
     bool credentialOperationPending() const { return _credentialPending; }
     bool credentialRestoreComplete() const { return _credentialRestoreComplete; }
     quint64 credentialGeneration() const { return _credentialGeneration; }
+#else
+    bool credentialOperationPending() const { return false; }
+    bool credentialRestoreComplete() const { return true; }
+#endif
     quint64 authGeneration() const { return _authGeneration; }
     QString persistenceMessage() const { return credentialStatusMessage(_credentialStatus); }
     CredentialStatus credentialStatus() const { return _credentialStatus; }
@@ -225,9 +247,11 @@ private:
 
     void resetAuthentication();
     bool announceLogin(quint64 generation);
+#ifdef Q_OS_LINUX
     void invalidateCredentialOperation();
     void persistSessionAsync(StoredSession record, quint64 authGeneration,
                              std::function<void(bool)> completion = {});
+#endif
 
     UserInfo _currentUser;
     MediaPreferences _mediaPrefs;
@@ -240,6 +264,7 @@ private:
     bool _settingsLoaded = false;
     bool _loginPending = false;
     quint64 _authGeneration = 0;
+#ifdef Q_OS_LINUX
     quint64 _credentialGeneration = 0;
     CredentialStore::RequestId _credentialRequest = 0;
     bool _credentialPending = false;
@@ -247,9 +272,10 @@ private:
     bool _credentialShutdown = false;
     bool _credentialShutdownComplete = false;
     std::vector<std::function<void()>> _credentialShutdownWaiters;
+    bool _savedSessionRetryAvailable = false;
+#endif
     CredentialStatus _credentialStatus = CredentialStatus::Empty;
     std::optional<StoredSession> _savedSession;
-    bool _savedSessionRetryAvailable = false;
     QString _serverBaseUrl;
 
     std::unique_ptr<QSettings> _settings;

@@ -123,9 +123,11 @@ public:
             mime == "video/VP9" ? 2 : mime == "video/H264" ? 3 : 4;
         observation_->codec_mask.fetch_or(1u << bit, std::memory_order_relaxed);
         observation_->input.fetch_add(1, std::memory_order_relaxed);
+        const bool sender_codec_allowed = bit == observation_->expected_codec ||
+            (observation_->expected_codec == 3 && observation_->allow_vp8_fallback && bit == 1);
         // Unsupported encoded output is never sent unprotected or passed through.
         if (bit == 4 || (observation_->receiving ? ((bit != 0) != observation_->video)
-                                               : bit != observation_->expected_codec)) {
+                                               : !sender_codec_allowed)) {
             observation_->state.store(static_cast<int>(webrtc::FrameCryptionState::kInternalError));
             observation_->reported_state.store(EncryptionState::INTERNAL_ERROR, std::memory_order_release);
             return;
@@ -233,15 +235,16 @@ bool E2eeManager::CanPublishMedia(const std::string& identity, const std::string
 
 webrtc::scoped_refptr<webrtc::FrameTransformerInterface> E2eeManager::CreateSenderCryptor(
     webrtc::Thread* signaling, const std::string& identity, const std::string& track,
-    const std::string& codec, uint64_t generation) {
-    if (!signaling || !CanPublishMedia(identity, codec)) return nullptr;
+    const std::string& codec, uint64_t generation, bool allow_vp8_fallback) {
+    if (!signaling || (allow_vp8_fallback && codec != "h264") ||
+        !CanPublishMedia(identity, codec)) return nullptr;
     // Serialize admission and observation registration with SetEnabled: a
     // concurrent disable must not slip between the check and binding creation.
     std::lock_guard lock(mutex_);
     if (!enabled_) return nullptr;
     const bool video = codec != "opus";
     options_.key_provider->ClaimMediaOwner(media_owner_);
-    auto observation = std::make_shared<MediaObservation>();
+    auto observation = std::make_shared<MediaObservation>(allow_vp8_fallback);
     observation->binding_id = ++next_media_binding_id_;
     observation->install_epoch = options_.key_provider->MediaInstallEpoch();
     observation->sif_trailer = options_.key_provider->MediaBackend()->options().uncrypted_magic_bytes;

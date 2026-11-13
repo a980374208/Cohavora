@@ -1,2 +1,7 @@
 # This manifest is bound to an exact SHA256 in dependency metadata.
 /build/prepare/libraries-required.txt text eol=lf
+
+# Keep executable scripts usable after checkout on either host.
+*.sh text eol=lf
+*.bat text eol=crlf
+*.py text eol=lf

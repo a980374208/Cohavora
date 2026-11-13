@@ -22,6 +22,7 @@ class QRadioButton;
 class QStackedWidget;
 
 namespace OpenMeeting { template <typename T> class QtCallbackGate; }
+namespace livekit { struct VideoEncoderCapabilities; }
 namespace Cohavora::Update { class UpdateService; }
 
 namespace MeetingUI {
@@ -99,6 +100,8 @@ private:
 	};
 
 	void buildUi();
+	void applyVideoEncoderCapabilities(const livekit::VideoEncoderCapabilities &capabilities);
+	void syncVideoCodecChoices(const QString &cameraCodec, const QString &screenShareCodec);
 	QWidget *buildGeneralPage();
 	QWidget *buildVideoPage();
 	QWidget *buildAudioPage();
@@ -137,12 +140,17 @@ private:
 	bool _firstPaintReported = false;
 	bool _forceDeviceRefresh = false;
 	bool _videoDevicesReady = false;
+	bool _videoEncoderCapabilitiesReady = false;
+	std::shared_ptr<const livekit::VideoEncoderCapabilities> _videoEncoderCapabilities;
+	QString _videoCodecBackend;
+	bool _videoCodecChoicesDirty = true;
 	bool _closed = false;
 	QListWidget *_navigation = nullptr;
 	QStackedWidget *_pages = nullptr;
 
 	QComboBox *_themeCombo = nullptr;
 	QComboBox *_languageCombo = nullptr;
+	QComboBox *_participantNameDisplayCombo = nullptr;
 	QCheckBox *_generalCamera = nullptr;
 	QCheckBox *_generalMicrophone = nullptr;
 	QCheckBox *_generalSpeaker = nullptr;
@@ -157,6 +165,7 @@ private:
 	QComboBox *_resolutionCombo = nullptr;
 	QComboBox *_cameraCodecCombo = nullptr;
 	QComboBox *_screenShareCodecCombo = nullptr;
+	QComboBox *_videoEncoderCombo = nullptr;
 	QComboBox *_screenShareResolutionCombo = nullptr;
 	QComboBox *_screenShareFpsCombo = nullptr;
 	QComboBox *_receiveResolutionMatchCombo = nullptr;

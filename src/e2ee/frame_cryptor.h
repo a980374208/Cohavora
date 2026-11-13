@@ -138,6 +138,8 @@ private:
 class E2eeManager {
 public:
     struct MediaObservation {
+        explicit MediaObservation(bool allow_vp8_fallback = false)
+            : allow_vp8_fallback(allow_vp8_fallback) {}
         uint64_t binding_id = 0;
         std::string track;
         std::string identity;
@@ -146,6 +148,8 @@ public:
         std::atomic<bool> retired{false};
         std::shared_ptr<const std::atomic<bool>> binding_active;
         unsigned expected_codec = 0;
+        // Captured at binding creation; only an automatic H264 sender opts in.
+        const bool allow_vp8_fallback;
         uint64_t generation = 0;
         std::atomic<uint64_t> input{0}, output{0};
         std::atomic<unsigned> codec_mask{0};
@@ -172,7 +176,8 @@ public:
     bool CanPublishMedia(const std::string& identity, const std::string& codec) const;
     webrtc::scoped_refptr<webrtc::FrameTransformerInterface> CreateSenderCryptor(
         webrtc::Thread* signaling, const std::string& identity,
-        const std::string& track, const std::string& codec, uint64_t generation);
+        const std::string& track, const std::string& codec, uint64_t generation,
+        bool allow_vp8_fallback = false);
     webrtc::scoped_refptr<webrtc::FrameTransformerInterface> CreateReceiverCryptor(
         webrtc::Thread* signaling, const std::string& identity,
         const std::string& track, bool video, uint64_t generation,

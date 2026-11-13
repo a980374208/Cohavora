@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "package_id": "webrtc-306121acd4-cohavora-bssl-codecs-v1",
+  "boringssl_prefix": "cohavora_bssl",
+  "compile_definitions": [
+    "RTC_ENABLE_H265"
+  ],
+  "configurations": {
+    "Debug": {
+      "library_sha256": "a3f4da2a59f14950bb17de6553ce2950d4a4e891bcde3080cf6880ac055ba9f4",
+      "runtime_library": "MTd_StaticDebug",
+      "iterator_debug_level": 2,
+      "external_static_libraries": {
+        "x265": {
+          "relative_path": "lib/Debug/x265-static.lib",
+          "sha256": "096574786449feabe7b51957ccf046c3133e41b7e756fc5dbce607c9a933969c"
+        },
+        "vpl": {
+          "relative_path": "lib/Debug/vpld.lib",
+          "sha256": "f8fd166c3f5947e6605f6012846e0fdc34f080548a4af838c6ea9d6ded42b6dc"
+        }
+      }
+    },
+    "Release": {
+      "library_sha256": "e137514da1b5a61cb42657c11a66c2c65174900e6a1876dcf42a5d04a9127968",
+      "runtime_library": "MT_StaticRelease",
+      "iterator_debug_level": 0,
+      "external_static_libraries": {
+        "x265": {
+          "relative_path": "lib/Release/x265-static.lib",
+          "sha256": "8075d390ac68db7f21467ba21264749b0646bcc647ac6b1a77bd50ce7aae69b8"
+        },
+        "vpl": {
+          "relative_path": "lib/Release/vpl.lib",
+          "sha256": "52be5c04855e5ed4bb8244bd4c396a450a8f558f9fca7e9e8c5df7b7c8d58601"
+        }
+      }
+    }
+  }
+}

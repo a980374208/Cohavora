@@ -92,8 +92,8 @@ std::optional<MediaPreferences> ResolveEncryptionMediaPreferences(
     if (encryption.mode != livekit::MeetingEncryptionMode::Required) return effective;
     const auto resolve = [](QString& codec) {
         codec = codec.trimmed().toLower();
-        if (codec == QStringLiteral("auto")) codec = QStringLiteral("vp8");
-        return codec == QStringLiteral("vp8") || codec == QStringLiteral("h264");
+        return codec == QStringLiteral("auto") ||
+            codec == QStringLiteral("vp8") || codec == QStringLiteral("h264");
     };
     if (!resolve(effective.cameraVideoCodec) || !resolve(effective.screenShareVideoCodec)) return std::nullopt;
     return effective;
@@ -3100,7 +3100,7 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     if (!effectivePrefs) {
         encryption.Revoke();
         failEncryptionAdmission(
-            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing."));
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
         return;
     }
     const uint64_t generation = beginAdmission(AdmissionStage::Joining);
@@ -3242,7 +3242,7 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
     if (!effectivePrefs) {
         encryption.Revoke();
         failEncryptionAdmission(
-            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing."));
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
         return;
     }
     const uint64_t generation = beginAdmission(AdmissionStage::Creating);
@@ -3350,7 +3350,7 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
     if (!effectivePrefs) {
         encryption.Revoke();
         failEncryptionAdmission(
-            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing."));
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
         return;
     }
     const uint64_t generation = beginAdmission(AdmissionStage::ReadyToStart);
@@ -4564,15 +4564,22 @@ void MeetingCoordinator::requestScreenShareSources() {
         if (!session->acceptsDataOnStrand()) return;
         std::vector<livekit::DesktopSource> sources;
         try { sources = livekit::EnumerateDesktopSources(); } catch (...) {}
-        SessionShutdownService::Instance().SubmitCleanup([gate, generation, request, sources = std::move(sources)] {
-            auto outputs = DiscoverScreenShareAudioOutputs();
+        auto deliver = [gate, generation, request, sources = std::move(sources)](
+                std::vector<livekit::SystemAudioOutput> outputs) mutable {
             gate->Post([generation, request, sources = std::move(sources), outputs = std::move(outputs)](MeetingCoordinator* self) {
                 if (!self->isCurrentSessionGenerationOnUiThread(generation) || request != self->_screenSourceRequest ||
                     self->_state != MeetingState::InMeeting) return;
                 self->_screenShareAudioOutputs = std::move(outputs);
                 emit self->screenShareSourcesReady(sources);
             });
+        };
+#ifdef Q_OS_LINUX
+        SessionShutdownService::Instance().SubmitCleanup([deliver = std::move(deliver)]() mutable {
+            deliver(DiscoverScreenShareAudioOutputs());
         });
+#else
+        deliver({});
+#endif
     });
 }
 

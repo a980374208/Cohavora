@@ -122,9 +122,15 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
         if (!checked) {
             _autoLoginBox->setChecked(false);
             const QPointer<LoginDialog> self(this);
+#ifdef Q_OS_LINUX
             _session.forgetSavedSessionAsync([self](bool cleared) {
                 if (self && !cleared) self->showError(self->_session.persistenceMessage());
             });
+#else
+            const bool cleared = _session.forgetSavedSession();
+            if (self) self->refreshPersistenceState();
+            if (self && !cleared) self->showError(self->_session.persistenceMessage());
+#endif
         }
     });
     connect(&_session, &OpenMeeting::SessionManager::persistenceStateChanged,
@@ -288,7 +294,7 @@ void LoginDialog::initUI() {
         const QPointer<LoginDialog> self(this);
         setLoading(true);
         _loginInFlight = true;
-        _session.resumeSavedSessionAsync(false, automaticChoice, [self](bool resumed) {
+        auto finished = [self](bool resumed) {
             if (!self) return;
             self->_loginInFlight = false;
             self->setLoading(false);
@@ -297,8 +303,26 @@ void LoginDialog::initUI() {
                 self->showError(self->_session.persistenceMessage());
                 self->updateSavedSessionAction();
             }
-        });
-        if (self) _loginGeneration = _session.authGeneration();
+        };
+#ifdef Q_OS_LINUX
+        _session.resumeSavedSessionAsync(false, automaticChoice, std::move(finished));
+        if (self) self->_loginGeneration = self->_session.authGeneration();
+#else
+        const auto previousGeneration = _session.authGeneration();
+        const auto resumeGeneration = previousGeneration + 1;
+        _loginGeneration = resumeGeneration;
+        const bool resumed = _session.resumeSavedSession(false, automaticChoice);
+        if (!self || !self->_loginInFlight || self->_loginGeneration != resumeGeneration) return;
+        const auto currentGeneration = self->_session.authGeneration();
+        // A rejected request need not reset authentication. A later generation
+        // belongs to a reentrant login/logout and must keep its own UI state.
+        if (currentGeneration != previousGeneration && currentGeneration != resumeGeneration) return;
+        self->_loginGeneration = currentGeneration;
+        self->refreshPersistenceState();
+        if (!self || !self->_loginInFlight || self->_loginGeneration != currentGeneration ||
+            self->_session.authGeneration() != currentGeneration) return;
+        finished(resumed);
+#endif
     });
     accLayout->addWidget(_loginBtn);
 

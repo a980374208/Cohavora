@@ -39,6 +39,22 @@ public:
         terminal_ = true;
     }
 
+    void RecordVideoFormat(const VideoFormatDiagnosticRow& format,
+                           ThreadRole thread = ThreadRole::Session) noexcept {
+        std::lock_guard lock(mutex_);
+        Event event;
+        event.SetVideoFormat(format);
+        event.context = context_;
+        event.thread_role = thread;
+        event.sdp_role = role_;
+        event.sdp_sequence = ++sequence_;
+        event.sdp_after_terminal = terminal_;
+        event.sdp_ice_restart = ice_restart_;
+        event.media_kind = MediaKind::Video;
+        event.outcome = format.valid ? Outcome::Success : Outcome::Failure;
+        EmitBusinessEvent(event);
+    }
+
 private:
     void EmitLocked(SdpAction action, SdpPhase phase, SdpState before,
                     SdpState after, SdpReason reason, int rtc_error, ThreadRole thread, SdpDescription description) noexcept {

@@ -2,6 +2,10 @@
 #include "dshow_graph_owner.h"
 #include "dshow_enumerator.h"
 #include "media_converters.h"
+#include "libyuv/convert_argb.h"
+#include "libyuv/convert_from_argb.h"
+#include "libyuv/planar_functions.h"
+#include "rtc_base/ref_counted_object.h"
 #include <windows.h>
 #include <dvdmedia.h>
 #include <wrl/implements.h>
@@ -489,6 +493,9 @@ void DShowVideoCapture::TeardownFilterGraph() {
     graph_builder_.Reset();
     capture_graph_builder_.Reset();
     grabber_callback_.Reset();
+    for (auto& slot : nv12_pool_) {
+        slot = nullptr;
+    }
 }
 
 bool DShowVideoCapture::Start() {
@@ -574,7 +581,7 @@ void DShowVideoCapture::OnRawFrameReceived(double sample_time, const uint8_t* bu
     // 输出目标 VideoFrame
     VideoFrame frame;
     if (config_.output_format == VideoBufferType::RGBA) {
-        frame = VideoFrame::create(w, h, VideoBufferType::RGBA);
+        frame = VideoFrame::createUninit(w, h, VideoBufferType::RGBA);
         uint8_t* dst_rgba = frame.data();
 
         switch (negotiated_format_) {
@@ -594,36 +601,46 @@ void DShowVideoCapture::OnRawFrameReceived(double sample_time, const uint8_t* bu
                 return;
         }
     } else if (config_.output_format == VideoBufferType::NV12) {
-        frame = VideoFrame::create(w, h, VideoBufferType::NV12);
-        uint8_t* dst_nv12 = frame.data();
-
-        if (negotiated_format_ == DShowPixelFormat::NV12) {
-            std::memcpy(dst_nv12, buffer, w * h * 3 / 2);
-        } else if (negotiated_format_ == DShowPixelFormat::YUY2) {
-            MediaConverters::ConvertYUY2ToNV12(buffer, dst_nv12, w, h);
-        } else {
-            // RGB -> NV12
-            std::vector<uint8_t> temp_rgba(w * h * 4);
-            if (negotiated_format_ == DShowPixelFormat::ARGB32)
-                MediaConverters::ConvertARGB32ToRGBA(buffer, temp_rgba.data(), w, h, flip_vertically_);
-            else
-                MediaConverters::ConvertRGB24ToRGBA(buffer, temp_rgba.data(), w, h, flip_vertically_);
-            // Convert RGBA -> NV12 Y plane
-            uint8_t* y_p = dst_nv12;
-            uint8_t* uv_p = dst_nv12 + (w * h);
-            for (int y = 0; y < h; ++y) {
-                for (int x = 0; x < w; ++x) {
-                    const uint8_t* p = temp_rgba.data() + (y * w + x) * 4;
-                    y_p[y * w + x] = static_cast<uint8_t>((66 * p[0] + 129 * p[1] + 25 * p[2] + 128) >> 8) + 16;
-                    if ((y % 2 == 0) && (x % 2 == 0)) {
-                        int u_val = ((-38 * p[0] - 74 * p[1] + 112 * p[2] + 128) >> 8) + 128;
-                        int v_val = ((112 * p[0] - 94 * p[1] - 18 * p[2] + 128) >> 8) + 128;
-                        uv_p[(y / 2) * w + x] = static_cast<uint8_t>(u_val);
-                        uv_p[(y / 2) * w + x + 1] = static_cast<uint8_t>(v_val);
-                    }
+        webrtc::scoped_refptr<webrtc::NV12Buffer> nv12_buffer;
+        for (auto& slot : nv12_pool_) {
+            if (slot && slot->width() == w && slot->height() == h &&
+                static_cast<const webrtc::RefCountedObject<webrtc::NV12Buffer>*>(slot.get())->HasOneRef()) {
+                nv12_buffer = slot;
+                break;
+            }
+        }
+        if (!nv12_buffer) {
+            nv12_buffer = webrtc::NV12Buffer::Create(w, h);
+            for (auto& slot : nv12_pool_) {
+                if (!slot || slot->width() != w || slot->height() != h ||
+                    static_cast<const webrtc::RefCountedObject<webrtc::NV12Buffer>*>(slot.get())->HasOneRef()) {
+                    slot = nv12_buffer;
+                    break;
                 }
             }
         }
+        uint8_t* dst_y = nv12_buffer->MutableDataY();
+        uint8_t* dst_uv = nv12_buffer->MutableDataUV();
+        const int y_stride = nv12_buffer->StrideY();
+        const int uv_stride = nv12_buffer->StrideUV();
+
+        if (negotiated_format_ == DShowPixelFormat::NV12) {
+            libyuv::NV12Copy(buffer, w, buffer + static_cast<size_t>(w) * h, w,
+                             dst_y, y_stride, dst_uv, uv_stride, w, h);
+        } else if (negotiated_format_ == DShowPixelFormat::YUY2) {
+            libyuv::YUY2ToNV12(buffer, w * 2, dst_y, y_stride, dst_uv, uv_stride, w, h);
+        } else if (negotiated_format_ == DShowPixelFormat::ARGB32) {
+            const int src_height = flip_vertically_ ? -h : h;
+            libyuv::ARGBToNV12(buffer, w * 4, dst_y, y_stride, dst_uv, uv_stride, w, src_height);
+        } else if (negotiated_format_ == DShowPixelFormat::RGB24) {
+            std::vector<uint8_t> temp_argb(static_cast<size_t>(w) * h * 4);
+            const int src_height = flip_vertically_ ? -h : h;
+            libyuv::RGB24ToARGB(buffer, w * 3, temp_argb.data(), w * 4, w, src_height);
+            libyuv::ARGBToNV12(temp_argb.data(), w * 4, dst_y, y_stride, dst_uv, uv_stride, w, h);
+        } else {
+            return;
+        }
+        frame = VideoFrame(std::move(nv12_buffer));
     }
 
     VideoCaptureOptions options;

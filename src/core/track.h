@@ -76,6 +76,7 @@ struct VideoLayerSetting {
     int max_fps = 30;
     std::string rid; // "f", "h", "q"
     double scale_resolution_down_by = 1.0;
+    bool operator==(const VideoLayerSetting&) const = default;
 };
 
 // Signaling-advertised layers of one codec, not requested or received sizes.
@@ -121,6 +122,7 @@ struct SimulcastCodecSpec {
     std::string cid;
     std::string scalability_mode;
     std::vector<VideoLayerSetting> layers;
+    bool operator==(const SimulcastCodecSpec&) const = default;
 };
 
 struct VideoPublishOptions {
@@ -138,6 +140,13 @@ struct VideoPublishOptions {
     // Zero retains SDK preset behavior. The application's screen-share session
     // explicitly supplies 15/20/30; camera encoding is unaffected.
     int screen_share_fps = 0;
+    // Resolved automatic policy for this sender, independent of explicit H264.
+    bool auto_hardware_h264 = false;
+    bool allow_vp8_fallback = false;
+    // Resolved only: exact local H264 formats whose real layer parameters
+    // passed hardware initialization and retirement before AddTrack.
+    std::vector<webrtc::SdpVideoFormat> preflight_h264_formats;
+    bool operator==(const VideoPublishOptions&) const = default;
 };
 
 struct ResolvedVideoPublishPlan {

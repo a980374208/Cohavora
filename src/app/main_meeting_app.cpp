@@ -29,6 +29,7 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
+#include "src/platform/system_hardware_info.h"
 #include "src/app/debug_login_options.h"
 #include "src/app/debug_storage_paths.h"
 #include "src/app/pilot_diagnostics_probe.h"
@@ -242,6 +243,21 @@ int main(int argc, char *argv[]) {
 	std::unique_ptr<MeetingApp::PilotDiagnosticsProbe> pilotProbe;
 	auto pilotParticipant = std::make_shared<std::atomic<std::shared_ptr<const std::string>>>();
 	auto& shutdownService = OpenMeeting::SessionShutdownService::Instance();
+	// Driver discovery can initialize native sessions. Keep it off the UI thread;
+	// settings read the published snapshot without waiting for a driver.
+	shutdownService.Submit([] {
+		livekit::platform::LogSystemHardwareInfo();
+		livekit::ProbeVideoEncoderCapabilities();
+		const auto capabilities = livekit::GetVideoEncoderCapabilities();
+		using livekit::diagnostic::Event;
+		using livekit::diagnostic::EmitBusinessEvent;
+		EmitBusinessEvent(Event::EncoderCapability(0x1002,
+			capabilities.amf.h264, capabilities.amf.h265));
+		EmitBusinessEvent(Event::EncoderCapability(0x10de,
+			capabilities.nvenc.h264, capabilities.nvenc.h265));
+		EmitBusinessEvent(Event::EncoderCapability(0x8086,
+			capabilities.qsv.h264, capabilities.qsv.h265));
+	});
 	const auto pilotPath = qEnvironmentVariable("LIVEKIT_UIA_PILOT_PROBE");
 	const auto pilotRun = qEnvironmentVariable("LIVEKIT_UIA_RUN_ID");
 	const auto probeCapacityContract = qEnvironmentVariable("LIVEKIT_UIA_PROBE_CAPACITY_CONTRACT");
@@ -382,6 +398,7 @@ int main(int argc, char *argv[]) {
 			}
 			mainWindow.reset();
 			MeetingUI::MeetingLogConsoleWindow::DestroyInstance();
+#ifdef Q_OS_LINUX
             // Both completions run on Qt. Secret Service drains on its own
             // owner/reaper, never on the serial native media cleanup queue.
             auto remaining = std::make_shared<int>(2);
@@ -389,6 +406,9 @@ int main(int argc, char *argv[]) {
                 if (--*remaining == 0 && finished) finished();
             };
             session.shutdownCredentialsAsync(drained);
+#else
+            auto drained = std::move(finished);
+#endif
 			shutdownService.DrainAsync([&, drained]() mutable {
 				shutdownService.SubmitCleanup(
 					[history = std::move(telemetryHistory), run = std::move(processRun),

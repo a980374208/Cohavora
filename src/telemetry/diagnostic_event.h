@@ -72,6 +72,16 @@ enum class EventKind : std::uint8_t {
     SettingsFirstPaint,
     SettingsDeviceProbe,
     UiTiming,
+    // Append only: existing event ordinals are persisted by diagnostics/tests.
+    HardwareCpu,
+    HardwareMemory,
+    HardwareGpu,
+    HardwareGpuEnumeration,
+    HardwareEncoderCapability,
+    HardwareEncoderPreflight,
+    HardwareEncoderFailure,
+    VideoFormatResolved,
+    VideoLevelRejected,
 };
 
 enum class TimingMetric : std::uint8_t { JoinReady, LeaveComplete, UiFirstPaint };
@@ -191,16 +201,94 @@ struct Context final {
     OpaqueId parent_operation_id;
     OpaqueId request_id;
     OpaqueId legacy_operation_id;
-    std::uint64_t session_generation = 0;
-    std::uint64_t room_generation = 0;
-    std::uint64_t recovery_epoch = 0;
     bool has_session_generation = false;
     bool has_room_generation = false;
     bool has_recovery_epoch = false;
+    std::uint64_t session_generation = 0;
+    std::uint64_t room_generation = 0;
+    std::uint64_t recovery_epoch = 0;
 };
 
 // The LG2 producers have no free-text attribute. Later catalog events extend
 // this closed type rather than accepting arbitrary JSON or exception strings.
+enum HardwareKnownField : std::uint8_t {
+    HardwareModelKnown = 1,
+    HardwareLogicalProcessorsKnown = 2,
+    HardwarePhysicalCoresKnown = 4,
+    HardwareMemoryKnown = 8,
+    HardwareAuxiliaryMemoryKnown = 16,
+    HardwareGpuIdentityKnown = 32,
+    HardwareDriverKnown = 64,
+};
+
+enum HardwareFlag : std::uint8_t {
+    HardwareModelTruncated = 1,
+    HardwareEnumerationComplete = 2,
+    HardwareDriverVersionFromDxgi = 4,
+};
+
+enum HardwareEncoderCodec : std::uint8_t {
+    HardwareEncoderH264 = 1,
+    HardwareEncoderH265 = 2,
+};
+
+// One fixed-size row per CPU/memory/GPU. No device identifiers, arbitrary log
+// text, variable-size payload or heap allocation enters the event queue.
+struct HardwareInfoRow final {
+    std::array<char, 57> model{};
+    std::uint8_t known_fields = 0;
+    std::uint8_t encoder_codecs = 0;
+    std::uint8_t flags = 0;
+    std::uint16_t logical_processors = 0;
+    std::uint16_t physical_cores = 0;
+    std::uint32_t vendor_id = 0;
+    std::uint32_t device_id = 0;
+    // Memory event: total/available physical bytes. GPU: dedicated/shared bytes.
+    std::uint64_t memory_bytes = 0;
+    std::uint64_t auxiliary_memory_bytes = 0;
+    // Four unsigned 16-bit dotted version components, most significant first.
+    std::uint64_t driver_version = 0;
+
+    bool AssignModel(std::string_view value) noexcept;
+};
+
+enum class EncoderFailureStage : std::uint8_t {
+    Preflight, InitParameters, InitTopology, Initialization,
+    RateUpdate, Encode, OutputValidation, Retirement, InitProfileLevel,
+    InitLevelConstraints, RateLevelConstraints
+};
+
+// Closed numeric metadata only; vendor error strings never enter the queue.
+struct EncoderDiagnosticRow final {
+    std::uint16_t width = 0;
+    std::uint16_t height = 0;
+    std::uint16_t framerate = 0;
+    EncoderFailureStage stage = EncoderFailureStage::Preflight;
+    std::uint8_t layer = 0;
+    std::uint32_t bitrate_bps = 0;
+    std::int32_t status = 0;
+};
+
+enum class VideoFormatSource : std::uint8_t {
+    PreflightApproved, CodecPreference, LocalOffer, RemoteAnswer,
+    SenderParameters, EncoderFactory, EncoderLayerFactory
+};
+
+// Fixed numeric projection of H264 fmtp; never stores SDP or arbitrary strings.
+struct VideoFormatDiagnosticRow final {
+    std::uint32_t profile_level_id = 0;
+    std::uint16_t media_section_index = 65535;
+    std::int16_t payload_type = -1;
+    VideoFormatSource source = VideoFormatSource::CodecPreference;
+    std::uint8_t profile = 0;
+    std::uint8_t level = 255;
+    std::int8_t packetization_mode = -1;
+    std::int8_t level_asymmetry = -1;
+    bool valid = false;
+    bool profile_level_defaulted = false;
+};
+static_assert(sizeof(VideoFormatDiagnosticRow) <= sizeof(EncoderDiagnosticRow));
+
 struct Event final {
     EventKind kind = EventKind::ProcessStarted;
     ThreadRole thread_role = ThreadRole::Unknown;
@@ -211,9 +299,12 @@ struct Event final {
     SdpState signaling_before = SdpState::Unknown;
     SdpState signaling_after = SdpState::Unknown;
     SdpReason sdp_reason = SdpReason::None;
-    std::uint64_t sdp_sequence = 0;
     bool sdp_after_terminal = false;
     bool sdp_ice_restart = false;
+    // Small numeric metadata shares alignment padding to retain the queue budget.
+    std::uint8_t encoder_level = 0;
+    bool has_video_format_payload = false;
+    std::uint64_t sdp_sequence = 0;
     Context context;
     OpaqueId media_endpoint_id;
     OpaqueId previous_media_endpoint_id;
@@ -285,6 +376,13 @@ struct Event final {
     std::uint32_t process_id = 0;
     std::uint32_t redaction_version = 1;
     std::array<char, 33> process_run_id{};
+    HardwareInfoRow hardware;
+    union {
+        EncoderDiagnosticRow encoder{};
+        VideoFormatDiagnosticRow video_format;
+    };
+
+    void SetVideoFormat(VideoFormatDiagnosticRow row) noexcept;
 
     static Event Started(std::string_view build_id,
                          std::string_view symbol_identity = "unknown") noexcept;
@@ -302,7 +400,13 @@ struct Event final {
     static Event SettingsProbe(MediaKind media, std::uint64_t elapsed_ms,
                                Outcome result, std::uint32_t count,
                                bool cache_hit = false) noexcept;
+    static Event EncoderCapability(std::uint32_t vendor_id,
+                                   bool h264, bool h265) noexcept;
 };
+
+// PendingEvent adds a bool rounded to Event's alignment. Keep all 8192 slots
+// within the existing 8 MiB budget rather than silently reducing capacity.
+static_assert(sizeof(Event) + alignof(Event) <= kQueueBytes / kQueueEvents);
 
 std::string_view EventName(EventKind kind) noexcept;
 std::string_view ComponentName(EventKind kind) noexcept;
@@ -332,6 +436,8 @@ std::string_view MediaFallbackReasonName(MediaFallbackReason reason) noexcept;
 std::string_view RenderBackendName(RenderBackend backend) noexcept;
 std::string_view RenderReasonName(RenderReason reason) noexcept;
 std::string_view DeviceSwitchReasonName(DeviceSwitchReason reason) noexcept;
+std::string_view EncoderFailureStageName(EncoderFailureStage stage) noexcept;
+std::string_view VideoFormatSourceName(VideoFormatSource source) noexcept;
 Severity EventSeverity(EventKind kind) noexcept;
 Severity EventSeverity(const Event& event) noexcept;
 bool IsCritical(EventKind kind) noexcept;

@@ -2,14 +2,20 @@
 #include "../telemetry/session_telemetry.h"
 #include "api/scoped_refptr.h"
 #include "api/video/i420_buffer.h"
+#include "api/video/nv12_buffer.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_rotation.h"
+#include "libyuv/convert.h"
+#include "libyuv/convert_argb.h"
+#include "libyuv/convert_from_argb.h"
+#include "libyuv/planar_functions.h"
 #include "rtc_base/time_utils.h"
 #include <cstring>
 #include <iostream>
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
+#include <vector>
 
 namespace livekit {
 
@@ -76,90 +82,14 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
     const int64_t timestamp_us = timestamp_aligner_.TranslateTimestamp(
         capture_timestamp_us, system_timestamp_us);
 
-    webrtc::scoped_refptr<webrtc::I420Buffer> i420_buffer = webrtc::I420Buffer::Create(width, height);
-    
-    if (frame.type() == VideoBufferType::I420) {
-        auto planes = frame.planeInfos();
-        if (planes.size() >= 3) {
-            const uint8_t* y_data = reinterpret_cast<const uint8_t*>(planes[0].data_ptr);
-            const uint8_t* u_data = reinterpret_cast<const uint8_t*>(planes[1].data_ptr);
-            const uint8_t* v_data = reinterpret_cast<const uint8_t*>(planes[2].data_ptr);
-
-            for (int r = 0; r < height; ++r) {
-                std::memcpy(i420_buffer->MutableDataY() + r * i420_buffer->StrideY(),
-                            y_data + r * planes[0].stride,
-                            width);
-            }
-            int chroma_h = (height + 1) / 2;
-            int chroma_w = (width + 1) / 2;
-            for (int r = 0; r < chroma_h; ++r) {
-                std::memcpy(i420_buffer->MutableDataU() + r * i420_buffer->StrideU(),
-                            u_data + r * planes[1].stride,
-                            chroma_w);
-                std::memcpy(i420_buffer->MutableDataV() + r * i420_buffer->StrideV(),
-                            v_data + r * planes[2].stride,
-                            chroma_w);
-            }
-        }
-    } else if (frame.type() == VideoBufferType::NV12) {
-        const uint8_t* y_src = frame.data();
-        const uint8_t* uv_src = frame.data() + (width * height);
-        uint8_t* y_dst = i420_buffer->MutableDataY();
-        uint8_t* u_dst = i420_buffer->MutableDataU();
-        uint8_t* v_dst = i420_buffer->MutableDataV();
-        int y_stride = i420_buffer->StrideY();
-        int u_stride = i420_buffer->StrideU();
-        int v_stride = i420_buffer->StrideV();
-
-        for (int r = 0; r < height; ++r) {
-            std::memcpy(y_dst + r * y_stride, y_src + r * width, width);
-        }
-        int chroma_h = (height + 1) / 2;
-        int chroma_w = (width + 1) / 2;
-        for (int r = 0; r < chroma_h; ++r) {
-            for (int c = 0; c < chroma_w; ++c) {
-                u_dst[r * u_stride + c] = uv_src[r * width + c * 2];
-                v_dst[r * v_stride + c] = uv_src[r * width + c * 2 + 1];
-            }
-        }
-    } else {
-        const uint8_t* rgba = frame.data();
-        uint8_t* y_plane = i420_buffer->MutableDataY();
-        uint8_t* u_plane = i420_buffer->MutableDataU();
-        uint8_t* v_plane = i420_buffer->MutableDataV();
-
-        int y_stride = i420_buffer->StrideY();
-        int u_stride = i420_buffer->StrideU();
-        int v_stride = i420_buffer->StrideV();
-
-        for (int i = 0; i < height; ++i) {
-            for (int j = 0; j < width; ++j) {
-                int rgba_idx = (i * width + j) * 4;
-                uint8_t r = rgba[rgba_idx];
-                uint8_t g = rgba[rgba_idx + 1];
-                uint8_t b = rgba[rgba_idx + 2];
-
-                y_plane[i * y_stride + j] = static_cast<uint8_t>(
-                    ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
-
-                if (i % 2 == 0 && j % 2 == 0) {
-                    u_plane[(i / 2) * u_stride + (j / 2)] = static_cast<uint8_t>(
-                        ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-                    v_plane[(i / 2) * v_stride + (j / 2)] = static_cast<uint8_t>(
-                        ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
-                }
-            }
-        }
-    }
-
+    int target_w = width;
+    int target_h = height;
     if (!screencast_) {
         const bool landscape = width >= height;
         // Preserve ordinary-video sources through the supported 4K ceiling.
         // Smaller published layers are selected by simulcast/subscription.
         const int max_width = landscape ? 3840 : 2160;
         const int max_height = landscape ? 2160 : 3840;
-        int target_w = width;
-        int target_h = height;
 
         if (width > max_width || height > max_height) {
             if (static_cast<int64_t>(max_width) * height <=
@@ -177,12 +107,119 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
             target_w = (std::max)(2, target_w & ~1);
             target_h = (std::max)(2, target_h & ~1);
         }
+    }
+
+    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> frame_buffer;
+
+    if (frame.hasNativeBuffer()) {
+        auto native_buf = frame.videoFrameBuffer();
+        if (native_buf) {
+            if (target_w != width || target_h != height) {
+                frame_buffer = native_buf->Scale(target_w, target_h);
+            } else {
+                frame_buffer = std::move(native_buf);
+            }
+        }
+    }
+
+    if (!frame_buffer && frame.type() == VideoBufferType::NV12) {
+        webrtc::scoped_refptr<webrtc::NV12BufferInterface> nv12_src = frame.nv12Buffer();
+        if (!nv12_src) {
+            auto copied = webrtc::NV12Buffer::Create(width, height);
+            const auto planes = frame.planeInfos();
+            if (planes.size() >= 2) {
+                libyuv::NV12Copy(
+                    reinterpret_cast<const uint8_t*>(planes[0].data_ptr),
+                    static_cast<int>(planes[0].stride),
+                    reinterpret_cast<const uint8_t*>(planes[1].data_ptr),
+                    static_cast<int>(planes[1].stride),
+                    copied->MutableDataY(), copied->StrideY(),
+                    copied->MutableDataUV(), copied->StrideUV(),
+                    width, height);
+            } else {
+                const uint8_t* y_src = frame.data();
+                const uint8_t* uv_src = y_src + static_cast<std::size_t>(width) * height;
+                const int uv_stride = ((width + 1) / 2) * 2;
+                libyuv::NV12Copy(
+                    y_src, width, uv_src, uv_stride,
+                    copied->MutableDataY(), copied->StrideY(),
+                    copied->MutableDataUV(), copied->StrideUV(),
+                    width, height);
+            }
+            nv12_src = std::move(copied);
+        }
+
+        if (target_w != width || target_h != height) {
+            auto scaled = webrtc::NV12Buffer::Create(target_w, target_h);
+            scaled->CropAndScaleFrom(*nv12_src, 0, 0, width, height);
+            frame_buffer = std::move(scaled);
+        } else {
+            frame_buffer = std::move(nv12_src);
+        }
+    } else if (!frame_buffer &&
+               (frame.type() == VideoBufferType::I420 ||
+                frame.type() == VideoBufferType::I420A)) {
+        webrtc::scoped_refptr<webrtc::I420Buffer> i420_buffer =
+            webrtc::I420Buffer::Create(width, height);
+        const auto planes = frame.planeInfos();
+        if (planes.size() >= 3) {
+            libyuv::I420Copy(
+                reinterpret_cast<const uint8_t*>(planes[0].data_ptr),
+                static_cast<int>(planes[0].stride),
+                reinterpret_cast<const uint8_t*>(planes[1].data_ptr),
+                static_cast<int>(planes[1].stride),
+                reinterpret_cast<const uint8_t*>(planes[2].data_ptr),
+                static_cast<int>(planes[2].stride),
+                i420_buffer->MutableDataY(), i420_buffer->StrideY(),
+                i420_buffer->MutableDataU(), i420_buffer->StrideU(),
+                i420_buffer->MutableDataV(), i420_buffer->StrideV(),
+                width, height);
+        }
 
         if (target_w != width || target_h != height) {
             webrtc::scoped_refptr<webrtc::I420Buffer> scaled_buffer =
                 webrtc::I420Buffer::Create(target_w, target_h);
             scaled_buffer->ScaleFrom(*i420_buffer);
-            i420_buffer = scaled_buffer;
+            i420_buffer = std::move(scaled_buffer);
+        }
+        frame_buffer = std::move(i420_buffer);
+    } else if (!frame_buffer) {
+        auto nv12_buffer = webrtc::NV12Buffer::Create(width, height);
+        const uint8_t* src = frame.data();
+        if (frame.type() == VideoBufferType::BGRA) {
+            libyuv::ARGBToNV12(
+                src, width * 4,
+                nv12_buffer->MutableDataY(), nv12_buffer->StrideY(),
+                nv12_buffer->MutableDataUV(), nv12_buffer->StrideUV(),
+                width, height);
+        } else if (frame.type() == VideoBufferType::RGBA) {
+            libyuv::ABGRToNV12(
+                src, width * 4,
+                nv12_buffer->MutableDataY(), nv12_buffer->StrideY(),
+                nv12_buffer->MutableDataUV(), nv12_buffer->StrideUV(),
+                width, height);
+        } else {
+            std::vector<uint8_t> temp_argb(static_cast<std::size_t>(width) * height * 4);
+            if (frame.type() == VideoBufferType::ARGB) {
+                libyuv::BGRAToARGB(src, width * 4, temp_argb.data(), width * 4, width, height);
+            } else if (frame.type() == VideoBufferType::ABGR) {
+                libyuv::RGBAToARGB(src, width * 4, temp_argb.data(), width * 4, width, height);
+            } else if (frame.type() == VideoBufferType::RGB24) {
+                libyuv::RAWToARGB(src, width * 3, temp_argb.data(), width * 4, width, height);
+            }
+            libyuv::ARGBToNV12(
+                temp_argb.data(), width * 4,
+                nv12_buffer->MutableDataY(), nv12_buffer->StrideY(),
+                nv12_buffer->MutableDataUV(), nv12_buffer->StrideUV(),
+                width, height);
+        }
+
+        if (target_w != width || target_h != height) {
+            auto scaled = webrtc::NV12Buffer::Create(target_w, target_h);
+            scaled->CropAndScaleFrom(*nv12_buffer, 0, 0, width, height);
+            frame_buffer = std::move(scaled);
+        } else {
+            frame_buffer = std::move(nv12_buffer);
         }
     }
 
@@ -192,7 +229,7 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
     else if (options.rotation == VideoRotation::VIDEO_ROTATION_270) rtc_rotation = webrtc::kVideoRotation_270;
 
     webrtc::VideoFrame rtc_frame = webrtc::VideoFrame::Builder()
-                                       .set_video_frame_buffer(i420_buffer)
+                                       .set_video_frame_buffer(frame_buffer)
                                        .set_rotation(rtc_rotation)
                                        .set_timestamp_us(timestamp_us)
                                        .build();

@@ -541,21 +541,34 @@ TelemetryExportResult WriteTelemetryDiagnosticBundle(
             cleanup();
             return result;
         }
+        const auto metric_bytes = std::filesystem::file_size(
+            session / "telemetry" / "metrics.jsonl", error);
+        if (error || metric_bytes > kMaximumBundleBytes) {
+            result.reason = error ? "write_failed" : "bundle_budget_exceeded";
+            cleanup();
+            return result;
+        }
+        const auto maximum_event_bytes = kMaximumBundleBytes - metric_bytes;
         const auto timeline = checkpoint.process_run_id.empty()
-            ? OperationTimeline{} : ReadOperationTimeline(
-                diagnostic_root, session_id, 1024, checkpoint.process_run_id);
+            ? OperationTimeline{} : ReadOperationTimelineForExport(
+                diagnostic_root, session_id, maximum_event_bytes,
+                checkpoint.process_run_id, range.first_utc_ms, range.last_utc_ms);
+        if (timeline.budget_exceeded) {
+            result.reason = "bundle_budget_exceeded";
+            cleanup();
+            return result;
+        }
         std::ofstream events(session / "events.jsonl",
             std::ios::binary | std::ios::trunc);
-        std::uint64_t omitted_events_by_range = 0;
+        const auto omitted_events_by_range = timeline.omitted_by_selected_range;
+        std::uint64_t event_bytes = 0;
+        std::string event_failure;
         for (const auto& event : timeline.entries) {
-            if ((range.first_utc_ms &&
-                 event.occurred_at_utc_ms < range.first_utc_ms) ||
-                (range.last_utc_ms &&
-                 event.occurred_at_utc_ms > range.last_utc_ms)) {
-                ++omitted_events_by_range;
-                continue;
+            if (is_cancelled()) {
+                event_failure = "export_cancelled";
+                break;
             }
-            events << Json{
+            const auto row = Json{
                 {"event_name", event.event_name},
                 {"process_run_id", event.process_run_id},
                 {"operation_id", event.operation_id},
@@ -582,12 +595,24 @@ TelemetryExportResult WriteTelemetryDiagnosticBundle(
                 {"threshold_us", event.threshold_us}, {"boundary", event.boundary},
                 {"event_sequence", event.event_sequence},
                 {"attempt", event.attempt},
-            }.dump() << '\n';
+            }.dump();
+            if (row.size() + 1 > maximum_event_bytes - event_bytes) {
+                event_failure = "bundle_budget_exceeded";
+                break;
+            }
+            events << row << '\n';
+            if (!events) {
+                event_failure = "write_failed";
+                break;
+            }
+            event_bytes += row.size() + 1;
         }
         events.flush();
-        if (!events || is_cancelled()) {
-            result.cancelled = is_cancelled();
-            result.reason = result.cancelled ? "export_cancelled" : "write_failed";
+        if (is_cancelled()) event_failure = "export_cancelled";
+        else if (!events && event_failure.empty()) event_failure = "write_failed";
+        if (!event_failure.empty()) {
+            result.cancelled = event_failure == "export_cancelled";
+            result.reason = event_failure;
             events.close();
             cleanup();
             return result;

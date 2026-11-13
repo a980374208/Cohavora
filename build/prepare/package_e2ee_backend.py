@@ -12,8 +12,8 @@ def assemble(patched, guard, bsd_license, apache_license):
     profile = json.loads(PROFILE.read_text(encoding='utf-8'))
     payload = {}
     for name, expected in profile['files'].items():
-        if name.startswith('patched/'): source = patched / name.removeprefix('patched/')
-        elif name.startswith('media-guard/'): source = guard / name.removeprefix('media-guard/')
+        if name.startswith('patched/'): source = patched / name[len('patched/'):]
+        elif name.startswith('media-guard/'): source = guard / name[len('media-guard/'):]
         elif name == 'licenses/WebRTC-BSD.txt': source = bsd_license
         elif name == 'licenses/Apache-2.0.txt': source = apache_license
         else: raise ValueError('unsupported profile entry')

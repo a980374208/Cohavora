@@ -29,10 +29,12 @@ struct CredentialLoadResult {
 // Implementations are called only on the SessionManager's Qt thread.
 class CredentialStore {
 public:
+#ifdef Q_OS_LINUX
     using RequestId = quint64;
     enum class Interaction { Background, UserInitiated };
     using LoadCompletion = std::function<void(CredentialLoadResult)>;
     using StatusCompletion = std::function<void(CredentialStatus)>;
+#endif
 
     CredentialStore();
     virtual ~CredentialStore();
@@ -42,10 +44,12 @@ public:
     virtual CredentialStatus save(const StoredSession &session) = 0;
     virtual CredentialStatus clear() = 0;
 
-    // All entry points, cancellation and completions belong to the Qt owner.
+#ifdef Q_OS_LINUX
+    // Only Linux needs asynchronous Secret Service operations. All entry
+    // points, cancellation and completions belong to the Qt owner.
     // Completion is never inline. A destroyed context/store suppresses delivery.
     // The default adapter invokes the legacy store on that same Qt thread;
-    // Linux overrides it with Secret Service operations on a separate owner.
+    // Secret Service overrides it with operations on a separate owner.
     virtual RequestId loadAsync(const QString &service, const QString &account,
         Interaction interaction, QObject *context, LoadCompletion completion);
     virtual RequestId saveAsync(StoredSession session, Interaction interaction,
@@ -60,6 +64,7 @@ public:
 private:
     struct AsyncAdapter;
     std::unique_ptr<AsyncAdapter> adapter_;
+#endif
 };
 
 // Whether the default platform store can persist secrets in this build.

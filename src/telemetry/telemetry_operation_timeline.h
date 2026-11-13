@@ -48,7 +48,9 @@ struct OperationTimeline {
     std::uint64_t omitted = 0;
     std::uint64_t invalid_lines = 0;
     std::uint64_t skipped_files = 0;
+    std::uint64_t omitted_by_selected_range = 0;
     bool source_available = false;
+    bool budget_exceeded = false;
 };
 
 OperationTimeline ReadOperationTimeline(
@@ -56,6 +58,17 @@ OperationTimeline ReadOperationTimeline(
     const std::string& anonymous_session_id,
     std::size_t maximum_entries = 1024,
     const std::string& expected_run_id = {});
+
+// Complete export is separate from the UI's bounded tail. The byte budget
+// bounds retained typed entries after range filtering; callers also enforce
+// their serialized budget.
+OperationTimeline ReadOperationTimelineForExport(
+    const std::filesystem::path& diagnostic_root,
+    const std::string& anonymous_session_id,
+    std::uint64_t maximum_retained_bytes,
+    const std::string& expected_run_id = {},
+    std::int64_t first_utc_ms = 0,
+    std::int64_t last_utc_ms = 0);
 
 std::optional<OperationTimelineEntry> ProjectTimelineEvent(const diagnostic::Event& event);
 

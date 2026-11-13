@@ -400,6 +400,20 @@ private:
         return admission;
     }
     void SchedulePublisherMediaDiagnostic(uint64_t generation);
+    void EmitPublisherVideoFormat(
+        diagnostic::VideoFormatDiagnosticRow format,
+        uint64_t generation,
+        const std::shared_ptr<diagnostic::SdpNegotiationTrace>& trace = {},
+        diagnostic::ThreadRole thread = diagnostic::ThreadRole::Session) const noexcept;
+    void TracePublisherSdpFormats(
+        const std::string& sdp,
+        bool answer,
+        uint64_t generation,
+        const std::shared_ptr<diagnostic::SdpNegotiationTrace>& trace) const noexcept;
+    void TracePublisherSenderFormats(
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+        uint64_t generation,
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) noexcept;
     void EmitDiagnostic(diagnostic::Event event) const noexcept;
     friend class RoomPeerConnectionObserver;
     friend class RoomDataChannelObserver;
@@ -582,12 +596,26 @@ private:
     void NegotiatePublisher(uint64_t generation);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation);
+    struct PreflightedVideoPublishPlan {
+        ResolvedVideoPublishPlan plan;
+        std::function<void()> validate_current;
+    };
+    asio::awaitable<PreflightedVideoPublishPlan> PreflightVideoPublishPlanAsync(
+        std::shared_ptr<LocalVideoTrack> track,
+        ResolvedVideoPublishPlan plan,
+        std::vector<std::string> enabled_codecs,
+        uint64_t generation);
     void RollbackPublishedSenderBundle(
         const webrtc::scoped_refptr<webrtc::PeerConnectionInterface>& pc,
         const PublishedSenderBundle& bundle);
     asio::awaitable<void> ApplyPublishedSenderScalabilityModesAsync(
         PublishedSenderBundle bundle,
         uint64_t generation);
+    asio::awaitable<void> ValidateFinalVideoSendersAsync(
+        PublishedSenderBundle bundle,
+        VideoPublishOptions options,
+        uint64_t generation,
+        std::shared_ptr<LocalVideoTrack> track);
     void HandleSignalEvent(const SignalEvent& event, uint64_t event_generation = 0);
     void HandleSignalMessage(
         std::shared_ptr<proto::SignalResponse> msg,

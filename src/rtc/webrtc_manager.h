@@ -1,5 +1,9 @@
 #pragma once
 
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -7,6 +11,7 @@
 #include <vector>
 #include <asio.hpp>
 #include "api/peer_connection_interface.h"
+#include "api/video_codecs/video_encoder_factory.h"
 #include "rtc_base/thread.h"
 #include "audio_playout_device_selection.h"
 
@@ -75,6 +80,88 @@ private:
 
 std::unique_ptr<webrtc::VideoEncoderFactory> CreateVideoEncoderFactory();
 std::unique_ptr<webrtc::VideoDecoderFactory> CreateVideoDecoderFactory();
+bool IsHardwareH264FormatSupported(const webrtc::SdpVideoFormat& format);
+std::unique_ptr<webrtc::VideoEncoderFactory::EncoderSelectorInterface>
+CreateAutoHardwareH264EncoderSelector(bool allow_vp8_fallback);
+// Process-wide creation preference. Existing encoder sessions keep their backend.
+// Accepted values: auto, software, amf, nvenc, qsv; unknown values select auto.
+void SetVideoEncoderPreference(const std::string& preference);
+std::string GetVideoEncoderPreference();
+
+struct VideoEncoderBackendCapability {
+    bool h264 = false;
+    bool h265 = false;
+};
+
+struct VideoEncoderCapabilities {
+    bool ready = false;
+    VideoEncoderBackendCapability amf;
+    VideoEncoderBackendCapability nvenc;
+    VideoEncoderBackendCapability qsv;
+};
+
+// Reads the current snapshot without running or waiting for a hardware probe.
+VideoEncoderCapabilities GetVideoEncoderCapabilities();
+// Run once from a background worker; vendor initialization may block.
+// Availability proves initialization/cleanup, not successful frame encoding.
+void ProbeVideoEncoderCapabilities();
+
+struct VideoEncoderPreflightLayer {
+    int width = 0;
+    int height = 0;
+    int max_fps = 0;
+    int max_bitrate_bps = 0;
+};
+
+struct VideoEncoderPreflightRequest {
+    std::vector<VideoEncoderPreflightLayer> layers;
+    std::vector<webrtc::SdpVideoFormat> formats;
+    std::string preference;
+    bool screenshare = false;
+};
+
+enum class VideoEncoderPreflightStatus {
+    Ready, InvalidParameters, UnsupportedFormat, Unavailable,
+    InitializationFailed, NotHardware, Cancelled, TimedOut, RetirementFailed
+};
+
+enum class VideoEncoderPreflightPhase { Startup, Ceiling };
+
+struct VideoEncoderPreflightResult {
+    VideoEncoderPreflightStatus status = VideoEncoderPreflightStatus::Unavailable;
+    std::vector<webrtc::SdpVideoFormat> formats;
+    std::string backend;
+    std::size_t failed_layer = 0;
+    int codec_status = 0;
+    VideoEncoderPreflightPhase phase = VideoEncoderPreflightPhase::Startup;
+    std::uint32_t tested_bitrate_bps = 0;
+    bool ok() const { return status == VideoEncoderPreflightStatus::Ready; }
+};
+
+// Call from a background executor. Success proves hardware initialization of
+// every requested layer, including cleanup; it does not prove encoded output.
+// Check independent groups at the startup floor and publication ceilings;
+// sessions from the first group are retired before creating the second group.
+// Auto checks only the first available backend in the runtime's cached
+// NVENC/QSV/AMF order. Failure leaves codec fallback to the publication plan.
+VideoEncoderPreflightResult PreflightVideoEncoder(
+    const VideoEncoderPreflightRequest& request,
+    std::shared_ptr<std::atomic<bool>> cancelled = {});
+
+namespace detail {
+using VideoEncoderPreflightFactory = std::function<
+    std::unique_ptr<webrtc::VideoEncoder>(const webrtc::SdpVideoFormat&)>;
+
+// Synchronous core for an owned encoder sequence. All layers remain alive until
+// the final initialization, then Release and destruction run on that sequence.
+VideoEncoderPreflightResult CheckVideoEncoderPreflightFormat(
+    const VideoEncoderPreflightRequest& request,
+    const webrtc::SdpVideoFormat& format,
+    const std::string& backend,
+    const VideoEncoderPreflightFactory& factory,
+    std::shared_ptr<std::atomic<bool>> cancelled = {});
+} // namespace detail
+
 bool IsVideoEncoderFormatSupported(
     const std::string& codec_name,
     const std::string& scalability_mode = {});

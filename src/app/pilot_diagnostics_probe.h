@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <thread>
 #include <atomic>
 #include <type_traits>
@@ -22,6 +23,43 @@
 #endif
 
 namespace MeetingApp {
+// A dedicated data-only native witness, not the aggregate safe metric catalog.
+// Absence remains null; unknown implementations never acquire hardware credit.
+inline nlohmann::json BuildPilotCodecSenderSnapshot(
+    const livekit::telemetry::CodecSenderSnapshot& snapshot) {
+    using namespace livekit::telemetry;
+    using Json = nlohmann::json;
+    const auto text = [](std::string_view value) -> Json {
+        return value.empty() ? Json(nullptr) : Json(std::string(value));
+    };
+    const auto optional = [](const auto& value) -> Json {
+        return value.has_value() ? Json(*value) : Json(nullptr);
+    };
+    auto rows = Json::array();
+    for (std::size_t index = 0; index < (std::min)(snapshot.row_count, snapshot.rows.size()); ++index) {
+        const auto& row = snapshot.rows[index];
+        const auto source = row.source == CodecSenderSource::Camera ? "camera" :
+            (row.source == CodecSenderSource::ScreenShare ? "screen_share" : "");
+        const auto mapping = row.mapping == CodecSenderMapping::Matched ? "matched" :
+            (row.mapping == CodecSenderMapping::Ambiguous ? "ambiguous" : "missing");
+        const auto implementation = row.implementation_name_length <= row.implementation_name.size()
+            ? ClassifyCodecSenderImplementation(std::string_view(row.implementation_name.data(), row.implementation_name_length)).name
+            : std::string_view{};
+        rows.push_back({{"source", text(source)}, {"track_sid", text(row.track_sid.view())},
+            {"rtp_id", text(row.rtp_id.view())}, {"codec_id", text(row.codec_id.view())}, {"mid", text(row.mid.view())},
+            {"pc_index", row.pc_index}, {"room_generation", row.room_generation}, {"publication_epoch", row.publication_epoch},
+            {"mapping", mapping}, {"codec", text(CodecSenderCodecText(row.codec))},
+            {"encoder", text(CodecSenderEncoderText(row.encoder))}, {"encoder_implementation", text(implementation)},
+            {"hardware", optional(row.hardware)}, {"fallback", optional(row.fallback)},
+            {"frames_encoded", optional(row.frames_encoded)}, {"frames_sent", optional(row.frames_sent)},
+            {"bytes_sent", optional(row.bytes_sent)}, {"packets_sent", optional(row.packets_sent)}});
+    }
+    return {{"schema", "cohavora-codec-sender-snapshot-v1"}, {"sequence", snapshot.sequence},
+        {"capture_unix_ms", snapshot.capture_unix_ms > 0 ? Json(snapshot.capture_unix_ms) : Json(nullptr)},
+        {"stats_timestamp_ms", snapshot.stats_timestamp_ms > 0 ? Json(snapshot.stats_timestamp_ms) : Json(nullptr)},
+        {"overflow", snapshot.overflow || snapshot.row_count > snapshot.rows.size()}, {"rows", std::move(rows)}};
+}
+
 // Shared by the opt-in probe and its projection regression. Values already
 // passed through the typed safe catalog; preserve unavailable values as null.
 inline nlohmann::json BuildPilotDiagnosticMetrics(
@@ -200,6 +238,16 @@ public:
                         {"failures", capture.failures}, {"failure_reason", capture.failure_reason},
                         {"binding_failures", capture.binding_failures},
                         {"binding_failure_reason", capture.binding_failure_reason}}}};
+                row["pid"] = CurrentProcessId();
+                row["process_start_ticks"] = nullptr;
+                constexpr std::uint64_t kFiletimeToDotNetTicks = 504911232000000000ULL;
+                if (process_creation.value("available", false) &&
+                    process_creation["creation_filetime_100ns"].is_number_unsigned()) {
+                    const auto filetime = process_creation["creation_filetime_100ns"].get<std::uint64_t>();
+                    if (filetime <= (std::numeric_limits<std::uint64_t>::max)() - kFiletimeToDotNetTicks)
+                        row["process_start_ticks"] = filetime + kFiletimeToDotNetTicks;
+                }
+                row["codec_sender"] = BuildPilotCodecSenderSnapshot({});
 #if defined(_WIN32)
                 if (bounded) {
                     row["schema"] = 2;
@@ -300,6 +348,7 @@ public:
                     // Preserve availability alongside selected values. Nulls are
                     // never replaced with a fabricated zero by the verifier.
                     row["metrics"] = BuildPilotDiagnosticMetrics(*records.back());
+                    row["codec_sender"] = BuildPilotCodecSenderSnapshot(s.codec_sender);
                     row["revision"] = s.revision;
                     row["session_complete"] = s.session_complete;
                     row["anonymous_session_id"] = records.back()->anonymous_session_id;

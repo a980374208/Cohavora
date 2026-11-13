@@ -7,10 +7,12 @@ Location: build/prepare/prepare.py
 '''
 
 import hashlib
+import errno
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -33,7 +35,6 @@ script_dir = Path(__file__).parent.resolve()
 root_dir = script_dir.parent.parent.resolve()
 deps_dir = root_dir / "deps"
 cache_keys_dir = root_dir / ".cache_keys"
-cache_keys_dir.mkdir(parents=True, exist_ok=True)
 
 WEBRTC_PACKAGE_METADATA_PATH = script_dir / "webrtc-package.json"
 
@@ -109,17 +110,9 @@ def load_webrtc_package_metadata(path: Path):
     return metadata
 
 
-WEBRTC_PACKAGE_METADATA = load_webrtc_package_metadata(
-    WEBRTC_PACKAGE_METADATA_PATH)
-WEBRTC_PACKAGE_ARCHIVE = WEBRTC_PACKAGE_METADATA["archive"]
-WEBRTC_PACKAGE_URL = WEBRTC_PACKAGE_METADATA["download_url"]
-WEBRTC_PACKAGE_SHA256 = WEBRTC_PACKAGE_METADATA["sha256"]
-WEBRTC_PACKAGE_SIZE = WEBRTC_PACKAGE_METADATA["size"]
-WEBRTC_PACKAGE_CACHE_ID = (
-    f"v4:{WEBRTC_PACKAGE_METADATA['package_id']}:{WEBRTC_PACKAGE_SHA256}"
-)
-WEBRTC_REQUIRED_FILES = tuple(WEBRTC_PACKAGE_METADATA["required_files"])
 _validated_webrtc_archives = set()
+_validated_zip_hashes = {}
+VERIFY_FULL = False
 
 
 def load_required_manifest(path: Path):
@@ -130,9 +123,6 @@ def load_required_manifest(path: Path):
     )
 
 
-LIBRARIES_REQUIRED_FILES = load_required_manifest(
-    script_dir / "libraries-required.txt"
-)
 LIBRARIES_ARCHIVE_METADATA_PATH = script_dir / "libraries-archive.json"
 
 
@@ -218,7 +208,11 @@ def load_libraries_archive_metadata(path: Path):
     if metadata["required_manifest_sha256"] != manifest_hash:
         raise ValueError(
             "Libraries archive metadata does not match libraries-required.txt")
-    source_build_guide = script_dir / "README.md"
+    local_guide_name = metadata.get("local_source_build_guide", "README.md")
+    if (not isinstance(local_guide_name, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.md", local_guide_name)):
+        raise ValueError("Libraries archive metadata has an invalid local source build guide")
+    source_build_guide = path.parent / local_guide_name
     # Older schema-1 metadata used the release guide fingerprint for the local
     # copy as well. The optional local fingerprint allows that copy to evolve
     # without changing the independently pinned release asset.
@@ -241,17 +235,30 @@ def load_libraries_archive_metadata(path: Path):
     return metadata
 
 
-LIBRARIES_ARCHIVE_METADATA = load_libraries_archive_metadata(
-    LIBRARIES_ARCHIVE_METADATA_PATH)
-LIBRARIES_ARCHIVE_NAME = LIBRARIES_ARCHIVE_METADATA["archive"]
-LIBRARIES_ARCHIVE_URL = LIBRARIES_ARCHIVE_METADATA["url"]
-LIBRARIES_ARCHIVE_SHA256 = LIBRARIES_ARCHIVE_METADATA["sha256"]
-LIBRARIES_ARCHIVE_SIZE = LIBRARIES_ARCHIVE_METADATA["size"]
-QT_RELEASE_CACHE_ID = (
-    f"v4:qt-5.15.18:{LIBRARIES_ARCHIVE_NAME}:"
-    f"{LIBRARIES_ARCHIVE_SHA256}"
-)
 _validated_libraries_archives = set()
+
+
+def initialize_metadata():
+    """Load reviewed inputs only for an actual preparation, never at import/help."""
+    global WEBRTC_PACKAGE_METADATA, WEBRTC_PACKAGE_ARCHIVE, WEBRTC_PACKAGE_URL
+    global WEBRTC_PACKAGE_SHA256, WEBRTC_PACKAGE_SIZE, WEBRTC_PACKAGE_CACHE_ID
+    global WEBRTC_REQUIRED_FILES, LIBRARIES_REQUIRED_FILES
+    global LIBRARIES_ARCHIVE_METADATA, LIBRARIES_ARCHIVE_NAME, LIBRARIES_ARCHIVE_URL
+    global LIBRARIES_ARCHIVE_SHA256, LIBRARIES_ARCHIVE_SIZE, QT_RELEASE_CACHE_ID
+    WEBRTC_PACKAGE_METADATA = load_webrtc_package_metadata(WEBRTC_PACKAGE_METADATA_PATH)
+    WEBRTC_PACKAGE_ARCHIVE = WEBRTC_PACKAGE_METADATA["archive"]
+    WEBRTC_PACKAGE_URL = WEBRTC_PACKAGE_METADATA["download_url"]
+    WEBRTC_PACKAGE_SHA256 = WEBRTC_PACKAGE_METADATA["sha256"]
+    WEBRTC_PACKAGE_SIZE = WEBRTC_PACKAGE_METADATA["size"]
+    WEBRTC_PACKAGE_CACHE_ID = f"v4:{WEBRTC_PACKAGE_METADATA['package_id']}:{WEBRTC_PACKAGE_SHA256}"
+    WEBRTC_REQUIRED_FILES = tuple(WEBRTC_PACKAGE_METADATA["required_files"])
+    LIBRARIES_REQUIRED_FILES = load_required_manifest(script_dir / "libraries-required.txt")
+    LIBRARIES_ARCHIVE_METADATA = load_libraries_archive_metadata(LIBRARIES_ARCHIVE_METADATA_PATH)
+    LIBRARIES_ARCHIVE_NAME = LIBRARIES_ARCHIVE_METADATA["archive"]
+    LIBRARIES_ARCHIVE_URL = LIBRARIES_ARCHIVE_METADATA["url"]
+    LIBRARIES_ARCHIVE_SHA256 = LIBRARIES_ARCHIVE_METADATA["sha256"]
+    LIBRARIES_ARCHIVE_SIZE = LIBRARIES_ARCHIVE_METADATA["size"]
+    QT_RELEASE_CACHE_ID = f"v4:qt-5.15.18:{LIBRARIES_ARCHIVE_NAME}:{LIBRARIES_ARCHIVE_SHA256}"
 
 
 def compute_string_hash(value: str) -> str:
@@ -275,21 +282,92 @@ def format_missing(root: Path, missing) -> str:
     return f"Required dependency artifacts are missing:\n{details}"
 
 
-def required_files_fingerprint(root: Path, required_files) -> str:
+def file_identity(path: Path):
+    info = path.stat()
+    return [info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_dev, info.st_ino]
+
+
+def write_json_atomic(path: Path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix=".verification-",
+                                     suffix=".tmp", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(value, stream, sort_keys=True)
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def required_files_fingerprint(root: Path, required_files, metadata=None,
+                               verify_full=None, cache_receipt=True) -> str:
+    """Reuse local stat receipts; --verify-full always reads the actual bytes.
+
+    These receipts optimize trusted local reuse. They are not cryptographic proof
+    against a writer able to preserve filesystem metadata or edit the receipt.
+    """
+    required_files = tuple(required_files)
+    binding = {"schema_version": 1, "root": str(root.resolve()),
+               "files": required_files, "metadata": metadata}
+    cache_file = cache_keys_dir / "verified" / (compute_string_hash(
+        json.dumps([binding["root"], required_files], sort_keys=True)) + ".json")
+    snapshots = {}
+    for relative in required_files:
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(format_missing(root, [relative]))
+        snapshots[relative] = file_identity(path)
+    binding_hash = compute_string_hash(json.dumps(binding, sort_keys=True))
+    full = VERIFY_FULL if verify_full is None else verify_full
+    if not full and cache_receipt:
+        try:
+            receipt = json.loads(cache_file.read_text(encoding="utf-8"))
+            fingerprint = receipt["fingerprint"]
+            if (receipt["binding"] == binding_hash and receipt["stats"] == snapshots
+                    and isinstance(fingerprint, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", fingerprint)):
+                return fingerprint
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     digest = hashlib.sha256()
     for relative in required_files:
         path = root / relative
-        if not path.is_file():
-            error(format_missing(root, [relative]))
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
         digest.update(compute_file_hash(path).encode("ascii"))
         digest.update(b"\0")
-    return digest.hexdigest()
+    fingerprint = digest.hexdigest()
+    # Never publish a receipt for files modified while they were being read.
+    if snapshots != {relative: file_identity(root / relative) for relative in required_files}:
+        raise ValueError(f"Dependency files changed during verification: {root}")
+    if cache_receipt:
+        write_json_atomic(cache_file, {"binding": binding_hash, "stats": snapshots,
+                                       "fingerprint": fingerprint})
+    return fingerprint
 
 
-def check_cache_key(stage_name: str, expected_key: str) -> str:
-    key_file = cache_keys_dir / stage_name
+def seed_fingerprint_receipt(root, required_files, metadata, fingerprint):
+    """Bind a fully verified candidate to its new location after same-disk rename."""
+    binding = {"schema_version": 1, "root": str(root.resolve()),
+               "files": tuple(required_files), "metadata": metadata}
+    cache_file = cache_keys_dir / "verified" / (compute_string_hash(
+        json.dumps([binding["root"], tuple(required_files)], sort_keys=True)) + ".json")
+    write_json_atomic(cache_file, {
+        "binding": compute_string_hash(json.dumps(binding, sort_keys=True)),
+        "stats": {relative: file_identity(root / relative) for relative in required_files},
+        "fingerprint": fingerprint})
+
+
+def state_dir_for(target_deps_dir: Path) -> Path:
+    resolved = target_deps_dir.resolve()
+    if resolved == (root_dir / "deps").resolve():
+        return cache_keys_dir
+    return resolved / ".prepare-cache"
+
+
+def check_cache_key(stage_name: str, expected_key: str, state_dir: Path = None) -> str:
+    base_dir = state_dir or cache_keys_dir
+    key_file = base_dir / stage_name
     if not key_file.is_file():
         return "NotFound"
     try:
@@ -299,76 +377,119 @@ def check_cache_key(stage_name: str, expected_key: str) -> str:
         return "Stale"
 
 
-def write_cache_key(stage_name: str, key: str):
-    key_file = cache_keys_dir / stage_name
-    temp_key = cache_keys_dir / f".{stage_name}.{os.getpid()}.tmp"
+def write_cache_key(stage_name: str, key: str, state_dir: Path = None):
+    base_dir = state_dir or cache_keys_dir
+    base_dir.mkdir(parents=True, exist_ok=True)
+    key_file = base_dir / stage_name
+    temp_key = base_dir / f".{stage_name}.{os.getpid()}.tmp"
     temp_key.write_text(key, encoding="utf-8")
     os.replace(temp_key, key_file)
 
 
 @contextmanager
-def stage_lock(stage_name: str, timeout_seconds: int = 60):
-    lock_dir = cache_keys_dir / f"{stage_name}.lock"
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        try:
-            lock_dir.mkdir()
-            (lock_dir / "owner").write_text(str(os.getpid()), encoding="ascii")
-            break
-        except FileExistsError:
+def stage_lock(stage_name: str, timeout_seconds=None, lock_dir: Path = None):
+    """A process-owned lock, released by the OS even when a preparer crashes."""
+    base_dir = lock_dir or cache_keys_dir
+    base_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = base_dir / f"{stage_name}.lck"
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    with lock_path.open("a+b") as stream:
+        # msvcrt locks a byte range. Keep this inode/file alive across releases.
+        if stream.seek(0, os.SEEK_END) == 0:
+            stream.write(b"\0")
+            stream.flush()
+        while True:
             try:
-                age = time.time() - lock_dir.stat().st_mtime
-            except FileNotFoundError:
-                continue
-            if age > 30 * 60:
-                shutil.rmtree(lock_dir, ignore_errors=True)
-                continue
-            if time.monotonic() >= deadline:
-                error(f"Timed out waiting for dependency stage lock: {lock_dir}")
-            time.sleep(0.25)
-
-    try:
-        yield
-    finally:
-        shutil.rmtree(lock_dir, ignore_errors=True)
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError(f"Timed out waiting for dependency stage lock: {lock_path}") from exc
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def validate_zip(path: Path, expected_sha256: str = None):
     if not path.is_file():
         raise ValueError(f"Dependency archive does not exist: {path}")
     if expected_sha256:
-        actual = compute_file_hash(path)
+        identity = (str(path.resolve()), *file_identity(path))
+        actual = _validated_zip_hashes.get(identity)
+        if actual is None:
+            actual = compute_file_hash(path)
         if actual.lower() != expected_sha256.lower():
             raise ValueError(
                 f"SHA-256 mismatch for {path}: expected {expected_sha256}, "
                 f"got {actual}"
             )
+        _validated_zip_hashes[identity] = actual
     if not zipfile.is_zipfile(path):
         raise ValueError(f"Dependency archive is not a valid ZIP file: {path}")
-    with zipfile.ZipFile(path, "r") as archive:
-        damaged = archive.testzip()
-        if damaged:
-            raise ValueError(f"Dependency archive contains a damaged entry: {damaged}")
+    # Extraction reads every member and verifies its CRC; do not decompress twice.
 
 
 def normalized_zip_files(path: Path):
     with zipfile.ZipFile(path, "r") as archive:
         return {
-            member.filename.replace("\\", "/").strip("/").lower()
-            for member in archive.infolist()
+            member.filename.rstrip("/").lower()
+            for member in checked_zip_entries(archive)
             if not member.is_dir()
         }
 
 
+def checked_zip_entries(archive):
+    seen = set()
+    entries = archive.infolist()
+    for member in entries:
+        name = member.orig_filename
+        if name != member.filename:
+            raise ValueError(f"Unsafe normalized archive path: {name!r}")
+        parts = name.rstrip("/").split("/")
+        if (not name or name.startswith("/") or "\\" in name
+                or any(ord(c) < 32 for c in name)
+                or any(part in ("", ".", "..") or ":" in part
+                       or part.endswith((".", " ")) for part in parts)
+                or any(re.fullmatch(r"(?i)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?", part)
+                       for part in parts)):
+            raise ValueError(f"Unsafe archive path: {name!r}")
+        normalized = "/".join(parts).casefold()
+        if normalized in seen:
+            raise ValueError(f"Duplicate archive entry: {name}")
+        seen.add(normalized)
+        file_type = stat.S_IFMT(member.external_attr >> 16)
+        allowed = (0, stat.S_IFDIR) if member.is_dir() else (0, stat.S_IFREG)
+        if file_type not in allowed:
+            raise ValueError(f"Unsupported ZIP entry type: {name}")
+    return entries
+
+
 def validate_libraries_archive(path: Path):
-    stat = path.stat()
-    identity = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    info = path.stat()
+    identity = (str(path.resolve()), *file_identity(path),
+                compute_string_hash(json.dumps(LIBRARIES_ARCHIVE_METADATA, sort_keys=True)))
     if identity in _validated_libraries_archives:
         return
-    if stat.st_size != LIBRARIES_ARCHIVE_SIZE:
+    if info.st_size != LIBRARIES_ARCHIVE_SIZE:
         raise ValueError(
             f"Qt/Libraries archive size mismatch for {path}: expected "
-            f"{LIBRARIES_ARCHIVE_SIZE}, got {stat.st_size}. The pinned archive "
+            f"{LIBRARIES_ARCHIVE_SIZE}, got {info.st_size}. The pinned archive "
             f"is {LIBRARIES_ARCHIVE_NAME}.")
     validate_zip(path, LIBRARIES_ARCHIVE_SHA256)
     archive_files = normalized_zip_files(path)
@@ -397,55 +518,21 @@ def validate_libraries_archive(path: Path):
 
 
 def download_libraries_archive() -> Path:
-    archive_path = cache_keys_dir / LIBRARIES_ARCHIVE_NAME
-    if archive_path.is_file():
-        try:
-            validate_libraries_archive(archive_path)
-            return archive_path
-        except (OSError, ValueError, zipfile.BadZipFile):
-            archive_path.unlink(missing_ok=True)
-            print("[CACHE] Removed an invalid Qt/Libraries archive.")
-
-    last_error = None
-    for attempt in range(1, 4):
-        part_path = cache_keys_dir / (
-            f".{LIBRARIES_ARCHIVE_NAME}.{os.getpid()}.{attempt}.part"
-        )
-        part_path.unlink(missing_ok=True)
-        print(
-            f"[DOWNLOAD] Downloading {LIBRARIES_ARCHIVE_URL} -> "
-            f"{archive_path} (attempt {attempt}/3)..."
-        )
-        try:
-            request = urllib.request.Request(
-                LIBRARIES_ARCHIVE_URL,
-                headers={"User-Agent": "Cohavora-dependency-preparer/1"},
-            )
-            with urllib.request.urlopen(request, timeout=60) as response:
-                with part_path.open("wb") as destination:
-                    shutil.copyfileobj(response, destination, 1024 * 1024)
-            validate_libraries_archive(part_path)
-            os.replace(part_path, archive_path)
-            return archive_path
-        except (OSError, ValueError, urllib.error.URLError, zipfile.BadZipFile) as exc:
-            last_error = exc
-            part_path.unlink(missing_ok=True)
-            if attempt < 3:
-                time.sleep(attempt)
-
-    error(
-        f"Failed to download and verify {LIBRARIES_ARCHIVE_URL}: {last_error}")
+    return download_archive(LIBRARIES_ARCHIVE_NAME, LIBRARIES_ARCHIVE_URL,
+                            LIBRARIES_ARCHIVE_SIZE, LIBRARIES_ARCHIVE_SHA256,
+                            validate_libraries_archive)
 
 
 def validate_webrtc_archive(path: Path):
-    stat = path.stat()
-    identity = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    info = path.stat()
+    identity = (str(path.resolve()), *file_identity(path),
+                compute_string_hash(json.dumps(WEBRTC_PACKAGE_METADATA, sort_keys=True)))
     if identity in _validated_webrtc_archives:
         return
-    if stat.st_size != WEBRTC_PACKAGE_SIZE:
+    if info.st_size != WEBRTC_PACKAGE_SIZE:
         raise ValueError(
             f"WebRTC package size mismatch for {path}: expected "
-            f"{WEBRTC_PACKAGE_SIZE}, got {stat.st_size}")
+            f"{WEBRTC_PACKAGE_SIZE}, got {info.st_size}")
     validate_zip(path, WEBRTC_PACKAGE_SHA256)
     archive_files = normalized_zip_files(path)
     if len(archive_files) != WEBRTC_PACKAGE_METADATA["file_count"]:
@@ -484,6 +571,11 @@ def validate_webrtc_archive(path: Path):
 
 
 def cache_webrtc_archive(source_path: Path) -> Path:
+    with stage_lock("archive-" + compute_string_hash(WEBRTC_PACKAGE_ARCHIVE)[:16]):
+        return _cache_webrtc_archive(source_path)
+
+
+def _cache_webrtc_archive(source_path: Path) -> Path:
     validate_webrtc_archive(source_path)
     archive_path = cache_keys_dir / WEBRTC_PACKAGE_ARCHIVE
     if source_path.resolve() == archive_path.resolve():
@@ -501,44 +593,53 @@ def cache_webrtc_archive(source_path: Path) -> Path:
 
 
 def download_webrtc_archive() -> Path:
-    archive_path = cache_keys_dir / WEBRTC_PACKAGE_ARCHIVE
-    if archive_path.is_file():
-        try:
-            validate_webrtc_archive(archive_path)
-            return archive_path
-        except (OSError, ValueError, zipfile.BadZipFile):
-            archive_path.unlink(missing_ok=True)
-            print("[CACHE] Removed an invalid WebRTC archive.")
+    return download_archive(WEBRTC_PACKAGE_ARCHIVE, WEBRTC_PACKAGE_URL,
+                            WEBRTC_PACKAGE_SIZE, WEBRTC_PACKAGE_SHA256,
+                            validate_webrtc_archive)
 
-    last_error = None
-    for attempt in range(1, 4):
-        part_path = cache_keys_dir / (
-            f".{WEBRTC_PACKAGE_ARCHIVE}.{os.getpid()}.{attempt}.part"
-        )
-        part_path.unlink(missing_ok=True)
-        print(
-            f"[DOWNLOAD] Downloading {WEBRTC_PACKAGE_URL} -> "
-            f"{archive_path} (attempt {attempt}/3)..."
-        )
-        try:
-            request = urllib.request.Request(
-                WEBRTC_PACKAGE_URL,
-                headers={"User-Agent": "Cohavora-dependency-preparer/1"},
-            )
-            with urllib.request.urlopen(request, timeout=60) as response:
-                with part_path.open("wb") as destination:
-                    shutil.copyfileobj(response, destination, 1024 * 1024)
-            validate_webrtc_archive(part_path)
-            os.replace(part_path, archive_path)
-            return archive_path
-        except (OSError, ValueError, urllib.error.URLError,
-                zipfile.BadZipFile) as exception:
-            last_error = exception
-            part_path.unlink(missing_ok=True)
-            if attempt < 3:
-                time.sleep(attempt)
 
-    error(f"Failed to download and verify {WEBRTC_PACKAGE_URL}: {last_error}")
+def download_archive(name, url, expected_size, expected_hash, validator):
+    with stage_lock("archive-" + compute_string_hash(name)[:16]):
+        archive_path = cache_keys_dir / name
+        if archive_path.is_file():
+            try:
+                validator(archive_path)
+                return archive_path
+            except (OSError, ValueError, zipfile.BadZipFile):
+                archive_path.unlink()
+                print(f"[CACHE] Removed an invalid archive: {name}")
+        last_error = None
+        for attempt in range(1, 4):
+            part_path = cache_keys_dir / f".{name}.{os.getpid()}.{attempt}.part"
+            print(f"[DOWNLOAD] {url} (attempt {attempt}/3)")
+            try:
+                digest = hashlib.sha256()
+                downloaded = 0
+                request = urllib.request.Request(url, headers={
+                    "User-Agent": "Cohavora-dependency-preparer/1"})
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    with part_path.open("wb") as destination:
+                        while chunk := response.read(1024 * 1024):
+                            downloaded += len(chunk)
+                            if downloaded > expected_size:
+                                raise ValueError("Download exceeded the pinned archive size")
+                            destination.write(chunk)
+                            digest.update(chunk)
+                actual_hash = digest.hexdigest()
+                if downloaded != expected_size or actual_hash != expected_hash:
+                    raise ValueError(f"Downloaded archive size or SHA-256 mismatch: {name}")
+                _validated_zip_hashes[(str(part_path.resolve()), *file_identity(part_path))] = actual_hash
+                validator(part_path)
+                os.replace(part_path, archive_path)
+                _validated_zip_hashes[(str(archive_path.resolve()), *file_identity(archive_path))] = actual_hash
+                return archive_path
+            except (OSError, ValueError, urllib.error.URLError, zipfile.BadZipFile) as exc:
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(attempt)
+            finally:
+                part_path.unlink(missing_ok=True)
+        raise ValueError(f"Failed to download and verify {url}: {last_error}")
 
 
 def resolve_webrtc_archive(package_path: Path = None) -> Path:
@@ -548,39 +649,55 @@ def resolve_webrtc_archive(package_path: Path = None) -> Path:
 
 
 def safe_extract_zip(archive_path: Path, extract_to: Path):
-    validate_zip(archive_path)
     extract_to.mkdir(parents=True, exist_ok=True)
     extract_root = extract_to.resolve()
     with zipfile.ZipFile(archive_path, "r") as archive:
-        for member in archive.infolist():
+        for member in checked_zip_entries(archive):
             destination = (extract_to / member.filename).resolve()
             try:
                 common = os.path.commonpath((str(extract_root), str(destination)))
             except ValueError:
-                error(f"Archive entry escapes the extraction root: {member.filename}")
+                raise ValueError(f"Archive entry escapes the extraction root: {member.filename}")
             if common != str(extract_root):
-                error(f"Archive entry escapes the extraction root: {member.filename}")
+                raise ValueError(f"Archive entry escapes the extraction root: {member.filename}")
         archive.extractall(extract_to)
+
+
+def remove_path(path: Path):
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists():
+        path.unlink()
 
 
 def atomic_replace_directory(staged_dir: Path, target_dir: Path):
     target_dir.parent.mkdir(parents=True, exist_ok=True)
     backup_dir = target_dir.parent / f".{target_dir.name}.backup-{os.getpid()}"
-    if backup_dir.exists():
-        shutil.rmtree(backup_dir)
+    remove_path(backup_dir)
 
-    had_target = target_dir.exists()
+    had_target = target_dir.exists() or target_dir.is_symlink()
     if had_target:
-        target_dir.rename(backup_dir)
+        try:
+            target_dir.rename(backup_dir)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"Cannot replace dependencies at {target_dir}. Close Visual Studio "
+                "or stop builds/linkers using these files, then retry.") from exc
     try:
         staged_dir.rename(target_dir)
-    except Exception:
-        if had_target and backup_dir.exists() and not target_dir.exists():
+    except Exception as exc:
+        if (had_target and (backup_dir.exists() or backup_dir.is_symlink())
+                and not (target_dir.exists() or target_dir.is_symlink())):
             backup_dir.rename(target_dir)
+        if isinstance(exc, PermissionError):
+            raise PermissionError(
+                f"Cannot install dependencies at {target_dir}. Close Visual Studio "
+                "or stop builds/linkers using these files, then retry.") from exc
         raise
     else:
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
+        remove_path(backup_dir)
 
 
 def find_webrtc_payload(extract_root: Path) -> Path:
@@ -590,29 +707,53 @@ def find_webrtc_payload(extract_root: Path) -> Path:
     raise ValueError(f"WebRTC package has no expected SDK root: {extract_root}")
 
 
-def webrtc_install_is_valid(target_dir: Path) -> bool:
+def webrtc_install_is_valid(target_dir: Path, verify_full=None, cache_receipt=True) -> bool:
     if missing_required_files(target_dir, WEBRTC_REQUIRED_FILES):
         return False
+    manifest = target_dir / "metadata/package.json"
+    if (not manifest.is_file() or manifest.is_symlink()
+            or hashlib.sha256(manifest.read_bytes()).hexdigest()
+            != WEBRTC_PACKAGE_METADATA["manifest_sha256"]):
+        return False
     return (
-        required_files_fingerprint(target_dir, WEBRTC_REQUIRED_FILES)
+        required_files_fingerprint(target_dir, WEBRTC_REQUIRED_FILES,
+                                   WEBRTC_PACKAGE_METADATA, verify_full, cache_receipt)
         == WEBRTC_PACKAGE_METADATA["required_files_sha256"]
     )
 
 
-def prepare_webrtc(package_archive_path: Path = None):
-    stage_name = "webrtc"
-    target_dir = deps_dir / "webrtc"
-    expected_key = compute_string_hash(WEBRTC_PACKAGE_CACHE_ID)
-    if (check_cache_key(stage_name, expected_key) == "Good"
-            and webrtc_install_is_valid(target_dir)):
-        print("[STAGE: WebRTC] OK (verified dual-config prefixed SDK)")
-        return target_dir
+def is_existing_webrtc_valid(target_dir: Path) -> bool:
+    if target_dir.is_symlink() or not target_dir.is_dir():
+        return False
+    try:
+        return webrtc_install_is_valid(target_dir)
+    except (OSError, ValueError):
+        return False
 
-    archive_path = resolve_webrtc_archive(package_archive_path)
-    with stage_lock(stage_name):
-        if (check_cache_key(stage_name, expected_key) == "Good"
-                and webrtc_install_is_valid(target_dir)):
+
+def prepare_webrtc(package_archive_path: Path = None, target_deps_dir: Path = None,
+                   no_repair: bool = False):
+    stage_name = "webrtc"
+    active_deps_dir = target_deps_dir or deps_dir
+    state_dir = state_dir_for(active_deps_dir)
+    target_dir = active_deps_dir / "webrtc"
+    expected_key = compute_string_hash(WEBRTC_PACKAGE_CACHE_ID)
+    with stage_lock(stage_name, lock_dir=state_dir):
+        if is_existing_webrtc_valid(target_dir):
+            if check_cache_key(stage_name, expected_key, state_dir) != "Good":
+                write_cache_key(stage_name, expected_key, state_dir)
+            print("[STAGE: WebRTC] OK (local cache; use --verify-full for full hashing)")
             return target_dir
+
+        if target_dir.exists() or target_dir.is_symlink():
+            if no_repair:
+                raise ValueError(
+                    f"Existing {target_dir} does not match the pinned WebRTC package. "
+                    "The existing tree was preserved. Move it aside manually before "
+                    "preparing dependencies.")
+            print(f"[REPAIR] Replacing mismatched WebRTC in {target_dir}...")
+
+        archive_path = resolve_webrtc_archive(package_archive_path)
 
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(
@@ -623,15 +764,18 @@ def prepare_webrtc(package_archive_path: Path = None):
             extracted = temp_root / "extracted"
             print(f"[EXTRACT] Extracting {archive_path.name} into staging...")
             safe_extract_zip(archive_path, extracted)
-            shutil.copytree(find_webrtc_payload(extracted), candidate)
-            if not webrtc_install_is_valid(candidate):
+            find_webrtc_payload(extracted).rename(candidate)
+            if not webrtc_install_is_valid(candidate, verify_full=True, cache_receipt=False):
                 raise ValueError(
                     "Staged WebRTC package content fingerprint does not match "
                     "the pinned dual-config package")
 
             atomic_replace_directory(candidate, target_dir)
+            seed_fingerprint_receipt(target_dir, WEBRTC_REQUIRED_FILES,
+                                     WEBRTC_PACKAGE_METADATA,
+                                     WEBRTC_PACKAGE_METADATA["required_files_sha256"])
 
-        write_cache_key(stage_name, expected_key)
+        write_cache_key(stage_name, expected_key, state_dir)
 
     print(
         f" -> Dual-config prefixed WebRTC deployed transactionally and verified "
@@ -672,7 +816,6 @@ def preflight_inputs(
         qt_archive_path: Path = None,
         libraries_source: Path = None,
         webrtc_archive_path: Path = None):
-    target_libraries = deps_dir / "Libraries/win64"
     if qt_archive_path:
         validate_libraries_archive(qt_archive_path)
     elif libraries_source:
@@ -687,58 +830,75 @@ def preflight_inputs(
 
     if webrtc_archive_path:
         validate_webrtc_archive(webrtc_archive_path)
-    elif not webrtc_install_is_valid(deps_dir / "webrtc"):
-        resolve_webrtc_archive()
 
 
-def prepare_libraries(qt_archive_path: Path = None, libraries_source: Path = None):
+def prepare_libraries(qt_archive_path: Path = None, libraries_source: Path = None,
+                      target_deps_dir: Path = None, no_repair: bool = False):
     stage_name = "libraries"
-    target_dir = deps_dir / "Libraries/win64"
-
-    source_root = None
-    if qt_archive_path:
-        validate_libraries_archive(qt_archive_path)
-        input_identity = f"archive:{compute_file_hash(qt_archive_path)}"
-    elif libraries_source:
-        source_root = find_libraries_root(libraries_source)
-        source_missing = missing_required_files(source_root, LIBRARIES_REQUIRED_FILES)
-        if source_missing:
-            error(format_missing(source_root, source_missing))
-        input_identity = (
-            "directory:"
-            + required_files_fingerprint(source_root, LIBRARIES_REQUIRED_FILES)
-        )
-    else:
-        target_missing = missing_required_files(target_dir, LIBRARIES_REQUIRED_FILES)
-        if target_missing:
-            qt_archive_path = download_libraries_archive()
-            input_identity = f"archive:{LIBRARIES_ARCHIVE_SHA256}"
+    active_deps_dir = target_deps_dir or deps_dir
+    state_dir = state_dir_for(active_deps_dir)
+    target_dir = active_deps_dir / "Libraries/win64"
+    state_path = state_dir / "libraries-state.json"
+    binding = compute_string_hash(json.dumps({
+        "root": str(target_dir.resolve()), "metadata": LIBRARIES_ARCHIVE_METADATA,
+        "required_files": LIBRARIES_REQUIRED_FILES}, sort_keys=True))
+    with stage_lock(stage_name, lock_dir=state_dir):
+        source_root = None
+        if qt_archive_path:
+            validate_libraries_archive(qt_archive_path)
+            expected_fingerprint = LIBRARIES_ARCHIVE_METADATA["required_files_sha256"]
+        elif libraries_source:
+            source_root = find_libraries_root(libraries_source)
+            expected_fingerprint = required_files_fingerprint(
+                source_root, LIBRARIES_REQUIRED_FILES, LIBRARIES_ARCHIVE_METADATA)
         else:
-            input_identity = (
-                "preinstalled:"
-                + required_files_fingerprint(target_dir, LIBRARIES_REQUIRED_FILES)
-            )
+            expected_fingerprint = LIBRARIES_ARCHIVE_METADATA["required_files_sha256"]
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                if (state["binding"] == binding
+                        and re.fullmatch(r"[0-9a-f]{64}", state["fingerprint"])):
+                    expected_fingerprint = state["fingerprint"]
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
 
-    expected_key = compute_string_hash(f"{QT_RELEASE_CACHE_ID}:{input_identity}")
-    missing = missing_required_files(target_dir, LIBRARIES_REQUIRED_FILES)
-    if check_cache_key(stage_name, expected_key) == "Good" and not missing:
-        print("[STAGE: Libraries] OK (verified Qt and third-party artifacts)")
-        return target_dir
+        if not target_dir.is_symlink() and target_dir.is_dir():
+            missing = missing_required_files(target_dir, LIBRARIES_REQUIRED_FILES)
+            if not missing:
+                try:
+                    actual_fingerprint = required_files_fingerprint(
+                        target_dir, LIBRARIES_REQUIRED_FILES, LIBRARIES_ARCHIVE_METADATA)
+                except (OSError, ValueError):
+                    actual_fingerprint = None
+                if (actual_fingerprint is not None
+                        and not qt_archive_path and not libraries_source
+                        and actual_fingerprint != expected_fingerprint
+                        and any(check_cache_key(stage_name, compute_string_hash(
+                            f"{QT_RELEASE_CACHE_ID}:{kind}:{actual_fingerprint}"), state_dir) == "Good"
+                                for kind in ("preinstalled", "directory"))):
+                    # Migrate only an unchanged tree whose content fingerprint was
+                    # already recorded by the previous preparer, never a new baseline.
+                    expected_fingerprint = actual_fingerprint
+                if actual_fingerprint == expected_fingerprint:
+                    write_json_atomic(state_path, {"binding": binding,
+                                                   "fingerprint": expected_fingerprint})
+                    write_cache_key(stage_name, compute_string_hash(
+                        f"{QT_RELEASE_CACHE_ID}:{expected_fingerprint}"), state_dir)
+                    print("[STAGE: Libraries] OK (local cache; use --verify-full for full hashing)")
+                    return target_dir
 
-    if not qt_archive_path and not libraries_source:
-        write_cache_key(stage_name, expected_key)
-        print(f" -> Existing libraries verified in {target_dir}")
-        return target_dir
+        if target_dir.exists() or target_dir.is_symlink():
+            if no_repair:
+                raise ValueError(
+                    f"Existing {target_dir} does not match the expected Libraries package. "
+                    "The existing tree was preserved. Move it aside manually before "
+                    "preparing dependencies.")
+            print(f"[REPAIR] Replacing mismatched Libraries in {target_dir}...")
 
-    with stage_lock(stage_name):
-        missing = missing_required_files(target_dir, LIBRARIES_REQUIRED_FILES)
-        if check_cache_key(stage_name, expected_key) == "Good" and not missing:
-            return target_dir
-
+        if not qt_archive_path and not libraries_source:
+            qt_archive_path = download_libraries_archive()
+            expected_fingerprint = LIBRARIES_ARCHIVE_METADATA["required_files_sha256"]
         target_dir.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix=".libraries-stage-", dir=target_dir.parent
-        ) as temp_dir:
+        with tempfile.TemporaryDirectory(prefix=".libraries-stage-", dir=target_dir.parent) as temp_dir:
             temp_root = Path(temp_dir)
             candidate = temp_root / "candidate"
             if qt_archive_path:
@@ -746,20 +906,32 @@ def prepare_libraries(qt_archive_path: Path = None, libraries_source: Path = Non
                 print(f"[EXTRACT] Extracting {qt_archive_path} into staging...")
                 safe_extract_zip(qt_archive_path, extracted)
                 source_root = find_libraries_root(extracted)
+                # Only our temporary extraction may be moved. External sources stay intact.
+                source_root.rename(candidate)
+                ignore = shutil.ignore_patterns(".git*", "*.obj", "*.tlog", "*.pch")
+                for directory, dirs, files in os.walk(candidate, topdown=True):
+                    ignored = ignore(directory, dirs + files)
+                    for name in ignored:
+                        path = Path(directory) / name
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                            dirs.remove(name)
+                        else:
+                            path.unlink()
             else:
-                print(f"[INSTALL] Staging Libraries from {source_root}...")
-
-            ignore = shutil.ignore_patterns(".git*", "*.obj", "*.tlog", "*.pch")
-            shutil.copytree(source_root, candidate, ignore=ignore)
+                ignore = shutil.ignore_patterns(".git*", "*.obj", "*.tlog", "*.pch")
+                shutil.copytree(source_root, candidate, ignore=ignore)
             ensure_zlib_alias(candidate)
-            missing = missing_required_files(candidate, LIBRARIES_REQUIRED_FILES)
-            if missing:
-                error(format_missing(candidate, missing))
-
+            candidate_fingerprint = required_files_fingerprint(
+                candidate, LIBRARIES_REQUIRED_FILES, LIBRARIES_ARCHIVE_METADATA,
+                verify_full=True, cache_receipt=False)
+            if candidate_fingerprint != expected_fingerprint:
+                raise ValueError("Staged Libraries content fingerprint does not match its verified source")
             atomic_replace_directory(candidate, target_dir)
-
-        write_cache_key(stage_name, expected_key)
-
+            seed_fingerprint_receipt(target_dir, LIBRARIES_REQUIRED_FILES,
+                                     LIBRARIES_ARCHIVE_METADATA, candidate_fingerprint)
+        write_json_atomic(state_path, {"binding": binding, "fingerprint": expected_fingerprint})
+        write_cache_key(stage_name, compute_string_hash(f"{QT_RELEASE_CACHE_ID}:{expected_fingerprint}"), state_dir)
     print(f" -> Libraries deployed transactionally and verified in {target_dir}")
     return target_dir
 
@@ -772,7 +944,7 @@ def main():
     libraries_input.add_argument(
         "--qt-archive",
         type=str,
-        help=f"Path to pinned {LIBRARIES_ARCHIVE_NAME}",
+        help="Path to the pinned Qt/Libraries archive",
     )
     libraries_input.add_argument(
         "--libraries-src",
@@ -782,16 +954,35 @@ def main():
     parser.add_argument(
         "--webrtc-archive",
         type=str,
-        help=f"Path to pinned dual-config {WEBRTC_PACKAGE_ARCHIVE}",
+        help="Path to the pinned dual-config WebRTC archive",
     )
+    parser.add_argument(
+        "--deps-dir",
+        type=Path,
+        default=root_dir / "deps",
+        help="Dependency installation directory (default: ./deps)",
+    )
+    parser.add_argument("--verify-full", action="store_true",
+                        help="Hash every required installed file; bypass local stat receipts")
+    parser.add_argument("--no-repair", "--norepair", dest="no_repair", action="store_true",
+                        help="Preserve an existing mismatched dependency tree and fail instead of replacing it")
     args = parser.parse_args()
+    global VERIFY_FULL
+    VERIFY_FULL = args.verify_full
+    initialize_metadata()
+    cache_keys_dir.mkdir(parents=True, exist_ok=True)
+
+    target_deps_dir = args.deps_dir.expanduser()
+    if not target_deps_dir.is_absolute():
+        target_deps_dir = root_dir / target_deps_dir
+    target_deps_dir = target_deps_dir.resolve()
 
     print("==================================================")
     print("  LiveKit C++ Self-Contained Dependency Pipeline  ")
     print("  (Native In-Source UI | Pure C++ Toolchain)      ")
     print("==================================================")
     print(f"Project Root  : {root_dir}")
-    print(f"Target Deps   : {deps_dir}\n")
+    print(f"Target Deps   : {target_deps_dir}\n")
     print(
         "Command       : "
         + subprocess.list2cmdline(
@@ -800,12 +991,12 @@ def main():
         + "\n"
     )
 
-    qt_archive = Path(args.qt_archive).resolve() if args.qt_archive else None
+    qt_archive = Path(args.qt_archive).expanduser().resolve() if args.qt_archive else None
     libraries_source = (
-        Path(args.libraries_src).resolve() if args.libraries_src else None
+        Path(args.libraries_src).expanduser().resolve() if args.libraries_src else None
     )
     webrtc_archive = (
-        Path(args.webrtc_archive).resolve()
+        Path(args.webrtc_archive).expanduser().resolve()
         if args.webrtc_archive
         else None
     )
@@ -817,13 +1008,13 @@ def main():
         error(f"WebRTC package does not exist: {webrtc_archive}")
 
     preflight_inputs(qt_archive, libraries_source, webrtc_archive)
-    deps_dir.mkdir(parents=True, exist_ok=True)
+    target_deps_dir.mkdir(parents=True, exist_ok=True)
 
-    prepare_webrtc(webrtc_archive)
-    prepare_libraries(qt_archive, libraries_source)
+    prepare_webrtc(webrtc_archive, target_deps_dir, args.no_repair)
+    prepare_libraries(qt_archive, libraries_source, target_deps_dir, args.no_repair)
 
     print("\n==================================================")
-    print("[SUCCESS] All project dependencies are ready in ./deps!")
+    print(f"[SUCCESS] All project dependencies are ready in {target_deps_dir}!")
     print("==================================================")
 
 

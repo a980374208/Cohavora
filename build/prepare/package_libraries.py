@@ -21,7 +21,7 @@ DEFAULT_OUTPUT = (
     / "dependency-archives"
     / "cohavora-libraries-win64-qt-5.15.18-20260925.zip"
 )
-SOURCE_BUILD_GUIDE = SCRIPT_DIR / "README.md"
+SOURCE_BUILD_GUIDE = SCRIPT_DIR / "libraries-build-guide.md"
 SOURCE_BUILD_GUIDE_ASSET_NAME = (
     "cohavora-libraries-win64-qt-5.15.18-20260925-source-build.md"
 )
@@ -157,6 +157,7 @@ def write_metadata(
         "source_build_guide": source_build_guide.name,
         "source_build_guide_url": SOURCE_BUILD_GUIDE_URL,
         "source_build_guide_sha256": file_sha256(source_build_guide),
+        "local_source_build_guide": SOURCE_BUILD_GUIDE.name,
         "local_source_build_guide_hash_mode": "lf",
         "local_source_build_guide_sha256": hashlib.sha256(
             SOURCE_BUILD_GUIDE.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),

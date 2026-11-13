@@ -4,8 +4,29 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 namespace livekit::diagnostic {
+
+void Event::SetVideoFormat(VideoFormatDiagnosticRow row) noexcept {
+    std::construct_at(&video_format, row);
+    has_video_format_payload = true;
+    kind = EventKind::VideoFormatResolved;
+}
+
+std::string_view VideoFormatSourceName(VideoFormatSource source) noexcept {
+    switch (source) {
+    case VideoFormatSource::PreflightApproved: return "preflight_approved";
+    case VideoFormatSource::CodecPreference: return "codec_preference";
+    case VideoFormatSource::LocalOffer: return "local_offer";
+    case VideoFormatSource::RemoteAnswer: return "remote_answer";
+    case VideoFormatSource::SenderParameters: return "sender_parameters";
+    case VideoFormatSource::EncoderFactory: return "encoder_factory";
+    case VideoFormatSource::EncoderLayerFactory: return "encoder_layer_factory";
+    }
+    return "unknown";
+}
+
 namespace {
 
 template <std::size_t N>
@@ -40,7 +61,41 @@ bool IsToken(const std::array<char, N>& value, bool operation = false) noexcept 
     return terminated && (!operation || IsSafeOperationId(value.data()));
 }
 
+bool IsHardwareModelCharacter(char ch) noexcept {
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+        (ch >= '0' && ch <= '9') || ch == ' ' || ch == '_' || ch == '-' ||
+        ch == '.' || ch == '(' || ch == ')' || ch == '[' || ch == ']' ||
+        ch == '+' || ch == '@';
+}
+
+bool IsHardwareModel(const HardwareInfoRow& row) noexcept {
+    const auto end = std::find(row.model.begin(), row.model.end(), '\0');
+    if (end == row.model.end() ||
+        !std::all_of(end, row.model.end(), [](char ch) { return ch == '\0'; }))
+        return false;
+    if (!(row.known_fields & HardwareModelKnown)) return end == row.model.begin();
+    return end != row.model.begin() && std::all_of(row.model.begin(), end,
+        IsHardwareModelCharacter);
+}
+
 } // namespace
+
+bool HardwareInfoRow::AssignModel(std::string_view value) noexcept {
+    model.fill('\0');
+    known_fields &= ~HardwareModelKnown;
+    flags &= ~HardwareModelTruncated;
+    while (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+    while (!value.empty() && value.back() == ' ') value.remove_suffix(1);
+    // Validate the complete bounded OS value, including any truncated suffix.
+    if (value.empty() || value.size() > 512 ||
+        !std::all_of(value.begin(), value.end(), IsHardwareModelCharacter))
+        return false;
+    const auto count = (std::min)(value.size(), model.size() - 1);
+    std::copy_n(value.begin(), count, model.begin());
+    known_fields |= HardwareModelKnown;
+    if (count != value.size()) flags |= HardwareModelTruncated;
+    return true;
+}
 
 bool IsSafeOperationId(std::string_view value) noexcept {
     if (value.empty()) return true;
@@ -178,6 +233,17 @@ Event Event::SettingsProbe(MediaKind media, std::uint64_t elapsed_ms,
     return event;
 }
 
+Event Event::EncoderCapability(std::uint32_t vendor, bool h264, bool h265) noexcept {
+    Event event;
+    event.kind = EventKind::HardwareEncoderCapability;
+    event.thread_role = ThreadRole::Media;
+    event.hardware.vendor_id = vendor;
+    event.hardware.known_fields = HardwareGpuIdentityKnown;
+    event.hardware.encoder_codecs = (h264 ? HardwareEncoderH264 : 0) |
+        (h265 ? HardwareEncoderH265 : 0);
+    return event;
+}
+
 std::string_view SdpDescriptionName(SdpDescription value) noexcept {
     constexpr std::string_view names[] = {"unknown", "offer", "answer"};
     const auto index = static_cast<std::size_t>(value);
@@ -217,6 +283,15 @@ std::string_view SdpReasonName(SdpReason value) noexcept {
 std::string_view EventName(EventKind kind) noexcept {
     switch (kind) {
     case EventKind::ProcessStarted: return "process.started";
+    case EventKind::HardwareCpu: return "hardware.cpu";
+    case EventKind::HardwareMemory: return "hardware.memory";
+    case EventKind::HardwareGpu: return "hardware.gpu";
+    case EventKind::HardwareGpuEnumeration: return "hardware.gpu.enumeration";
+    case EventKind::HardwareEncoderCapability: return "hardware.encoder.capability";
+    case EventKind::HardwareEncoderPreflight: return "hardware.encoder.preflight";
+    case EventKind::HardwareEncoderFailure: return "hardware.encoder.failure";
+    case EventKind::VideoFormatResolved: return "video.format.resolved";
+    case EventKind::VideoLevelRejected: return "video.level.rejected";
     case EventKind::ProcessStopping: return "process.stopping";
     case EventKind::ProcessTerminal: return "process.terminal";
     case EventKind::QueueSummary: return "diagnostics.queue.summary";
@@ -278,7 +353,16 @@ std::string_view EventName(EventKind kind) noexcept {
 
 std::string_view ComponentName(EventKind kind) noexcept {
     switch (kind) {
+    case EventKind::HardwareEncoderPreflight:
+    case EventKind::HardwareEncoderFailure:
+    case EventKind::VideoFormatResolved: return "webrtc";
+    case EventKind::VideoLevelRejected: return "webrtc";
     case EventKind::ProcessStarted:
+    case EventKind::HardwareCpu:
+    case EventKind::HardwareMemory:
+    case EventKind::HardwareGpu:
+    case EventKind::HardwareGpuEnumeration:
+    case EventKind::HardwareEncoderCapability:
     case EventKind::ProcessStopping:
     case EventKind::ProcessTerminal:
     case EventKind::ProcessIssue: return "app";
@@ -356,6 +440,7 @@ std::string_view BusinessErrorName(std::int32_t code) noexcept {
 
 Severity EventSeverity(EventKind kind) noexcept {
     switch (kind) {
+    case EventKind::HardwareEncoderFailure: return Severity::Warning;
     case EventKind::ChatReceived:
     case EventKind::HttpRequestStarted:
     case EventKind::AdmissionStageChanged:
@@ -443,8 +528,19 @@ bool IsCritical(EventKind kind) noexcept {
 }
 
 bool IsValidEvent(const Event& event) noexcept {
+    if (event.has_video_format_payload != (event.kind == EventKind::VideoFormatResolved))
+        return false;
     switch (event.kind) {
+    case EventKind::VideoFormatResolved:
+    case EventKind::VideoLevelRejected:
+    case EventKind::HardwareEncoderPreflight:
+    case EventKind::HardwareEncoderFailure:
     case EventKind::ProcessStarted:
+    case EventKind::HardwareCpu:
+    case EventKind::HardwareMemory:
+    case EventKind::HardwareGpu:
+    case EventKind::HardwareGpuEnumeration:
+    case EventKind::HardwareEncoderCapability:
     case EventKind::ProcessStopping:
     case EventKind::ProcessTerminal:
     case EventKind::QueueSummary:
@@ -503,6 +599,31 @@ bool IsValidEvent(const Event& event) noexcept {
         break;
     default: return false;
     }
+    const auto& hardware = event.hardware;
+    if (!IsHardwareModel(hardware) || hardware.known_fields > 127 ||
+        hardware.flags > (HardwareModelTruncated | HardwareEnumerationComplete |
+            HardwareDriverVersionFromDxgi) ||
+        hardware.encoder_codecs > (HardwareEncoderH264 | HardwareEncoderH265) ||
+        ((hardware.flags & HardwareModelTruncated) &&
+         !(hardware.known_fields & HardwareModelKnown))) return false;
+    if (event.kind == EventKind::HardwareEncoderCapability &&
+        (hardware.vendor_id != 0x1002 && hardware.vendor_id != 0x10de &&
+         hardware.vendor_id != 0x8086)) return false;
+    if ((event.kind == EventKind::HardwareEncoderPreflight ||
+         event.kind == EventKind::HardwareEncoderFailure ||
+         event.kind == EventKind::VideoLevelRejected) &&
+        (event.encoder.stage > EncoderFailureStage::RateLevelConstraints ||
+         (hardware.vendor_id != 0 && hardware.vendor_id != 0x1002 &&
+          hardware.vendor_id != 0x10de && hardware.vendor_id != 0x8086))) return false;
+    if (event.kind == EventKind::VideoFormatResolved) {
+        const auto& format = event.video_format;
+        if (format.source > VideoFormatSource::EncoderLayerFactory ||
+            format.profile_level_id > 0xffffff || format.profile > 7 ||
+            format.payload_type < -1 || format.payload_type > 127 ||
+            format.packetization_mode < -1 || format.packetization_mode > 1 ||
+            format.level_asymmetry < -1 || format.level_asymmetry > 1 ||
+            (format.valid && (format.profile == 0 || format.level == 255))) return false;
+    }
     if (event.kind == EventKind::UiTiming &&
         (event.timing_metric > TimingMetric::UiFirstPaint ||
          event.timing_scene > TimingScene::Settings ||
@@ -552,7 +673,11 @@ bool IsValidEvent(const Event& event) noexcept {
     return (!event.window_sample || event.kind == EventKind::SignalMessageSummary) &&
         event.http_status >= 0 && event.http_status <= 599 &&
         event.network_error >= 0 && event.network_error <= 1000 &&
-        event.rtc_error_type >= 0 && event.rtc_error_type <= 100 &&
+        event.rtc_error_type >=
+            ((event.kind == EventKind::HardwareEncoderPreflight ||
+              event.kind == EventKind::HardwareEncoderFailure ||
+              event.kind == EventKind::VideoLevelRejected) ? -100 : 0) &&
+        event.rtc_error_type <= 100 &&
         IsToken(event.build_id) &&
         IsToken(event.symbol_identity) &&
         IsToken(event.context.anonymous_session_id.bytes) &&
@@ -823,6 +948,23 @@ std::string_view FailureReasonName(FailureReason value) noexcept {
     case FailureReason::LedgerUnavailable: return "ledger_unavailable";
     default: return "unknown";
     }
+}
+
+std::string_view EncoderFailureStageName(EncoderFailureStage stage) noexcept {
+    switch (stage) {
+    case EncoderFailureStage::Preflight: return "preflight";
+    case EncoderFailureStage::InitParameters: return "init_parameters";
+    case EncoderFailureStage::InitTopology: return "init_topology";
+    case EncoderFailureStage::Initialization: return "initialization";
+    case EncoderFailureStage::RateUpdate: return "rate_update";
+    case EncoderFailureStage::Encode: return "encode";
+    case EncoderFailureStage::OutputValidation: return "output_validation";
+    case EncoderFailureStage::Retirement: return "retirement";
+    case EncoderFailureStage::InitProfileLevel: return "init_profile_level";
+    case EncoderFailureStage::InitLevelConstraints: return "init_level_constraints";
+    case EncoderFailureStage::RateLevelConstraints: return "rate_level_constraints";
+    }
+    return "unknown";
 }
 
 static_assert(sizeof(Event) * kQueueEvents <= kQueueBytes);

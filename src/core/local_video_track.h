@@ -35,6 +35,7 @@ public:
     void set_publish_options(const VideoPublishOptions& options);
     VideoPublishOptions publish_options() const { std::lock_guard lock(options_mutex_); return publish_options_; }
     VideoPublishOptions requested_publish_options() const { std::lock_guard lock(options_mutex_); return requested_publish_options_; }
+    uint64_t publish_options_revision() const { std::lock_guard lock(options_mutex_); return publish_options_revision_; }
     void SetScreenShareProfile(ScreenShareFrameProfile profile);
     std::optional<ScreenShareFrameProfile> screen_share_profile() const {
         std::lock_guard lock(options_mutex_); return screen_profile_;
@@ -50,6 +51,13 @@ public:
         int height,
         const VideoPublishOptions& requested_options,
         const std::vector<std::string>& local_sender_codecs,
+        const std::vector<std::string>& server_enabled_codecs,
+        bool prefer_hardware_h264 = false);
+    static ResolvedVideoPublishPlan ResolveHardwarePreflightFallback(
+        int width,
+        int height,
+        const ResolvedVideoPublishPlan& original_plan,
+        const std::vector<std::string>& local_sender_codecs,
         const std::vector<std::string>& server_enabled_codecs);
     static std::vector<VideoLayerSetting> ComputeSignalLayers(
         const SimulcastCodecSpec& spec);
@@ -64,6 +72,7 @@ private:
     VideoPublishOptions requested_publish_options_;
     VideoPublishOptions publish_options_;
     mutable std::mutex options_mutex_;
+    uint64_t publish_options_revision_ = 1;
     std::optional<ScreenShareFrameProfile> screen_profile_;
 };
 

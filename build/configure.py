@@ -160,6 +160,8 @@ def main():
                         help="Linux Qt 5.15.18 installation prefix")
     parser.add_argument("--tdesktop-libs", type=str,
                         help="Windows TDesktop Libraries/win64 directory")
+    parser.add_argument("--deps-dir", type=str,
+                        help="Project-local dependency directory (default: ./deps)")
     parser.add_argument("--build-type", type=str, choices=["Debug", "Release", "RelWithDebInfo", "MinSizeRel"], help="CMake build type")
     dependency_mode = parser.add_mutually_exclusive_group()
     dependency_mode.add_argument(
@@ -181,6 +183,9 @@ def main():
     parser.add_argument(
         "--webrtc-archive", type=str,
         help="Pinned platform WebRTC archive passed to dependency preparation")
+    parser.add_argument(
+        "--no-repair", "--norepair", dest="no_repair", action="store_true",
+        help="Preserve existing mismatched dependencies and fail instead of replacing them")
 
     args, extra_cmake_args = parser.parse_known_args()
     if any(
@@ -191,10 +196,10 @@ def main():
             "--tdesktop-dir was removed because the project always uses the "
             "in-tree TDesktop sources.")
     preparation_inputs = (
-        args.qt_archive, args.libraries_src, args.webrtc_archive)
+        args.qt_archive, args.libraries_src, args.webrtc_archive, args.no_repair)
     if any(preparation_inputs) and not args.prepare_deps:
         configuration_error(
-            "Dependency archive/source options require --prepare-deps.")
+            "Dependency archive/source and --no-repair options require --prepare-deps.")
     if is_windows and args.vcpkg_only:
         configuration_error("--vcpkg-only is currently available on Linux only.")
     if args.vcpkg_only and args.prepare_deps:
@@ -236,6 +241,8 @@ def main():
     cache_path = build_dir / "CMakeCache.txt"
     cached_definitions = {} if args.vcpkg_only else read_cmake_cache(cache_path)
     explicit_definitions = {}
+    if args.deps_dir:
+        explicit_definitions["DEPS_DIR"] = args.deps_dir
     if args.webrtc_root:
         explicit_definitions["WEBRTC_ROOT"] = args.webrtc_root
     if args.qt_root:
@@ -353,7 +360,7 @@ def main():
     print(f"Project Root    : {project_root}")
     print(f"Build Directory : {build_dir}")
 
-    local_deps_dir = deps_dir if is_linux else (project_root / "deps").resolve()
+    local_deps_dir = deps_dir
     local_webrtc_root = local_deps_dir / "webrtc"
     local_tdesktop_libs = local_deps_dir / "Libraries" / ("win64" if is_windows else "linux64")
     local_qt_root = (local_deps_dir / "Qt-5.15.18"
@@ -371,22 +378,24 @@ def main():
                 libraries_required_files.append(line)
         libraries_required_files = tuple(libraries_required_files)
     else:
-        webrtc_required_files = (
-            "include/api/peer_connection_interface.h",
-            "include/third_party/libyuv/include/libyuv.h",
-            "generated/Release/build/chromeos_buildflags.h",
-            "generated/Debug/build/chromeos_buildflags.h",
-            "prefix/Release/boringssl_prefix_symbols.h",
-            "prefix/Debug/boringssl_prefix_symbols.h",
-            "lib/Release/libwebrtc.a",
-            "lib/Debug/libwebrtc.a")
-        libraries_required_files = (
-            "lib/cmake/Qt5/Qt5Config.cmake",
-            "lib/libQt5Core.a",
-            "lib/libQt5Gui.a",
-            "lib/libQt5Widgets.a",
-            "lib/libQt5Network.a",
-            "lib/libQt5Svg.a")
+        linux_metadata_path = (
+            project_root / "build" / "prepare" / "linux-packages.json")
+        try:
+            linux_metadata = json.loads(
+                linux_metadata_path.read_text(encoding="utf-8"))
+            webrtc_required_files = tuple(
+                linux_metadata["webrtc"]["required_files"].keys())
+            libraries_required_files = tuple(
+                linux_metadata["qt"]["required_files"].keys())
+        except (OSError, json.JSONDecodeError, KeyError, TypeError,
+                AttributeError) as exception:
+            configuration_error(
+                f"Unable to read Linux dependency metadata {linux_metadata_path}: "
+                f"{exception}")
+        if not webrtc_required_files or not libraries_required_files:
+            configuration_error(
+                f"Linux dependency metadata {linux_metadata_path} has an empty "
+                "required_files list.")
 
     def libraries_are_complete(root):
         return all(
@@ -427,7 +436,7 @@ def main():
         prep_cmd = [
             sys.executable,
             str(project_root / "build" / "prepare" / "prepare.py")]
-        if is_linux and deps_dir != (project_root / "deps").resolve():
+        if deps_dir != (project_root / "deps").resolve():
             prep_cmd.extend(["--deps-dir", str(deps_dir)])
         if qt_archive:
             prep_cmd.extend(["--qt-archive", str(qt_archive)])
@@ -435,6 +444,8 @@ def main():
             prep_cmd.extend(["--libraries-src", str(libraries_source)])
         if webrtc_archive:
             prep_cmd.extend(["--webrtc-archive", str(webrtc_archive)])
+        if args.no_repair:
+            prep_cmd.append("--no-repair")
         print("\n[INFO] Preparing project-local dependencies:")
         print(f"  {format_command(prep_cmd)}\n")
         sys.stdout.flush()
@@ -488,6 +499,8 @@ def main():
         else:
             cmd.append(f"-DCMAKE_BUILD_TYPE={args.build_type}")
 
+    if args.deps_dir:
+        cmd.append(f"-DDEPS_DIR={deps_dir}")
     if args.webrtc_root:
         cmd.append(f"-DWEBRTC_ROOT={webrtc_root}")
     if is_linux:

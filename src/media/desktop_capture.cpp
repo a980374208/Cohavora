@@ -1,4 +1,5 @@
 #include "desktop_capture.h"
+#include "d3d11_nv12_frame_buffer.h"
 #include "screen_display_identity.h"
 #include <limits>
 
@@ -10,6 +11,7 @@
 #include "modules/desktop_capture/win/screen_capturer_win_directx.h"
 #include "screen_capture_fallback.h"
 #include "libyuv/convert.h"
+#include "libyuv/convert_from_argb.h"
 #include "libyuv/scale.h"
 #include <windows.h>
 #include <wtsapi32.h>
@@ -259,11 +261,18 @@ public:
                         : IsOwnedWgcSupported(source.kind));
                 auto capturer = window && wgc_supported &&
                     !probe_.use_legacy_wgc_window
-                    ? CreateOwnedWgcWindowCapturer([this](auto phase) { Notify(phase); })
+                    ? CreateOwnedWgcWindowGpuCapturer([this](auto phase) { Notify(phase); })
                     : (window ? MakeCapturer(source.kind, wgc_supported) : nullptr);
                 if (!window) {
                     capturer = std::make_unique<ScreenCaptureFallback>(
                         std::vector<ScreenCaptureFallback::Backend>{
+                            {[this]() -> std::unique_ptr<webrtc::DesktopCapturer> {
+                                if (probe_.simulate_dxgi_unsupported ||
+                                    !webrtc::ScreenCapturerWinDirectx::IsSupported()) return nullptr;
+                                return InjectCaptureFailure(
+                                    CreateOwnedDxgiScreenGpuCapturer(),
+                                    probe_.simulate_dxgi_failure_after_frames);
+                            }},
                             {[this]() -> std::unique_ptr<webrtc::DesktopCapturer> {
                                 if (probe_.simulate_dxgi_unsupported ||
                                     !webrtc::ScreenCapturerWinDirectx::IsSupported()) return nullptr;
@@ -273,7 +282,7 @@ public:
                             }},
                             {[this, wgc_supported]() -> std::unique_ptr<webrtc::DesktopCapturer> {
                                 return wgc_supported
-                                    ? InjectCaptureFailure(CreateOwnedWgcScreenCapturer(
+                                    ? InjectCaptureFailure(CreateOwnedWgcScreenGpuCapturer(
                                         [this](auto phase) { Notify(phase); }), probe_.simulate_wgc_failure_after_frames) : nullptr;
                             }, true},
                             {[] { return MakeCapturer(DesktopSourceKind::Screen); }, true}
@@ -356,6 +365,7 @@ public:
         if (joined) Notify(DesktopCaptureProbePhase::Joined);
         frame_ = {};
         ended_ = {};
+        gpu_converter_.reset();
         converted_.reset();
         scaled_.reset();
         last_applied_.reset();
@@ -386,6 +396,7 @@ private:
                 if (probe_.on_conversion_timing) probe_.on_conversion_timing((NowNs()-started)/1000);
             }
         } catch (...) { Fail(CaptureFailure::ConversionException); }
+        gpu_converter_.reset();
     }
     void Notify(DesktopCaptureProbePhase phase, std::uint32_t capturer_id = 0) noexcept {
         if (!probe_.on_event) return;
@@ -410,11 +421,12 @@ private:
         }
         if (result != webrtc::DesktopCapturer::Result::SUCCESS || !frame) return;
         if (probe_.on_capture_timing) backend_time_us_ = std::max<int64_t>(0,frame->capture_time_ms()) * 1000;
-        observed_backend.store(frame->capturer_id(), std::memory_order_relaxed);
+        const std::uint32_t raw_capturer_id = frame->capturer_id() & ~kD3d11TextureDesktopFrameCapturerIdBit;
+        observed_backend.store(raw_capturer_id, std::memory_order_relaxed);
         observed_frames.fetch_add(1, std::memory_order_relaxed);
-        if (!backend_seen_ || frame->capturer_id() != backend_id_) {
+        if (!backend_seen_ || raw_capturer_id != backend_id_) {
             backend_seen_ = true;
-            backend_id_ = frame->capturer_id();
+            backend_id_ = raw_capturer_id;
             Notify(DesktopCaptureProbePhase::BackendFrame, backend_id_);
         }
         const int w = frame->size().width(), h = frame->size().height();
@@ -444,28 +456,58 @@ private:
         const auto& frame = pending.frame;
         const auto& profile = pending.profile;
         const int w = frame->size().width(), h = frame->size().height();
-        if (!converted_ || converted_->width() != w || converted_->height() != h)
-            converted_ = VideoFrame::create(w, h, VideoBufferType::I420);
+
+        if (const auto* gpu_frame = D3d11TextureDesktopFrame::FromDesktopFrame(frame.get())) {
+            if (!gpu_converter_ || gpu_converter_->device() != gpu_frame->device()) {
+                gpu_converter_ = std::make_unique<D3d11VideoProcessorConverter>(
+                    gpu_frame->device(),
+                    gpu_frame->adapter_luid(),
+                    gpu_frame->device_context_mutex());
+            }
+            if (auto gpu_nv12 = gpu_converter_->ConvertAndScale(
+                    gpu_frame->texture(), w, h, profile.width, profile.height)) {
+                VideoFrame delivered_gpu(std::move(gpu_nv12), VideoBufferType::NV12);
+                last_frame_ns_.store(NowNs(), std::memory_order_relaxed);
+                if (!stopped_.load(std::memory_order_acquire) && frame_) {
+                    frame_(delivered_gpu);
+                    if (!stopped_.load(std::memory_order_acquire) &&
+                        (!last_applied_ || *last_applied_ != profile)) {
+                        last_applied_ = profile;
+                        if (pending.applied) pending.applied(profile);
+                    }
+                }
+                return;
+            }
+            // If GPU VideoProcessor conversion fails on this adapter, ensure CPU BGRA
+            // bytes are mapped before falling back to the Phase 1 libyuv path.
+            gpu_frame->EnsureCpuData();
+        }
+
+        if (!converted_ || converted_->width() != w || converted_->height() != h ||
+                converted_->type() != VideoBufferType::NV12) {
+            converted_ = VideoFrame::createUninit(w, h, VideoBufferType::NV12);
+        }
         auto& output = *converted_;
-        const int cw = (w + 1) / 2, ch = (h + 1) / 2;
+        const int uv_stride = ((w + 1) / 2) * 2;
         auto* y = output.data();
-        auto* u = y + w * h;
-        auto* v = u + cw * ch;
+        auto* uv = y + static_cast<std::size_t>(w) * h;
         // DesktopFrame BGRA bytes are libyuv's little-endian ARGB input.
-        if (libyuv::ARGBToI420(frame->data(), frame->stride(), y, w, u, cw, v, cw, w, h) != 0) {
+        if (libyuv::ARGBToNV12(frame->data(), frame->stride(), y, w, uv, uv_stride, w, h) != 0) {
             Fail(CaptureFailure::Conversion);
             return;
         }
         const VideoFrame* delivered = &output;
         if (profile.width != w || profile.height != h) {
             const int dw = profile.width, dh = profile.height;
-            if (!scaled_ || scaled_->width() != dw || scaled_->height() != dh)
-                scaled_ = VideoFrame::create(dw, dh, VideoBufferType::I420);
+            if (!scaled_ || scaled_->width() != dw || scaled_->height() != dh ||
+                    scaled_->type() != VideoBufferType::NV12) {
+                scaled_ = VideoFrame::createUninit(dw, dh, VideoBufferType::NV12);
+            }
+            const int duv_stride = ((dw + 1) / 2) * 2;
             auto* dy = scaled_->data();
-            auto* du = dy + dw * dh;
-            auto* dv = du + (dw / 2) * (dh / 2);
-            if (libyuv::I420Scale(y,w,u,cw,v,cw,w,h,
-                    dy,dw,du,dw/2,dv,dw/2,dw,dh,libyuv::kFilterBox) != 0) {
+            auto* duv = dy + static_cast<std::size_t>(dw) * dh;
+            if (libyuv::NV12Scale(y, w, uv, uv_stride, w, h,
+                    dy, dw, duv, duv_stride, dw, dh, libyuv::kFilterBox) != 0) {
                 Fail(CaptureFailure::Scaling);
                 return;
             }
@@ -492,6 +534,7 @@ private:
     int source_width_ = 0, source_height_ = 0; // wait_mutex_
     QualityCallback requested_callback_, active_callback_;
     std::optional<ScreenShareFrameProfile> last_applied_; // converter only
+    std::unique_ptr<D3d11VideoProcessorConverter> gpu_converter_; // converter only
     std::optional<VideoFrame> converted_, scaled_; // converter-owned reusable buffers
     FrameCallback frame_;
     EndCallback ended_;

@@ -3,14 +3,14 @@
 #include "src/net/service_endpoint_policy.h"
 
 #include <QtCore/QJsonDocument>
+#ifdef Q_OS_LINUX
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
-#include <QtCore/QUrl>
 #include <unordered_map>
-#ifdef Q_OS_LINUX
 #include "src/net/linux_secret_service.h"
 #endif
+#include <QtCore/QUrl>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <dpapi.h>
@@ -20,6 +20,7 @@
 
 namespace OpenMeeting {
 
+#ifdef Q_OS_LINUX
 struct CredentialStore::AsyncAdapter {
     struct Pending { bool cancelled = false; };
     std::unique_ptr<QObject> dispatcher = std::make_unique<QObject>();
@@ -47,8 +48,12 @@ struct CredentialStore::AsyncAdapter {
 };
 
 CredentialStore::CredentialStore() : adapter_(std::make_unique<AsyncAdapter>()) {}
+#else
+CredentialStore::CredentialStore() = default;
+#endif
 CredentialStore::~CredentialStore() = default;
 
+#ifdef Q_OS_LINUX
 CredentialStore::RequestId CredentialStore::loadAsync(const QString &service,
         const QString &account, Interaction, QObject *context, LoadCompletion completion) {
     return adapter_->post(context, [this, service, account, completion = std::move(completion)](bool cancelled) mutable {
@@ -67,7 +72,7 @@ CredentialStore::RequestId CredentialStore::saveAsync(StoredSession session,
 
 CredentialStore::RequestId CredentialStore::clearAsync(QObject *context, StatusCompletion completion) {
     Q_ASSERT(QThread::currentThread() == adapter_->dispatcher->thread());
-    // Keep DPAPI/legacy revocation's original same-thread commit boundary.
+    // Keep legacy revocation's original same-thread commit boundary.
     // Cancellation may suppress notification, never the logout tombstone.
     const auto result = clear();
     return adapter_->post(context, [result, completion = std::move(completion)](bool cancelled) mutable {
@@ -90,6 +95,7 @@ void CredentialStore::shutdownAsync(QObject *context, std::function<void()> comp
         if (completion) completion();
     });
 }
+#endif
 
 namespace {
 constexpr auto kRecord = "auth/protectedSessionV2";

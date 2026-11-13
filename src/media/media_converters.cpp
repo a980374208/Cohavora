@@ -1,4 +1,5 @@
 #include "media_converters.h"
+#include "libyuv/planar_functions.h"
 #include <cguid.h>
 #include <algorithm>
 #include <cmath>
@@ -213,24 +214,9 @@ void MediaConverters::ConvertYUY2ToNV12(const uint8_t* yuy2, uint8_t* nv12, int 
     if (!yuy2 || !nv12 || width <= 0 || height <= 0) return;
 
     uint8_t* y_plane = nv12;
-    uint8_t* uv_plane = nv12 + (width * height);
-
-    for (int y = 0; y < height; ++y) {
-        const uint8_t* p_src = yuy2 + (y * width * 2);
-        uint8_t* p_y = y_plane + (y * width);
-        uint8_t* p_uv = uv_plane + ((y / 2) * width);
-
-        for (int x = 0; x < width; x += 2) {
-            p_y[x]     = p_src[0]; // Y0
-            p_y[x + 1] = p_src[2]; // Y1
-
-            if ((y % 2) == 0) {
-                p_uv[x]     = p_src[1]; // U
-                p_uv[x + 1] = p_src[3]; // V
-            }
-            p_src += 4;
-        }
-    }
+    uint8_t* uv_plane = nv12 + (static_cast<std::size_t>(width) * height);
+    const int uv_stride = ((width + 1) / 2) * 2;
+    libyuv::YUY2ToNV12(yuy2, width * 2, y_plane, width, uv_plane, uv_stride, width, height);
 }
 
 void MediaConverters::ConvertRGB24ToRGBA(const uint8_t* rgb24, uint8_t* rgba, int width, int height, bool flip_v) {
