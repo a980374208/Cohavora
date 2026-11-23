@@ -18,6 +18,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -1414,6 +1415,7 @@ public:
 
     AMF_RESULT TerminateEncoder() {
         if (encoder_ && !encoder_terminated_) {
+            (void)encoder_->Flush();
             encoder_termination_result_ = encoder_->Terminate();
             encoder_terminated_ = true;
         }
@@ -1422,7 +1424,8 @@ public:
 
     Status Open(IDXGIAdapter1* adapter,
                 const DXGI_ADAPTER_DESC& adapter_desc,
-                AmfCapability* capability) {
+                AmfCapability* capability,
+                ID3D11Device* external_device = nullptr) {
         Close();
         adapter_luid_ = adapter_desc.AdapterLuid;
         module_ = LoadLibraryExW(
@@ -1457,18 +1460,27 @@ public:
             return Fail(capability, Status::kUnavailable,
                         AmfFailure("AMFInit", result));
         }
-        D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
-        const D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_1,
-                                               D3D_FEATURE_LEVEL_11_0};
-        const HRESULT created = D3D11CreateDevice(
-            adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            requested, static_cast<UINT>(std::size(requested)),
-            D3D11_SDK_VERSION, &device_, &level, &device_context_);
-        if (FAILED(created)) {
-            return Fail(capability, Status::kUnavailable,
-                        "AMD D3D11 hardware device creation failed, HRESULT=" +
-                            std::to_string(static_cast<std::uint32_t>(created)));
+        if (external_device) {
+            device_ = external_device;
+            device_->GetImmediateContext(&device_context_);
+            if (!device_context_) {
+                return Fail(capability, Status::kUnavailable,
+                            "AMD external D3D11 immediate context unavailable");
+            }
+        } else {
+            D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+            const D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_1,
+                                                   D3D_FEATURE_LEVEL_11_0};
+            const HRESULT created = D3D11CreateDevice(
+                adapter, D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                requested, static_cast<UINT>(std::size(requested)),
+                D3D11_SDK_VERSION, &device_, &level, &device_context_);
+            if (FAILED(created)) {
+                return Fail(capability, Status::kUnavailable,
+                            "AMD D3D11 hardware device creation failed, HRESULT=" +
+                                std::to_string(static_cast<std::uint32_t>(created)));
+            }
         }
         ComPtr<ID3D10Multithread> mt;
         if (SUCCEEDED(device_.As(&mt)) && mt) {
@@ -1722,7 +1734,11 @@ public:
     Status LastCloseStatus() const { return last_close_status_; }
 
     Status Open(const Config& config) {
-        Close();
+        return OpenInternal(config, /*preserve_external_device=*/false);
+    }
+
+    Status OpenInternal(const Config& config, bool preserve_external_device) {
+        CloseInternal(/*clear_external_device=*/!preserve_external_device);
         std::string retirement_reason;
         if (HardwareEncoderProbes().Check(HardwareEncoderVendor::kAmf,
                                           &retirement_reason) ==
@@ -1748,6 +1764,10 @@ public:
             }
         }
         config_ = config;
+        LUID external_luid{};
+        const bool has_external_luid =
+            preserve_external_device && external_device_ &&
+            QueryD3d11AdapterLuid(external_device_.Get(), &external_luid);
         ComPtr<IDXGIFactory1> factory;
         if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
             return Fail(Status::kUnavailable, "DXGI factory unavailable");
@@ -1765,9 +1785,16 @@ public:
             if (FAILED(adapter->GetDesc(&desc)) || desc.VendorId != kAmdVendor) {
                 continue;
             }
+            if (has_external_luid &&
+                (desc.AdapterLuid.LowPart != external_luid.LowPart ||
+                 desc.AdapterLuid.HighPart != external_luid.HighPart)) {
+                continue;
+            }
             found_amd = true;
             capability_ = DescribeAdapter(index, desc, codec_);
-            last_status = session_.Open(adapter.Get(), desc, &capability_);
+            last_status = session_.Open(
+                adapter.Get(), desc, &capability_,
+                has_external_luid ? external_device_.Get() : nullptr);
             if (last_status == Status::kOk) {
                 last_status = InitializeEncoder();
             } else {
@@ -1780,7 +1807,7 @@ public:
                 return Status::kOk;
             }
             const std::string operation_error = error_;
-            Close();
+            CloseInternal(/*clear_external_device=*/!preserve_external_device);
             if (retirement_failed_) {
                 return Fail(Status::kError, operation_error + "; " + close_error_);
             }
@@ -1813,7 +1840,7 @@ public:
                          << (codec_ == Codec::kH264 ? "H264" : "H265")
                          << " action=close_reinitialize bitrate="
                          << rates.bitrate_bps << " fps=" << rates.framerate_fps;
-        return Open(config);
+        return OpenInternal(config, /*preserve_external_device=*/static_cast<bool>(external_device_));
     }
 
     // Phase 2 GPU Native DX11 path: copies the GPU NV12 texture into a bounded
@@ -1846,6 +1873,37 @@ public:
                         "AMF DX11 adapter LUID mismatch with capture texture");
         }
 
+        // Rebind AMF onto the capture D3D11 device on the same AMD adapter so
+        // GPU copies stay same-device and avoid cross-device OpenSharedResource
+        // calls (which permanently accumulate per-texture WDDM DedicatedUsage
+        // counters on Windows/AMD even after both D3D11 devices close).
+        if (gpu_frame.device() &&
+            gpu_frame.device() != session_.device() &&
+            gpu_frame.device() != external_device_rejected_) {
+            const auto saved_next_pts = next_pts_;
+            external_device_ = gpu_frame.device();
+            external_device_context_mutex_ = gpu_frame.device_context_mutex();
+            const Status rebind_status =
+                OpenInternal(config_, /*preserve_external_device=*/true);
+            if (rebind_status == Status::kOk) {
+                next_pts_ = saved_next_pts;
+            } else {
+                if (retirement_failed_) {
+                    return Status::kRetirementFailed;
+                }
+                const ID3D11Device* rejected_device = gpu_frame.device();
+                external_device_.Reset();
+                external_device_context_mutex_.reset();
+                const Status fallback_status =
+                    OpenInternal(config_, /*preserve_external_device=*/false);
+                if (fallback_status != Status::kOk) {
+                    return fallback_status;
+                }
+                external_device_rejected_ = rejected_device;
+                next_pts_ = saved_next_pts;
+            }
+        }
+
         AMF_RESULT result = session_.encoder()->QueryOutput(&output_);
         if (output_ || (result != AMF_OK && result != AMF_REPEAT)) {
             return Abort(Status::kError,
@@ -1870,6 +1928,11 @@ public:
         src_box.back = 1;
 
         if (gpu_frame.device() == session_.device()) {
+            const auto ctx_mutex = gpu_frame.device_context_mutex();
+            std::unique_lock<std::mutex> ctx_lock;
+            if (ctx_mutex) {
+                ctx_lock = std::unique_lock<std::mutex>(*ctx_mutex);
+            }
             session_.device_context()->CopySubresourceRegion(
                 slot->dx11_texture.Get(), 0, 0, 0, 0,
                 gpu_frame.texture(), 0, &src_box);
@@ -1964,6 +2027,10 @@ public:
     }
 
     void Close() {
+        CloseInternal(/*clear_external_device=*/true);
+    }
+
+    void CloseInternal(bool clear_external_device) {
         initialized_ = false;
         session_.TerminateEncoder();
         buffer_.Release();
@@ -1971,6 +2038,11 @@ public:
         input_.Release();
         for (auto& entry : shared_cache_) {
             entry = {};
+        }
+        if (InputsRetired() && slots_) {
+            for (auto& slot : *slots_) {
+                slot.dx11_texture.Reset();
+            }
         }
         std::string failure;
         const Status result = session_.Close(&failure, false);
@@ -1992,6 +2064,11 @@ public:
                 slot.pixels.clear();
                 slot.dx11_texture.Reset();
             }
+        }
+        if (clear_external_device) {
+            external_device_.Reset();
+            external_device_context_mutex_.reset();
+            external_device_rejected_ = nullptr;
         }
         if (retirement_failed_) {
             error_ = close_error_;
@@ -2618,6 +2695,9 @@ private:
         std::make_unique<std::array<InputSlot, kInputSlots>>();
     std::array<SharedTextureCacheEntry, 8> shared_cache_{};
     std::size_t shared_cache_write_index_ = 0;
+    ComPtr<ID3D11Device> external_device_;
+    std::shared_ptr<std::mutex> external_device_context_mutex_;
+    const ID3D11Device* external_device_rejected_ = nullptr;
     AmfSession session_;
     AMFSurfacePtr input_;
     AMFDataPtr output_;
@@ -2680,6 +2760,7 @@ public:
             return Status::kUnavailable;
         }
         first_frame_ = true;
+        bound_external_device_ = nullptr;
         const Status status = Consume(worker_->Invoke(
             [config](D3d11AmfBackend& backend) {
                 return Snapshot(backend, backend.Open(config));
@@ -2707,7 +2788,15 @@ public:
                   int width, int height, std::uint64_t frame_id,
                   bool force_key_frame, Packet* packet) {
         if (!worker_ || retirement_failed_) return Status::kRetirementFailed;
-        const auto budget = first_frame_ ? kFirstFrameBudget : kFrameBudget;
+        const ID3D11Device* incoming_device = nullptr;
+        if (const auto* native =
+                D3d11Nv12FrameBuffer::FromVideoFrameBuffer(source.get())) {
+            incoming_device = native->device();
+        }
+        const bool needs_device_rebind =
+            incoming_device != nullptr && incoming_device != bound_external_device_;
+        const auto budget =
+            (first_frame_ || needs_device_rebind) ? kFirstFrameBudget : kFrameBudget;
         // Native and host fallback share this deadline, including GPU mapping.
         const auto deadline = Clock::now() + budget;
         auto reply = worker_->Invoke(
@@ -2774,11 +2863,15 @@ public:
                 return result;
             }, budget + kWorkerReplySlack);
         const Status status = Consume(std::move(reply), "Encode", packet);
-        if (status == Status::kOk) first_frame_ = false;
+        if (status == Status::kOk) {
+            first_frame_ = false;
+            if (incoming_device) bound_external_device_ = incoming_device;
+        }
         return status;
     }
 
     void Close() {
+        bound_external_device_ = nullptr;
         if (!worker_) return;
         // Close is ordered after the active request. Never release its resources
         // from the calling encoder sequence or join a blocked vendor thread.
@@ -2831,6 +2924,7 @@ private:
     Status last_close_status_ = Status::kOk;
     bool retirement_failed_ = false;
     bool first_frame_ = true;
+    const ID3D11Device* bound_external_device_ = nullptr;
 };
 
 std::uint8_t NegotiatedLevel(const webrtc::SdpVideoFormat& format) {
@@ -3299,10 +3393,41 @@ void ResetD3d11AmfEncoderDiagnostics() noexcept {
     g_cross_device_shared_opens.store(0, std::memory_order_relaxed);
 }
 
+namespace {
+
+// Peer answers commonly negotiate H.264 Constrained Baseline (42e0xx). AMF's
+// D3D11 wrapper configures Baseline without B-frames, FMO, ASO, or CABAC,
+// producing compliant bitstreams while retaining the negotiated level on
+// D3d11AmfVideoEncoder for strict constraint enforcement.
+webrtc::SdpVideoFormat NormalizeAmfH264ProbeFormat(
+    const webrtc::SdpVideoFormat& format) {
+    if (webrtc::PayloadStringToCodecType(format.name) !=
+        webrtc::kVideoCodecH264) {
+        return format;
+    }
+    const auto mode = format.parameters.find("packetization-mode");
+    const auto profile = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+    if (mode == format.parameters.end() || mode->second != "1" || !profile ||
+        profile->profile != webrtc::H264Profile::kProfileConstrainedBaseline ||
+        profile->level == webrtc::H264Level::kLevel1_b) {
+        return format;
+    }
+    const auto normalized_plid = webrtc::H264ProfileLevelIdToString(
+        webrtc::H264ProfileLevelId(webrtc::H264Profile::kProfileBaseline,
+                                   profile->level));
+    if (!normalized_plid) return format;
+    auto probe_format = format;
+    probe_format.parameters["profile-level-id"] = *normalized_plid;
+    return probe_format;
+}
+
+}  // namespace
+
 std::unique_ptr<webrtc::VideoEncoder> CreateD3d11AmfHardwareEncoder(
     const webrtc::SdpVideoFormat& format,
     webrtc::BackendFailurePolicy failure_policy) {
-    if (!webrtc::IsBackendH264FormatSupported(format) &&
+    const auto probe_format = NormalizeAmfH264ProbeFormat(format);
+    if (!webrtc::IsBackendH264FormatSupported(probe_format) &&
         !webrtc::IsBackendH265FormatSupported(format)) {
         return nullptr;
     }
@@ -3319,9 +3444,10 @@ std::unique_ptr<webrtc::VideoEncoder> CreateD3d11AmfVideoEncoder(
     const webrtc::SdpVideoFormat& format,
     webrtc::external_encoder::Status* probe_status) {
 #if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+    const auto probe_format = NormalizeAmfH264ProbeFormat(format);
     std::string reason;
     const auto status =
-        webrtc::ProbeAmfVideoEncoderAvailability(format, &reason);
+        webrtc::ProbeAmfVideoEncoderAvailability(probe_format, &reason);
     if (probe_status) *probe_status = status;
     if (status != Status::kOk) {
         RTC_LOG(LS_WARNING)

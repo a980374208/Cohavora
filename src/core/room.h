@@ -342,6 +342,8 @@ public:
     // Call from the session owner, then project a value-only snapshot to UI.
     std::optional<MediaEncryptionStatus> ReadMediaEncryptionStatus(uint64_t expected_generation) const;
 
+    asio::awaitable<ScreenShareFrameProfile> ConstrainScreenShareProfileAsync(
+        std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
     asio::awaitable<void> ApplyScreenShareSenderParametersAsync(
         std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
     asio::awaitable<void> SyncScreenShareMetadataAsync(
@@ -618,6 +620,11 @@ private:
     asio::awaitable<void> ApplyPublishedSenderScalabilityModesAsync(
         PublishedSenderBundle bundle,
         uint64_t generation);
+    asio::awaitable<void> ReconcileNegotiatedVideoSendersAsync(
+        PublishedSenderBundle bundle,
+        VideoPublishOptions options,
+        uint64_t generation,
+        std::shared_ptr<LocalVideoTrack> track);
     asio::awaitable<void> ValidateFinalVideoSendersAsync(
         PublishedSenderBundle bundle,
         VideoPublishOptions options,

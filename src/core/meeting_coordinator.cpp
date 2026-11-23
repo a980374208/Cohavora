@@ -163,7 +163,16 @@ livekit::SignalOptions ProductionMeetingSignalOptions(
     livekit::SignalOptions options;
     options.auto_subscribe = false;
     options.adaptive_stream = true;
-    options.connect_timeout = std::chrono::seconds(10);
+    // Protect WAN/proxy sessions against >10s transient signaling/ICE stalls.
+    options.connect_timeout = std::chrono::seconds(15);
+    options.reconnect_timeout = std::chrono::seconds(15);
+    options.timeouts.peer_connection = std::chrono::seconds(25);
+    options.timeouts.negotiation = std::chrono::seconds(25);
+    options.timeouts.publish = std::chrono::seconds(25);
+    options.timeouts.reconnect_attempt = std::chrono::seconds(35);
+    options.timeouts.reconnect_total = std::chrono::seconds(90);
+    // Recover from transient pre-upgrade proxy/WAN socket drops when endpoint validation holds.
+    options.initial_connect_retries = 2;
     options.allow_insecure_transport = allowInsecureTransport;
     return options;
 }
@@ -4562,7 +4571,7 @@ void MeetingCoordinator::applyScreenShareSnapshotOnUiThread(uint64_t generation,
     _screenShareSnapshot = snapshot;
     if (snapshot.state == livekit::ScreenShareState::Active && snapshot.applied_quality &&
         snapshot.quality_status == livekit::ScreenShareQualityStatus::Applied) {
-        const auto quality = snapshot.applied_quality->quality;
+        const auto quality = snapshot.requested_quality;
         auto prefs = _sessionManager.mediaPreferences();
         if (prefs.screenShareResolution != static_cast<int>(quality.resolution) || prefs.screenShareFps != quality.fps) {
             prefs.screenShareResolution = static_cast<int>(quality.resolution);

@@ -2,8 +2,11 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
+#include <utility>
 
 #include "api/video_codecs/h264_profile_level_id.h"
+#include "media/screen_share_quality.h"
 
 namespace livekit::detail {
 
@@ -73,6 +76,49 @@ inline H264LevelConstraintStatus CheckH264LevelConstraints(
         return Status::Supported;
     }
     return Status::UnsupportedLevel;
+}
+
+inline std::optional<std::pair<int, int>> ConstrainH264Dimensions(
+        webrtc::H264Level level, int width, int height, std::uint32_t fps) {
+    if (width < 2 || height < 2 || width > 16384 || height > 16384 || !fps)
+        return std::nullopt;
+    // Preserve aspect and frame rate, shrinking only the longer dimension.
+    // The actual negotiated sender format is still validated independently.
+    const bool landscape = width >= height;
+    const int longest = landscape ? width : height;
+    for (int bound = longest & ~1; bound >= 2; bound -= 2) {
+        const int w = landscape ? bound : int(std::int64_t(width) * bound / height) & ~1;
+        const int h = landscape ? int(std::int64_t(height) * bound / width) & ~1 : bound;
+        if (w < 2 || h < 2) break;
+        if (CheckH264LevelConstraints(level, w, h, fps) == H264LevelConstraintStatus::Supported)
+            return std::pair{w, h};
+    }
+    return std::nullopt;
+}
+
+inline std::optional<ScreenShareFrameProfile> ConstrainH264ScreenShareProfile(
+        const ScreenShareFrameProfile& requested, webrtc::H264Level level) {
+    if (!requested.quality.valid() || requested.width < 2 || requested.height < 2)
+        return std::nullopt;
+    const auto legal = [&](const ScreenShareFrameProfile& profile) {
+        return profile.width <= requested.width && profile.height <= requested.height &&
+            CheckH264LevelConstraints(level, profile.width, profile.height,
+                profile.quality.fps) == H264LevelConstraintStatus::Supported;
+    };
+    const auto original = ResolveScreenShareProfile(requested.source_width,
+        requested.source_height, requested.quality, requested.revision);
+    if (!original) return std::nullopt;
+    if (original->width == requested.width && original->height == requested.height && legal(requested))
+        return requested;
+    for (const auto mode : {ScreenShareResolution::P2160, ScreenShareResolution::P1440,
+                           ScreenShareResolution::P1080, ScreenShareResolution::P720}) {
+        auto quality = requested.quality;
+        quality.resolution = mode;
+        const auto profile = ResolveScreenShareProfile(requested.source_width,
+            requested.source_height, quality, requested.revision);
+        if (profile && legal(*profile)) return profile;
+    }
+    return std::nullopt;
 }
 
 } // namespace livekit::detail

@@ -95,6 +95,28 @@ bool IsTelemetryRunActive(const std::filesystem::path& root,
 TelemetryCheckpointRecord MakeTelemetryCheckpointRecord(
     const SafeTelemetryRecord& record);
 
+struct TelemetryCheckpointVerifiedSegment {
+    std::string file;
+    std::uint64_t size_bytes = 0;
+};
+
+struct TelemetryCheckpointVerifiedState {
+    std::string anonymous_session_id;
+    std::string process_run_id;
+    std::string manifest_bytes;
+    std::vector<TelemetryCheckpointVerifiedSegment> segments;
+    TelemetryCheckpointStatus status;
+};
+
+bool TryVerifyTelemetryCheckpointFromState(
+    const std::filesystem::path& report_directory,
+    const TelemetryCheckpointVerifiedState& verified_state);
+
+bool CaptureVerifiedTelemetryCheckpointState(
+    const std::filesystem::path& report_directory,
+    const TelemetryCheckpointStatus& status,
+    TelemetryCheckpointVerifiedState* verified_state);
+
 TelemetryCheckpointStatus InspectTelemetryCheckpoint(
     const std::filesystem::path& report_directory,
     TelemetryCheckpointWork* work = nullptr);
@@ -108,6 +130,16 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
     std::uint64_t maximum_history_bytes = 100ull * 1024ull * 1024ull,
     const TelemetryCheckpointControl* control = nullptr,
     TelemetryCheckpointWork* work = nullptr);
+TelemetryCheckpointResult AppendTelemetryCheckpoint(
+    const std::filesystem::path& root,
+    std::string_view anonymous_session_id,
+    const std::vector<TelemetryCheckpointRecord>& records,
+    std::uint64_t maximum_report_bytes,
+    std::string_view process_run_id,
+    std::uint64_t maximum_history_bytes,
+    const TelemetryCheckpointControl* control,
+    TelemetryCheckpointWork* work,
+    TelemetryCheckpointVerifiedState* verified_state);
 TelemetryCheckpointResult AppendTelemetryCheckpoint(
     const std::filesystem::path& root,
     const std::vector<SafeTelemetryRecordPtr>& records,

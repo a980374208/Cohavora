@@ -75,6 +75,7 @@ struct ScreenShareSession::Run {
     bool published = false;
     bool driving = false;
     ScreenShareQuality requested;
+    ScreenShareQuality applied_request;
     std::optional<ScreenShareFrameProfile> applied;
     std::optional<ScreenShareFrameProfile> delivered; // delivery mutex, bounded mailbox
     uint64_t revision = 1;
@@ -154,6 +155,11 @@ ScreenShareSession::Backend ScreenShareSession::ForRoom(const std::shared_ptr<Ro
                 return;
             }
         }
+    };
+    backend.resolve_quality = [weak](auto track, auto profile) -> asio::awaitable<ScreenShareFrameProfile> {
+        auto room = weak.lock();
+        if (!room) throw std::runtime_error("screen room retired");
+        co_return co_await room->ConstrainScreenShareProfileAsync(std::move(track), profile);
     };
     backend.apply_quality = [weak](auto track, auto profile) -> asio::awaitable<void> {
         auto room = weak.lock();
@@ -362,9 +368,65 @@ void ScreenShareSession::SetTransportReady(bool ready) {
     }
 }
 
+asio::awaitable<std::optional<ScreenShareFrameProfile>> ScreenShareSession::ApplyCaptureQuality(
+        std::shared_ptr<ScreenShareSession> self, std::shared_ptr<Run> run,
+        ScreenShareFrameProfile profile, uint64_t transport_revision, bool apply_sender) {
+    const auto revision = profile.revision;
+    const auto current = [&] {
+        return !self->closed_ && self->run_ == run && !run->stopping &&
+            run->revision == revision && self->transport_revision_ == transport_revision && self->transport_ready_;
+    };
+    const auto deadline = std::chrono::steady_clock::now() + self->backend_.first_frame_timeout;
+    auto callback = [weak = std::weak_ptr(run)](ScreenShareFrameProfile profile) {
+        if (auto run = weak.lock()) {
+            std::lock_guard lock(run->delivery);
+            if (run->accepting) run->delivered = profile;
+        }
+    };
+    for (;;) {
+        if (!current()) co_return std::nullopt;
+        auto effective = profile;
+        if (self->backend_.resolve_quality)
+            effective = co_await self->backend_.resolve_quality(run->track, profile);
+        if (!current()) co_return std::nullopt;
+        if (run->ended.load()) throw std::runtime_error("screen capture ended during quality update");
+        const auto expected = ResolveScreenShareProfile(
+            profile.source_width, profile.source_height, effective.quality, revision);
+        if (!expected || effective != *expected)
+            throw std::runtime_error("invalid effective screen profile");
+        if (apply_sender) {
+            co_await self->backend_.apply_quality(run->track, effective);
+            if (!current()) co_return std::nullopt;
+        }
+        std::optional<ScreenShareFrameProfile> latest;
+        { std::lock_guard lock(run->delivery); latest = run->delivered; }
+        if (!latest || *latest != effective) {
+            if (!run->capture || !run->capture->SetQuality(effective.quality, revision, callback))
+                throw std::runtime_error("capture rejected quality");
+        }
+        for (;;) {
+            if (!current()) co_return std::nullopt;
+            { std::lock_guard lock(run->delivery); latest = run->delivered; }
+            if (latest && latest->revision == revision && latest->quality == effective.quality) break;
+            if (run->ended.load() || std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("quality frame timeout");
+            run->timer.expires_after(20ms);
+            std::error_code error;
+            co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+        }
+        if (run->ended.load()) throw std::runtime_error("screen capture ended during quality update");
+        if (*latest == effective) co_return latest;
+        // Geometry can change while a quality operation waits for its frame.
+        // Re-resolve the delivered geometry, then align capture again if the
+        // negotiated codec requires another supported quality tier.
+        if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("quality geometry did not settle");
+        profile = *latest;
+    }
+}
+
 asio::awaitable<void> ScreenShareSession::ApplyQuality(std::shared_ptr<ScreenShareSession> self, std::shared_ptr<Run> run) {
     if (!run->applied || !run->capture) co_return;
     const auto previous = *run->applied;
+    const auto previous_request = run->applied_request;
     const auto revision = run->revision;
     const auto transport_revision = self->transport_revision_;
     const auto requested = run->requested;
@@ -375,31 +437,18 @@ asio::awaitable<void> ScreenShareSession::ApplyQuality(std::shared_ptr<ScreenSha
     bool failed = !target;
     bool uncertain = false;
     auto alive = [&] { return !self->closed_ && self->run_ == run && !run->stopping; };
-    auto callback = [weak = std::weak_ptr(run)](ScreenShareFrameProfile profile) {
-        if (auto run = weak.lock()) {
-            std::lock_guard lock(run->delivery);
-            if (run->accepting) run->delivered = profile;
-        }
-    };
     if (target) try {
-        co_await self->backend_.apply_quality(run->track, *target);
+        latest = co_await ApplyCaptureQuality(self, run, *target, transport_revision, true);
         if (!alive()) co_return;
-        if (!run->capture->SetQuality(requested, revision, callback)) throw std::runtime_error("capture rejected quality");
-        const auto deadline = std::chrono::steady_clock::now() + self->backend_.first_frame_timeout;
-        for (;;) {
-            if (!alive()) co_return;
-            { std::lock_guard lock(run->delivery); latest = run->delivered; }
-            if (latest && latest->revision == revision && latest->quality == requested) break;
-            if (run->ended.load() || std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("quality frame timeout");
-            run->timer.expires_after(20ms);
-            std::error_code error;
-            co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+        if (!latest) {
+            run->quality_dirty = true;
+            run->quality_status = ScreenShareQualityStatus::Pending;
+            self->SetState(ScreenShareState::Active);
+            co_return;
         }
-        if (latest->width != target->width || latest->height != target->height)
-            co_await self->backend_.apply_quality(run->track, *latest);
-        if (!alive()) co_return;
         run->track->SetScreenShareProfile(*latest);
         run->applied = latest;
+        run->applied_request = requested;
     } catch (const OperationError& error) {
         failed = true;
         uncertain = error.code() == OperationErrorCode::StateUncertain;
@@ -419,22 +468,21 @@ asio::awaitable<void> ScreenShareSession::ApplyQuality(std::shared_ptr<ScreenSha
         bool restored = !uncertain;
         const bool superseded = run->revision != revision;
         const auto recovery_revision = ++run->revision;
-        if (!superseded) run->requested = previous.quality;
+        if (!superseded) run->requested = previous_request;
         try {
-            co_await self->backend_.apply_quality(run->track, previous);
-            if (!alive()) co_return;
-            restored = run->capture->SetQuality(previous.quality, recovery_revision, callback) && restored;
-            const auto deadline = std::chrono::steady_clock::now() + self->backend_.first_frame_timeout;
-            while (restored && alive()) {
-                { std::lock_guard lock(run->delivery); latest = run->delivered; }
-                if (latest && latest->quality == previous.quality && latest->revision == recovery_revision) break;
-                if (run->ended.load() || std::chrono::steady_clock::now() >= deadline) { restored = false; break; }
-                run->timer.expires_after(20ms);
-                std::error_code error;
-                co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
-            }
+            auto recovery = previous;
+            recovery.revision = recovery_revision;
+            latest = co_await ApplyCaptureQuality(self, run, recovery, transport_revision, true);
+            restored = restored && latest && latest->quality == previous.quality &&
+                latest->width == previous.width && latest->height == previous.height;
         } catch (...) { restored = false; }
         if (!alive()) co_return;
+        if (transport_revision != self->transport_revision_) {
+            run->quality_dirty = true;
+            run->quality_status = ScreenShareQualityStatus::Pending;
+            self->SetState(ScreenShareState::Active);
+            co_return;
+        }
         if (restored && latest) {
             run->applied = latest;
             run->track->SetScreenShareProfile(*latest);
@@ -788,14 +836,41 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                     run->applied = run->delivered;
                 }
                 run->track->SetScreenShareProfile(*run->applied);
-                co_await self->backend_.publish(run->track);
-                run->quality_status = ScreenShareQualityStatus::Applied;
-                run->published = true;
-                failure = ScreenShareError::None;
-                if (!self->closed_ && !run->stopping && !run->ended.load())
-                    self->SetState(ScreenShareState::Active);
-                if (!self->closed_ && !run->stopping && !run->ended.load() && run->audio_options.enabled)
-                    self->StartAudio(run->audio_options, run->id, run->audio_epoch);
+                std::optional<ScreenShareFrameProfile> prepared;
+                while (!self->closed_ && self->run_ == run && !run->stopping) {
+                    if (run->ended.load()) throw std::runtime_error("screen capture ended before publish");
+                    if (self->transport_ready_ && self->backend_.connected()) {
+                        ScreenShareFrameProfile geometry;
+                        { std::lock_guard lock(run->delivery); geometry = run->delivered.value_or(*run->applied); }
+                        const auto requested = ResolveScreenShareProfile(
+                            geometry.source_width, geometry.source_height, run->requested, run->revision);
+                        if (!requested) throw std::runtime_error("screen profile unavailable");
+                        prepared = co_await ApplyCaptureQuality(
+                            self, run, *requested, self->transport_revision_, false);
+                        if (prepared) break;
+                    }
+                    if (self->closed_ || run->stopping) break;
+                    run->timer.expires_after(20ms);
+                    std::error_code error;
+                    co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+                }
+                if (prepared && !self->closed_ && !run->stopping) {
+                    run->applied = prepared;
+                    run->applied_request = run->requested;
+                    run->track->SetScreenShareProfile(*prepared);
+                    co_await self->backend_.publish(run->track);
+                    // Any later capture/alignment failure must retire an
+                    // already committed publication through normal cleanup.
+                    run->published = true;
+                    run->quality_status = ScreenShareQualityStatus::Applied;
+                    failure = ScreenShareError::None;
+                    if (!self->closed_ && !run->stopping && !run->ended.load())
+                        self->SetState(ScreenShareState::Active);
+                    if (!self->closed_ && !run->stopping && !run->ended.load() && run->audio_options.enabled)
+                        self->StartAudio(run->audio_options, run->id, run->audio_epoch);
+                } else if (run->stopping) {
+                    failure = ScreenShareError::None;
+                }
             }
             auto nextGeometryCheck = std::chrono::steady_clock::now();
             while (!self->closed_ && !run->stopping && !run->ended.load()) {
@@ -812,10 +887,14 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                     self->transport_ready_ && self->backend_.connected() &&
                     std::chrono::steady_clock::now() >= run->next_metadata_retry) {
                     run->next_metadata_retry = std::chrono::steady_clock::now() + 1s;
+                    const auto synced_profile = *run->applied;
+                    const auto synced_revision = run->revision;
+                    const auto synced_transport = self->transport_revision_;
                     bool synced = false;
-                    try { co_await self->backend_.sync_quality(run->track, *run->applied); synced = true; } catch (...) {}
+                    try { co_await self->backend_.sync_quality(run->track, synced_profile); synced = true; } catch (...) {}
                     if (self->closed_ || run->stopping) break;
-                    if (synced && !run->quality_dirty) {
+                    if (synced && !run->quality_dirty && run->revision == synced_revision &&
+                        self->transport_revision_ == synced_transport && run->applied && *run->applied == synced_profile) {
                         run->quality_status = ScreenShareQualityStatus::Applied;
                         self->SetState(ScreenShareState::Active);
                     }

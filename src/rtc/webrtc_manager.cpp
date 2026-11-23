@@ -549,8 +549,32 @@ public:
           linux_approved_h264_(std::move(approved)),
           simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>(preference, linux_plan_)) {}
 #else
-    CustomVideoEncoderFactory()
-        : simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>()) {}
+    explicit CustomVideoEncoderFactory(bool stable_process_capabilities = false)
+        : simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>()) {
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+        if (stable_process_capabilities) {
+            // Factory and PeerConnection CodecVendors cache independently.
+            // Advertise the same union for every room; publication preflight
+            // and Create() still enforce the currently selected backend.
+            stable_formats_ = CachedBackendFormats();
+            for (const auto& format : CachedSoftwareFormats()) {
+                if (std::none_of(stable_formats_.begin(), stable_formats_.end(),
+                        [&](const auto& existing) {
+                            return existing.name == format.name &&
+                                existing.parameters == format.parameters;
+                        })) stable_formats_.push_back(format);
+            }
+            std::erase_if(stable_formats_, [](const auto& format) {
+                return CodecNameEquals(format, "H265") &&
+                    (!webrtc::IsBackendH265FormatSupported(format) || !H265SendingAvailable());
+            });
+            for (auto& format : stable_formats_) {
+                if (CodecNameEquals(format, "H265"))
+                    format.scalability_modes = {webrtc::ScalabilityMode::kL1T1};
+            }
+        }
+#endif
+    }
 #endif
 
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
@@ -559,7 +583,8 @@ public:
         // Preserve codec preference order. VP9 single-stream/SVC passes through
         // the adapter; multiple independent RIDs can fall back to one encoder
         // per stream when native VP9 rejects unequal simulcast frame rates.
-        const auto legacy_formats = simulcast_factory_->GetSupportedFormats();
+        const auto legacy_formats = stable_formats_.empty()
+            ? simulcast_factory_->GetSupportedFormats() : stable_formats_;
         AppendFormatsNamed(formats, legacy_formats, "VP8");
         AppendFormatsNamed(formats, legacy_formats, "H264");
 #if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
@@ -595,6 +620,15 @@ public:
         std::optional<std::string> scalability_mode) const override {
         if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264") ||
             CodecNameEquals(format, "H265")) {
+            if (!stable_formats_.empty() &&
+                (CodecNameEquals(format, "H264") || CodecNameEquals(format, "H265"))) {
+                if (!format.IsCodecInList(GetSupportedFormats())) return {};
+                if (!scalability_mode) return {.is_supported = true};
+                if (CodecNameEquals(format, "H265"))
+                    return {.is_supported = *scalability_mode == "L1T1"};
+                const auto mode = webrtc::ScalabilityModeFromString(*scalability_mode);
+                return {.is_supported = mode && webrtc::H264Encoder::SupportsScalabilityMode(*mode)};
+            }
 #if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
             if (CodecNameEquals(format, "H264") && !format.IsCodecInList(GetSupportedFormats())) return {};
 #endif
@@ -689,6 +723,7 @@ private:
     detail::LinuxHardwareEncoderPlan linux_plan_;
     std::vector<webrtc::SdpVideoFormat> linux_approved_h264_;
 #endif
+    std::vector<webrtc::SdpVideoFormat> stable_formats_;
     std::unique_ptr<webrtc::VideoEncoderFactory> simulcast_factory_;
 };
 
@@ -1865,7 +1900,11 @@ bool WebRTCManager::Initialize() {
 
     auto audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
     auto audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+    auto video_encoder_factory = std::make_unique<CustomVideoEncoderFactory>(true);
+#else
     auto video_encoder_factory = CreateVideoEncoderFactory();
+#endif
     auto video_decoder_factory = CreateVideoDecoderFactory();
 
     auto env = webrtc::CreateEnvironment();

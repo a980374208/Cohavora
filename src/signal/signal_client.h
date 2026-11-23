@@ -59,6 +59,8 @@ struct SignalOptions {
     std::chrono::milliseconds connect_timeout = std::chrono::seconds(5);
     std::chrono::milliseconds reconnect_timeout = std::chrono::seconds(5);
     OperationTimeouts timeouts;
+    size_t initial_connect_retries = 0;
+    std::chrono::milliseconds initial_connect_retry_delay{std::chrono::milliseconds(300)};
 };
 
 class SignalClient;

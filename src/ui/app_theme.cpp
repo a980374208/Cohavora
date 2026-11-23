@@ -1,5 +1,6 @@
 #include "src/ui/app_theme.h"
 
+#include <QtCore/QChildEvent>
 #include <QtCore/QEvent>
 #include <QtCore/QAbstractNativeEventFilter>
 #include <QtCore/QFile>
@@ -58,6 +59,7 @@ constexpr auto kMenuStyledToneProperty = "meetingUiMenuStyledTone";
 constexpr auto kDialogStyledToneProperty = "meetingUiDialogStyledTone";
 constexpr auto kCenteredProperty = "meetingUiCentered";
 constexpr auto kSurfacePaletteProperty = "meetingUiSurfacePalette";
+constexpr auto kComboPopupCleanupProperty = "meetingUiComboPopupCleanup";
 constexpr auto kThemeSetting = "ui/theme";
 
 class ThemeRuntime;
@@ -197,6 +199,34 @@ void refreshStyle(QWidget &widget) {
 		style->polish(&widget);
 	}
 	widget.update();
+}
+
+void ensureComboPopupStyleCleanup(QComboBox *combo) {
+	if (!combo || combo->property(kComboPopupCleanupProperty).toBool()) {
+		return;
+	}
+	combo->setProperty(kComboPopupCleanupProperty, true);
+	QObject::connect(combo, &QObject::destroyed, [](QObject *object) {
+		// Work around Qt 5.15 QStyleSheetStyle::initObject() skipping
+		// QComboBoxPrivateContainer while its parent is a QComboBox with an
+		// empty local styleSheet: renderRule() still populates
+		// renderRulesCache without connecting QStyleSheetStyleCaches::objectDestroyed().
+		// During QObject::~QObject() of the QComboBox, object->metaObject() is
+		// already QObject (no longer QComboBox), while popup children are still
+		// valid QWidgets before deleteChildren(). Calling style->polish(popup)
+		// lets initObject(popup) succeed and connect destroyed -> objectDestroyed,
+		// so deleteChildren() immediately evicts all QStyleSheetStyle caches.
+		for (auto *child : object->children()) {
+			auto *popup = qobject_cast<QWidget *>(child);
+			if (!popup || !popup->windowFlags().testFlag(Qt::Popup)) {
+				continue;
+			}
+			if (auto *style = popup->style();
+					style && !popup->testAttribute(Qt::WA_StyleSheetTarget)) {
+				style->polish(popup);
+			}
+		}
+	});
 }
 
 QScreen *screenForWindow(const QWidget &window) {
@@ -363,9 +393,20 @@ public:
 
 protected:
 	bool eventFilter(QObject *watched, QEvent *event) override {
+		if (event->type() == QEvent::ChildAdded) {
+			if (auto *choice = qobject_cast<QComboBox *>(watched)) {
+				auto *childEvent = static_cast<QChildEvent *>(event);
+				if (auto *popup = qobject_cast<QWidget *>(childEvent->child());
+						popup && popup->windowFlags().testFlag(Qt::Popup)) {
+					ensureComboPopupStyleCleanup(choice);
+				}
+			}
+			return QObject::eventFilter(watched, event);
+		}
 		if (event->type() == QEvent::Polish && !stylingChoice_) {
 			if (auto *choice = qobject_cast<QComboBox *>(watched)) {
 				QScopedValueRollback<bool> guard(stylingChoice_, true);
+				ensureComboPopupStyleCleanup(choice);
 				styleChoiceControls(*choice, toneFromWidget(choice));
 			}
 		}
@@ -649,6 +690,9 @@ void install(QApplication &application, InstallOptions options) {
 		return;
 	}
 	Q_ASSERT(QThread::currentThread() == application.thread());
+	// Disable Qt 5's legacy QComboBox roll effect (QRollEffect::grab triggers
+	// unpolished QStyleSheetStyle::renderRule entries that leak per popup open).
+	QApplication::setEffectEnabled(Qt::UI_AnimateCombo, false);
 	runtime = new ThemeRuntime(application, std::move(options));
 	application.setProperty(kInstalledProperty, true);
 	application.installEventFilter(new ThemeEventFilter(&application));
@@ -746,6 +790,7 @@ void styleChoiceControls(QWidget &widget, Tone tone) {
 		choices.push_front(choice);
 	}
 	for (auto *choice : choices) {
+		ensureComboPopupStyleCleanup(choice);
 		setTone(*choice, tone);
 		auto *view = choice->view();
 		if (!view || !view->viewport()) continue;

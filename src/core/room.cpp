@@ -7,6 +7,7 @@
 #include "webrtc_manager.h"
 #include "rtc/video_format_diagnostics.h"
 #include "rtc/h264_level_constraints.h"
+#include "rtc/h265_level_constraints.h"
 #include "stats_collector.h"
 #include "local_audio_track.h"
 #include "local_video_track.h"
@@ -30,6 +31,7 @@
 #include <algorithm>
 #include "api/jsep.h"
 #include "api/video_codecs/sdp_video_format.h"
+#include "modules/video_coding/codecs/h264/include/h264.h"
 #include "api/video/video_sink_interface.h"
 #if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
 #include "api/make_ref_counted.h"
@@ -243,6 +245,69 @@ std::vector<webrtc::SdpVideoFormat> LocalHardwareH264Formats() {
         if (IsHardwareH264FormatSupported(format)) formats.push_back(std::move(format));
     }
     return formats;
+}
+
+std::optional<std::uint8_t> LocalH265SendLevel() {
+    const auto factory = WebRTCManager::Instance().factory();
+    if (!factory) return {};
+    std::optional<std::uint8_t> level;
+    for (const auto& codec : factory->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO).codecs) {
+        const auto format = detail::ProjectH265Format(codec.name, codec.parameters);
+        if (codec.IsMediaCodec() && format && format->valid)
+            level = std::max(level.value_or(0), format->level);
+    }
+    return level;
+}
+
+std::optional<webrtc::H264Level> SoftwareH264SendLevel() {
+    std::optional<webrtc::H264Level> level;
+    for (const auto& format : webrtc::SupportedH264Codecs(true)) {
+        const auto parsed = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+        if (parsed) level = level ? std::min(*level, parsed->level) : parsed->level;
+    }
+    return level;
+}
+
+[[noreturn]] void RejectH264Profile() {
+    throw OperationError(OperationKind::PublishTrack, OperationErrorCode::CodecUnsupported,
+        "video_quality", "the negotiated H264 format cannot support this video profile", false,
+        "h264", OperationRecoveryAction::SelectSupportedCodec);
+}
+
+std::optional<webrtc::H264Level> SenderH264Level(const webrtc::RtpParameters& parameters) {
+    std::optional<webrtc::H264Level> level;
+    for (const auto& encoding : parameters.encodings) {
+        const auto* codec = encoding.codec ? &*encoding.codec :
+            (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
+        if (!codec || CompareCodecName(codec->name.c_str(), "h264") != 0) continue;
+        const auto parsed = webrtc::ParseSdpForH264ProfileLevelId(codec->parameters);
+        if (!parsed) RejectH264Profile();
+        level = level ? std::min(*level, parsed->level) : parsed->level;
+    }
+    return level;
+}
+
+[[noreturn]] void RejectH265Profile() {
+    throw OperationError(OperationKind::PublishTrack, OperationErrorCode::CodecUnsupported,
+        "screen_quality", "the negotiated H265 format cannot support this screen profile", false,
+        "h265", OperationRecoveryAction::SelectSupportedCodec);
+}
+
+// A sender may select a format per encoding. Never substitute a locally
+// advertised level for the actual format after negotiation.
+std::optional<std::uint8_t> SenderH265Level(const webrtc::RtpParameters& parameters, bool require_format = false) {
+    std::optional<std::uint8_t> level;
+    if (parameters.encodings.empty()) RejectH265Profile();
+    for (const auto& encoding : parameters.encodings) {
+        const auto* codec = encoding.codec ? &*encoding.codec :
+            (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
+        if (!codec) { if (require_format) RejectH265Profile(); else continue; }
+        const auto format = detail::ProjectH265Format(codec->name, codec->parameters);
+        if (!format) continue;
+        if (!format->valid) RejectH265Profile();
+        level = std::min(level.value_or(format->level), format->level);
+    }
+    return level;
 }
 
 bool ExactH264Format(const webrtc::SdpVideoFormat& left,
@@ -6364,6 +6429,9 @@ Room::AddTrackToPublisherAsync(
                     encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
                     encoding.max_bitrate_bps = layer.max_bitrate_bps;
                     encoding.max_framerate = layer.max_fps;
+                    if ((task.screen_share && CompareCodecName(task.publish_options.video_codec.c_str(), "h265") == 0) ||
+                        CompareCodecName(task.publish_options.video_codec.c_str(), "h264") == 0)
+                        encoding.scale_resolution_down_to = webrtc::Resolution{layer.width, layer.height};
                     init.send_encodings.push_back(std::move(encoding));
                 }
             } else if (task.rtc_track->kind() ==
@@ -6545,6 +6613,8 @@ Room::AddTrackToPublisherAsync(
                             encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
                             encoding.max_bitrate_bps = layer.max_bitrate_bps;
                             encoding.max_framerate = layer.max_fps;
+                            if (CompareCodecName(backup_spec.codec.c_str(), "h264") == 0)
+                                encoding.scale_resolution_down_to = webrtc::Resolution{layer.width, layer.height};
                             backup_init.send_encodings.push_back(std::move(encoding));
                         }
 
@@ -6692,6 +6762,143 @@ Room::AddTrackToPublisherAsync(
         "install_sender");
 }
 
+asio::awaitable<ScreenShareFrameProfile> Room::ConstrainScreenShareProfileAsync(
+    std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile) {
+    auto admission = AdmitOperation(OperationKind::PublishTrack, "resolve_screen_quality");
+    if (!track || track->Track::source() != TrackSource::ScreenShareVideo ||
+        !profile.quality.valid() || profile.width < 2 || profile.height < 2)
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::InvalidState,
+            "resolve_screen_quality", "invalid screen profile");
+    const auto generation = session_generation_.load(std::memory_order_acquire);
+    const auto revision = track->publish_options_revision();
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::shared_ptr<TrackPublication> publication;
+    std::vector<std::string> ids;
+    std::vector<std::string> enabled_codecs;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) || connection_state_ != ConnectionState::Connected)
+            throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                "resolve_screen_quality", "screen session retired");
+        pc = publisher_pc_;
+        enabled_codecs = enabled_publish_codecs_;
+        if (local_participant_) for (const auto& [sid, item] : local_participant_->tracks()) {
+            if (item && item->track() == track) { publication = item; break; }
+        }
+        const auto found = published_sender_track_ids_.find(track.get());
+        if (found != published_sender_track_ids_.end()) ids = found->second;
+    }
+    if (!publication) {
+        // Resolve before publication so the first encoder input already uses
+        // the constrained capture profile. The final negotiated format is
+        // checked independently before publication commit.
+        const auto plan = ResolveVideoPublishPlan(track, enabled_codecs);
+        if (!plan.ok()) throw OperationError(OperationKind::PublishTrack,
+            OperationErrorCode::CodecUnsupported, "resolve_screen_quality", "screen codec unavailable");
+        if (plan.effective_codec == "h264" && GetVideoEncoderPreference() == "software") {
+            const auto level = SoftwareH264SendLevel();
+            const auto effective = level ? detail::ConstrainH264ScreenShareProfile(profile, *level) : std::nullopt;
+            if (!effective) RejectH264Profile();
+            co_return *effective;
+        }
+        if (plan.effective_codec != "h265") co_return profile;
+        const auto level = LocalH265SendLevel();
+        const auto effective = level ? detail::ConstrainH265ScreenShareProfile(profile, *level) : std::nullopt;
+        if (!effective) RejectH265Profile();
+        co_return *effective;
+    }
+
+    auto* signaling = WebRTCManager::Instance().signaling_thread();
+    if (!pc || !signaling || signaling->IsQuitting())
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "resolve_screen_quality", "screen publisher unavailable");
+    auto completion = std::make_shared<AwaitableState<ScreenShareFrameProfile>>(executor_);
+    const auto gate = callback_gate_;
+    auto cancel = gate->CancelWhenClosed([weak = std::weak_ptr(completion), weak_gate = std::weak_ptr(gate)] {
+        if (auto live = weak_gate.lock()) live->PostCompletion([weak] {
+            if (auto pending = weak.lock()) FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                "resolve_screen_quality", "screen session retired")));
+        });
+    });
+    struct Task {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<ScreenShareFrameProfile>> completion;
+        std::shared_ptr<ExecutorCallbackGate> gate;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        std::shared_ptr<LocalVideoTrack> track;
+        std::shared_ptr<TrackPublication> publication;
+        std::vector<std::string> ids;
+        ScreenShareFrameProfile profile;
+        uint64_t generation;
+        ExecutorCallbackGate::Ticket ticket;
+    };
+    auto* task = new Task{shared_from_this(), completion, gate, pc, track, publication,
+        std::move(ids), profile, generation, AdmitOperation(OperationKind::PublishTrack, "resolve_screen_quality")};
+    try {
+        signaling->PostTask([task] {
+            std::unique_ptr<Task> owned(task);
+            try {
+                {
+                    std::lock_guard lock(task->completion->mutex);
+                    if (task->completion->completed) return;
+                }
+                const auto current = [&] {
+                    std::lock_guard lock(task->room->room_mutex_);
+                    const auto local = task->room->local_participant_;
+                    return task->room->IsNativeGenerationCurrentLocked(task->generation) &&
+                        task->room->connection_state_ == ConnectionState::Connected &&
+                        task->room->publisher_pc_ == task->pc && local &&
+                        local->get_publication(task->publication->sid()) == task->publication &&
+                        task->publication->track() == task->track;
+                };
+                if (!current()) throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                    "resolve_screen_quality", "screen publication retired");
+                auto effective = task->profile;
+                bool found = false;
+                for (const auto& sender : task->pc->GetSenders()) {
+                    if (!sender || !sender->track()) continue;
+                    if (sender->track() != task->track->rtc_track() &&
+                        std::find(task->ids.begin(), task->ids.end(), sender->track()->id()) == task->ids.end()) continue;
+                    found = true;
+                    if (const auto level = SenderH264Level(sender->GetParameters())) {
+                        const auto constrained = detail::ConstrainH264ScreenShareProfile(effective, *level);
+                        if (!constrained) RejectH264Profile();
+                        effective = *constrained;
+                    }
+                    if (const auto level = SenderH265Level(sender->GetParameters(),
+                            CompareCodecName(task->track->requested_publish_options().video_codec.c_str(), "h265") == 0)) {
+                        const auto constrained = detail::ConstrainH265ScreenShareProfile(effective, *level);
+                        if (!constrained) RejectH265Profile();
+                        effective = *constrained;
+                    }
+                }
+                if (!found || !current()) throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                    "resolve_screen_quality", "screen sender retired");
+                task->gate->PostCompletion([completion = task->completion, effective] {
+                    CompleteAwaitable(completion, effective);
+                });
+            } catch (...) {
+                task->gate->PostCompletion([completion = task->completion, error = std::current_exception()] {
+                    FailAwaitable(completion, error);
+                });
+            }
+        });
+    } catch (...) { delete task; throw; }
+    auto effective = co_await WaitAwaitable<ScreenShareFrameProfile>(completion, operation_timeouts_.publish,
+        OperationKind::PublishTrack, OperationErrorCode::TrackPublishTimeout, "resolve_screen_quality");
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) || connection_state_ != ConnectionState::Connected ||
+            publisher_pc_ != pc || !local_participant_ ||
+            local_participant_->get_publication(publication->sid()) != publication || publication->track() != track ||
+            revision != track->publish_options_revision())
+            throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                "resolve_screen_quality", "screen publication changed during quality resolution");
+    }
+    co_return effective;
+}
+
 asio::awaitable<void> Room::ApplyScreenShareSenderParametersAsync(
     std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile) {
     auto admission = AdmitOperation(OperationKind::PublishTrack, "screen_quality");
@@ -6732,9 +6939,11 @@ asio::awaitable<void> Room::ApplyScreenShareSenderParametersAsync(
         std::vector<std::string> ids;
         ScreenShareFrameProfile profile;
         uint64_t generation;
+        ExecutorCallbackGate::Ticket ticket;
     };
-    auto* task = new Task{shared_from_this(), completion, pc, track, publication, ids, profile, generation};
-    signaling->PostTask([task] {
+    auto* task = new Task{shared_from_this(), completion, pc, track, publication, ids, profile, generation,
+        AdmitOperation(OperationKind::PublishTrack, "screen_quality")};
+    try { signaling->PostTask([task] {
         std::unique_ptr<Task> owned(task);
         {
             std::lock_guard lock(task->completion->mutex);
@@ -6755,13 +6964,16 @@ asio::awaitable<void> Room::ApplyScreenShareSenderParametersAsync(
         };
         std::vector<Saved> changed;
         auto restore = [&] {
+            if (!current()) return false;
             bool ok = true;
             for (auto& entry : changed) {
+                if (!current()) return false;
                 auto fresh = entry.sender->GetParameters();
                 if (fresh.encodings.size() != entry.parameters.encodings.size()) { ok = false; continue; }
                 for (size_t i = 0; i < fresh.encodings.size(); ++i) {
                     fresh.encodings[i].max_framerate = entry.parameters.encodings[i].max_framerate;
                     fresh.encodings[i].max_bitrate_bps = entry.parameters.encodings[i].max_bitrate_bps;
+                    fresh.encodings[i].scale_resolution_down_to = entry.parameters.encodings[i].scale_resolution_down_to;
                 }
                 ok = entry.sender->SetParameters(fresh).ok() && ok;
             }
@@ -6780,13 +6992,38 @@ asio::awaitable<void> Room::ApplyScreenShareSenderParametersAsync(
                 if (!parameters.codecs.empty()) options.video_codec = parameters.codecs[0].name;
                 // Compute the full-resolution budget independently of the frozen RID topology.
                 options.simulcast = false;
+                const auto h265_level = SenderH265Level(parameters, CompareCodecName(options.video_codec.c_str(), "h265") == 0);
+                const auto h264_level = SenderH264Level(parameters);
+                if (h265_level) options.video_codec = "h265";
                 auto budget = LocalVideoTrack::ComputeSimulcastOptions(task->profile.width, task->profile.height, options).layers.front();
+                if (h265_level) {
+                    if (parameters.encodings.size() != 1) RejectH265Profile();
+                    const auto* limits = webrtc::external_encoder::FindAmfHevcLevelLimits(*h265_level);
+                    budget.max_bitrate_bps = std::min(budget.max_bitrate_bps,
+                        static_cast<int>(limits->max_main_tier_bitrate_bps));
+                    if (detail::CheckH265LevelConstraints(*h265_level, task->profile.width, task->profile.height,
+                            budget.max_fps, budget.max_bitrate_bps) != detail::H265LevelConstraintStatus::Supported)
+                        RejectH265Profile();
+                }
                 changed.push_back({sender, parameters});
+                if (h264_level && detail::CheckH264LevelConstraints(*h264_level,
+                        task->profile.width, task->profile.height, budget.max_fps) !=
+                            detail::H264LevelConstraintStatus::Supported) RejectH264Profile();
                 for (auto& encoding : parameters.encodings) {
                     const bool low = parameters.encodings.size() > 1 && encoding.scale_resolution_down_by.value_or(1.0) > 1.0;
                     encoding.max_framerate = low ? 3 : budget.max_fps;
                     encoding.max_bitrate_bps = low ? std::max(150000, budget.max_bitrate_bps / (4 * (task->profile.quality.fps / 3))) : budget.max_bitrate_bps;
+                    if (h265_level) encoding.scale_resolution_down_to =
+                        webrtc::Resolution{task->profile.width, task->profile.height};
+                    else if (h264_level) {
+                        const double scale = encoding.scale_resolution_down_by.value_or(1.0);
+                        if (!std::isfinite(scale) || scale < 1.0) RejectH264Profile();
+                        encoding.scale_resolution_down_to = webrtc::Resolution{
+                            std::max(2, static_cast<int>(task->profile.width / scale) & ~1),
+                            std::max(2, static_cast<int>(task->profile.height / scale) & ~1)};
+                    }
                 }
+                if (!current()) throw std::runtime_error("screen sender retired");
                 if (!sender->SetParameters(parameters).ok()) throw std::runtime_error("screen sender rejected quality");
             }
             if (changed.empty() || !current()) throw std::runtime_error("screen sender retired");
@@ -6797,7 +7034,7 @@ asio::awaitable<void> Room::ApplyScreenShareSenderParametersAsync(
                 OperationKind::PublishTrack, restored ? OperationErrorCode::InvalidState : OperationErrorCode::StateUncertain,
                 "screen_quality", restored ? "quality update rejected" : "quality compensation failed", !restored)));
         }
-    });
+    }); } catch (...) { delete task; throw; }
     co_await WaitAwaitable<void>(completion, operation_timeouts_.publish,
         OperationKind::PublishTrack, OperationErrorCode::StateUncertain, "screen_quality");
 }
@@ -6947,7 +7184,79 @@ asio::awaitable<void> Room::ApplyPublishedSenderScalabilityModesAsync(
         "apply_scalability_mode");
 }
 
-asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
+namespace {
+
+struct PlannedVideoLayerLookup {
+    const std::string& expected_codec;
+    const std::vector<VideoLayerSetting>& layers;
+};
+
+PlannedVideoLayerLookup ResolveSenderPlannedLayerSpec(
+    std::size_t sender_index,
+    const VideoPublishOptions& options) {
+    const auto& specs = options.simulcast_codecs;
+    if (sender_index > 0 && sender_index < specs.size()) {
+        return {specs[sender_index].codec, specs[sender_index].layers};
+    }
+    return {options.video_codec, options.layers};
+}
+
+const VideoLayerSetting* FindPlannedEncodingLayer(
+    const webrtc::RtpEncodingParameters& encoding,
+    std::size_t encoding_index,
+    const webrtc::RtpParameters& parameters,
+    const std::vector<VideoLayerSetting>& layers) {
+    auto planned = layers.end();
+    if (!encoding.rid.empty()) {
+        planned = std::find_if(layers.begin(), layers.end(),
+            [&](const auto& layer) { return layer.rid == encoding.rid; });
+    }
+    if (planned == layers.end() && encoding.rid.empty() &&
+        layers.size() == parameters.encodings.size()) {
+        planned = layers.begin() + encoding_index;
+    }
+    return planned == layers.end() ? nullptr : &*planned;
+}
+
+bool ComputeNegotiatedEncodingGeometry(
+    std::pair<int, int> source_dimensions,
+    const webrtc::RtpEncodingParameters& encoding,
+    const VideoLayerSetting& planned,
+    int& width,
+    int& height,
+    std::uint32_t& framerate) {
+    width = source_dimensions.first;
+    height = source_dimensions.second;
+    if (width <= 0 || height <= 0) return false;
+    if (encoding.scale_resolution_down_to) {
+        auto bound = *encoding.scale_resolution_down_to;
+        if (bound.width <= 0 || bound.height <= 0) return false;
+        if ((width < height) != (bound.width < bound.height)) {
+            std::swap(bound.width, bound.height);
+        }
+        const auto scale = std::min(
+            {1.0, double(bound.width) / width, double(bound.height) / height});
+        width = static_cast<int>(std::round(width * scale));
+        height = static_cast<int>(std::round(height * scale));
+    } else {
+        const double scale =
+            encoding.scale_resolution_down_by.value_or(planned.scale_resolution_down_by);
+        if (!std::isfinite(scale) || scale < 1.0) return false;
+        width = static_cast<int>(std::round(width / scale));
+        height = static_cast<int>(std::round(height / scale));
+    }
+    const double fps = encoding.max_framerate.value_or(planned.max_fps);
+    if (!std::isfinite(fps) || fps <= 0 ||
+        fps > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+    framerate = static_cast<std::uint32_t>(std::ceil(fps));
+    return width > 0 && height > 0;
+}
+
+}  // namespace
+
+asio::awaitable<void> Room::ReconcileNegotiatedVideoSendersAsync(
     PublishedSenderBundle bundle,
     VideoPublishOptions options,
     uint64_t generation,
@@ -6956,6 +7265,159 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
         std::any_of(options.simulcast_codecs.begin(), options.simulcast_codecs.end(),
             [](const auto& spec) { return CompareCodecName(spec.codec.c_str(), "h264") == 0; });
     if (!may_use_h264) co_return;
+    auto admission = AdmitOperation(OperationKind::PublishTrack, "reconcile_video_level");
+    const auto source = track ? track->source() : nullptr;
+    const auto profile = track ? track->screen_share_profile() : std::nullopt;
+    const auto source_dimensions = profile ? std::pair{profile->width, profile->height}
+        : source ? source->dimensions() : std::pair{0, 0};
+    const auto revision = track ? track->publish_options_revision() : 0;
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    const auto gate = callback_gate_;
+    auto cancel = gate->CancelWhenClosed(
+        [weak = std::weak_ptr(completion), weak_gate = std::weak_ptr(gate)] {
+            if (auto live_gate = weak_gate.lock()) live_gate->PostCompletion([weak] {
+                if (auto pending = weak.lock()) FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                    "reconcile_video_level", "room retired before negotiated video sender reconciliation")));
+            });
+        });
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::chrono::milliseconds timeout;
+    {
+        std::lock_guard lock(room_mutex_);
+        pc = publisher_pc_;
+        timeout = operation_timeouts_.publish;
+    }
+    auto* signaling = WebRTCManager::Instance().signaling_thread();
+    if (!pc || !signaling || signaling->IsQuitting()) {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "reconcile_video_level", "publisher is unavailable for negotiated video sender reconciliation");
+    }
+    struct Task {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<void>> completion;
+        std::shared_ptr<ExecutorCallbackGate> gate;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        PublishedSenderBundle bundle;
+        VideoPublishOptions options;
+        std::pair<int, int> source_dimensions;
+        uint64_t generation;
+        ExecutorCallbackGate::Ticket ticket;
+    };
+    auto background_admission = AdmitOperation(OperationKind::PublishTrack, "reconcile_video_level");
+    auto* task = new Task{shared_from_this(), completion, gate, pc, std::move(bundle),
+        std::move(options), source_dimensions, generation, std::move(background_admission)};
+    try {
+        signaling->PostTask([task] {
+            std::unique_ptr<Task> owned(task);
+            const auto finish = [&](std::exception_ptr error = {}) {
+                task->gate->PostCompletion([completion = task->completion, error] {
+                    if (error) FailAwaitable(completion, error);
+                    else CompleteAwaitable(completion);
+                });
+            };
+            try {
+                {
+                    std::lock_guard lock(task->completion->mutex);
+                    if (task->completion->completed) return;
+                }
+                {
+                    std::lock_guard lock(task->room->room_mutex_);
+                    if (!task->room->IsNativeGenerationCurrentLocked(task->generation) ||
+                        task->room->publisher_pc_ != task->pc) {
+                        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                            "reconcile_video_level", "session changed before negotiated video sender reconciliation");
+                    }
+                }
+                for (std::size_t sender_index = 0; sender_index < task->bundle.senders.size(); ++sender_index) {
+                    const auto& sender = task->bundle.senders[sender_index];
+                    if (!sender) continue;
+                    const auto spec = ResolveSenderPlannedLayerSpec(sender_index, task->options);
+                    auto parameters = sender->GetParameters();
+                    if (parameters.encodings.empty()) continue;
+                    bool modified = false;
+                    for (std::size_t index = 0; index < parameters.encodings.size(); ++index) {
+                        auto& encoding = parameters.encodings[index];
+                        const webrtc::RtpCodec* codec = encoding.codec ? &*encoding.codec :
+                            (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
+                        if (!codec || CompareCodecName(codec->name.c_str(), "h264") != 0) continue;
+                        const auto format = detail::ProjectH264Format(codec->name, codec->parameters);
+                        if (!format || !format->valid) continue;
+                        const auto* planned = FindPlannedEncodingLayer(encoding, index, parameters, spec.layers);
+                        if (!planned) continue;
+                        int width = 0, height = 0;
+                        std::uint32_t framerate = 0;
+                        if (!ComputeNegotiatedEncodingGeometry(
+                                task->source_dimensions, encoding, *planned, width, height, framerate)) {
+                            continue;
+                        }
+                        const auto level = static_cast<webrtc::H264Level>(format->level);
+                        if (detail::CheckH264LevelConstraints(level, width, height, framerate) ==
+                            detail::H264LevelConstraintStatus::Supported) {
+                            continue;
+                        }
+                        const auto constrained = detail::ConstrainH264Dimensions(level, width, height, framerate);
+                        if (!constrained ||
+                            (constrained->first == width && constrained->second == height)) {
+                            continue;
+                        }
+                        RTC_LOG(LS_INFO)
+                            << "Reconciling negotiated H264 sender layer: sender=" << sender_index
+                            << " layer=" << index << " rid=" << encoding.rid
+                            << " level=" << static_cast<int>(format->level)
+                            << " from=" << width << "x" << height << "@" << framerate
+                            << " to=" << constrained->first << "x" << constrained->second;
+                        encoding.scale_resolution_down_to = webrtc::Resolution{
+                            constrained->first, constrained->second};
+                        modified = true;
+                    }
+                    if (modified) {
+                        const auto status = sender->SetParameters(parameters);
+                        if (!status.ok()) {
+                            RTC_LOG(LS_WARNING)
+                                << "Failed to apply negotiated H264 sender parameters: sender="
+                                << sender_index << " error=" << status.message();
+                        }
+                    }
+                }
+                finish();
+            } catch (const OperationError&) {
+                finish(std::current_exception());
+            } catch (...) {
+                finish(std::make_exception_ptr(OperationError(OperationKind::PublishTrack,
+                    OperationErrorCode::CodecUnsupported, "reconcile_video_level",
+                    "negotiated video sender parameters could not be reconciled", false,
+                    "h264", OperationRecoveryAction::SelectSupportedCodec)));
+            }
+        });
+    } catch (...) {
+        delete task;
+        throw;
+    }
+    co_await WaitAwaitable<void>(completion, timeout, OperationKind::PublishTrack,
+        OperationErrorCode::TrackPublishTimeout, "reconcile_video_level");
+    const auto current_profile = track ? track->screen_share_profile() : std::nullopt;
+    const auto current_dimensions = current_profile ? std::pair{current_profile->width, current_profile->height}
+        : source ? source->dimensions() : std::pair{0, 0};
+    if (!track || revision != track->publish_options_revision() || profile != current_profile ||
+        source_dimensions != current_dimensions) {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "reconcile_video_level", "video parameters changed before negotiated sender reconciliation completed", true);
+    }
+}
+
+asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
+    PublishedSenderBundle bundle,
+    VideoPublishOptions options,
+    uint64_t generation,
+    std::shared_ptr<LocalVideoTrack> track) {
+    const bool may_use_h264 = CompareCodecName(options.video_codec.c_str(), "h264") == 0 ||
+        std::any_of(options.simulcast_codecs.begin(), options.simulcast_codecs.end(),
+            [](const auto& spec) { return CompareCodecName(spec.codec.c_str(), "h264") == 0; });
+    const bool may_use_h265 = CompareCodecName(options.video_codec.c_str(), "h265") == 0 ||
+        std::any_of(options.simulcast_codecs.begin(), options.simulcast_codecs.end(),
+            [](const auto& spec) { return CompareCodecName(spec.codec.c_str(), "h265") == 0; });
+    if (!may_use_h264 && !may_use_h265) co_return;
     auto admission = AdmitOperation(OperationKind::PublishTrack, "validate_video_level");
     const auto source = track ? track->source() : nullptr;
     const auto profile = track ? track->screen_share_profile() : std::nullopt;
@@ -7020,8 +7482,10 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
                             "validate_video_level", "session changed before final video format validation");
                     }
                 }
+                bool checking_h265 = CompareCodecName(task->options.video_codec.c_str(), "h265") == 0;
+                std::uint32_t checked_bitrate = 0;
                 const auto reject = [&](std::size_t layer, int width = 0, int height = 0,
-                    std::uint32_t fps = 0, detail::H264LevelConstraintStatus status = detail::H264LevelConstraintStatus::InvalidParameters,
+                    std::uint32_t fps = 0, int status = static_cast<int>(detail::H264LevelConstraintStatus::InvalidParameters),
                     std::uint8_t level = 255) {
                     diagnostic::Event event;
                     event.kind = diagnostic::EventKind::VideoLevelRejected;
@@ -7035,75 +7499,75 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
                     event.thread_role = diagnostic::ThreadRole::Rtc;
                     event.media_kind = diagnostic::MediaKind::Video;
                     event.outcome = diagnostic::Outcome::Failure;
-                    event.hardware.encoder_codecs = diagnostic::HardwareEncoderH264;
+                    event.hardware.encoder_codecs = checking_h265 ? diagnostic::HardwareEncoderH265 : diagnostic::HardwareEncoderH264;
                     event.encoder.stage = diagnostic::EncoderFailureStage::InitLevelConstraints;
                     event.encoder_level = level;
                     event.encoder.layer = static_cast<std::uint8_t>(std::min<std::size_t>(layer, 255));
                     event.encoder.width = static_cast<std::uint16_t>(std::clamp(width, 0, 65535));
                     event.encoder.height = static_cast<std::uint16_t>(std::clamp(height, 0, 65535));
                     event.encoder.framerate = static_cast<std::uint16_t>(std::min<std::uint32_t>(fps, 65535));
+                    event.encoder.bitrate_bps = checked_bitrate;
                     event.encoder.status = static_cast<std::int32_t>(status);
                     diagnostic::EmitBusinessEvent(event);
                     throw OperationError(OperationKind::PublishTrack, OperationErrorCode::CodecUnsupported,
-                        "validate_video_level", "the final H264 format cannot support the current video parameters", false,
-                        "h264", OperationRecoveryAction::SelectSupportedCodec);
+                        "validate_video_level", "the final video format cannot support the current video parameters", false,
+                        checking_h265 ? "h265" : "h264", OperationRecoveryAction::SelectSupportedCodec);
                 };
-                const bool expects_h264 = task->options.video_codec == "h264" ||
-                    std::any_of(task->options.simulcast_codecs.begin(), task->options.simulcast_codecs.end(),
-                        [](const auto& spec) { return CompareCodecName(spec.codec.c_str(), "h264") == 0; });
-                if (task->bundle.senders.empty() && expects_h264) reject(0);
+                if (task->bundle.senders.empty()) reject(0);
                 for (std::size_t sender_index = 0; sender_index < task->bundle.senders.size(); ++sender_index) {
                     const auto& sender = task->bundle.senders[sender_index];
-                    const auto& specs = task->options.simulcast_codecs;
-                    const auto& layers = sender_index > 0 && sender_index < specs.size()
-                        ? specs[sender_index].layers : task->options.layers;
-                    const auto& expected_codec = sender_index > 0 && sender_index < specs.size()
-                        ? specs[sender_index].codec : task->options.video_codec;
+                    const auto spec = ResolveSenderPlannedLayerSpec(sender_index, task->options);
+                    const auto& layers = spec.layers;
+                    const auto& expected_codec = spec.expected_codec;
                     const bool expected_h264 = CompareCodecName(expected_codec.c_str(), "h264") == 0;
-                    if (!sender) { if (expected_h264) reject(0); else continue; }
+                    const bool expected_h265 = CompareCodecName(expected_codec.c_str(), "h265") == 0;
+                    checking_h265 = expected_h265;
+                    checked_bitrate = 0;
+                    if (!sender) { if (expected_h264 || expected_h265) reject(0); else continue; }
                     const auto parameters = sender->GetParameters();
-                    if (parameters.encodings.empty()) { if (expected_h264) reject(0); else continue; }
+                    if (parameters.encodings.empty()) { if (expected_h264 || expected_h265) reject(0); else continue; }
                     for (std::size_t index = 0; index < parameters.encodings.size(); ++index) {
+                        checking_h265 = expected_h265;
+                        checked_bitrate = 0;
                         const auto& encoding = parameters.encodings[index];
                         const webrtc::RtpCodec* codec = encoding.codec ? &*encoding.codec :
                             (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
-                        if (!codec) { if (expected_h264) reject(index); else continue; }
-                        if (CompareCodecName(codec->name.c_str(), "h264") != 0) {
-                            if (expected_h264 && CompareCodecName(codec->name.c_str(), "vp8") != 0 &&
+                        if (!codec) { if (expected_h264 || expected_h265) reject(index); else continue; }
+                        const bool actual_h265 = CompareCodecName(codec->name.c_str(), "h265") == 0;
+                        const bool actual_h264 = CompareCodecName(codec->name.c_str(), "h264") == 0;
+                        if (!actual_h264 && !actual_h265) {
+                            if ((expected_h264 || expected_h265) && CompareCodecName(codec->name.c_str(), "vp8") != 0 &&
                                 CompareCodecName(codec->name.c_str(), "vp9") != 0 && CompareCodecName(codec->name.c_str(), "av1") != 0 &&
                                 CompareCodecName(codec->name.c_str(), "h265") != 0) reject(index);
                             continue;
                         }
+                        checking_h265 = actual_h265;
                         const auto format = detail::ProjectH264Format(codec->name, codec->parameters);
-                        if (!format || !format->valid) reject(index);
-                        auto planned = layers.end();
-                        if (!encoding.rid.empty()) planned = std::find_if(layers.begin(), layers.end(),
-                            [&](const auto& layer) { return layer.rid == encoding.rid; });
-                        if (planned == layers.end() && encoding.rid.empty() && layers.size() == parameters.encodings.size())
-                            planned = layers.begin() + index;
-                        if (planned == layers.end()) reject(index);
-                        int width = task->source_dimensions.first, height = task->source_dimensions.second;
-                        if (width <= 0 || height <= 0) reject(index);
-                        if (encoding.scale_resolution_down_to) {
-                            auto bound = *encoding.scale_resolution_down_to;
-                            if (bound.width <= 0 || bound.height <= 0) reject(index);
-                            if ((width < height) != (bound.width < bound.height)) std::swap(bound.width, bound.height);
-                            const auto scale = std::min({1.0, double(bound.width) / width, double(bound.height) / height});
-                            width = static_cast<int>(std::round(width * scale));
-                            height = static_cast<int>(std::round(height * scale));
-                        } else {
-                            const double scale = encoding.scale_resolution_down_by.value_or(planned->scale_resolution_down_by);
-                            if (!std::isfinite(scale) || scale < 1.0) reject(index);
-                            width = static_cast<int>(std::round(width / scale));
-                            height = static_cast<int>(std::round(height / scale));
+                        const auto hevc_format = detail::ProjectH265Format(codec->name, codec->parameters);
+                        if (checking_h265 ? (!hevc_format || !hevc_format->valid || parameters.encodings.size() != 1)
+                                          : (!format || !format->valid)) reject(index);
+                        const auto* planned = FindPlannedEncodingLayer(encoding, index, parameters, layers);
+                        if (!planned) reject(index);
+                        int width = 0, height = 0;
+                        std::uint32_t framerate = 0;
+                        if (!ComputeNegotiatedEncodingGeometry(
+                                task->source_dimensions, encoding, *planned, width, height, framerate)) {
+                            reject(index);
                         }
-                        const double fps = encoding.max_framerate.value_or(planned->max_fps);
-                        if (!std::isfinite(fps) || fps <= 0 || fps > std::numeric_limits<std::uint32_t>::max()) reject(index);
-                        const auto framerate = static_cast<std::uint32_t>(std::ceil(fps));
-                        const auto status = detail::CheckH264LevelConstraints(
-                            static_cast<webrtc::H264Level>(format->level), width, height, framerate);
-                        if (status != detail::H264LevelConstraintStatus::Supported)
-                            reject(index, width, height, framerate, status, format->level);
+                        if (checking_h265) {
+                            const auto bitrate = encoding.max_bitrate_bps.value_or(planned->max_bitrate_bps);
+                            if (bitrate <= 0) reject(index);
+                            checked_bitrate = static_cast<std::uint32_t>(bitrate);
+                            const auto status = detail::CheckH265LevelConstraints(
+                                hevc_format->level, width, height, framerate, checked_bitrate);
+                            if (status != detail::H265LevelConstraintStatus::Supported)
+                                reject(index, width, height, framerate, static_cast<int>(status), hevc_format->level);
+                        } else {
+                            const auto status = detail::CheckH264LevelConstraints(
+                                static_cast<webrtc::H264Level>(format->level), width, height, framerate);
+                            if (status != detail::H264LevelConstraintStatus::Supported)
+                                reject(index, width, height, framerate, static_cast<int>(status), format->level);
+                        }
                     }
                 }
                 finish();
@@ -7112,8 +7576,9 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
             } catch (...) {
                 finish(std::make_exception_ptr(OperationError(OperationKind::PublishTrack,
                     OperationErrorCode::CodecUnsupported, "validate_video_level",
-                    "the final H264 sender parameters could not be validated", false,
-                    "h264", OperationRecoveryAction::SelectSupportedCodec)));
+                    "the final video sender parameters could not be validated", false,
+                    CompareCodecName(task->options.video_codec.c_str(), "h265") == 0 ? "h265" : "h264",
+                    OperationRecoveryAction::SelectSupportedCodec)));
             }
         });
     } catch (...) {
@@ -7137,6 +7602,40 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
     ResolvedVideoPublishPlan plan,
     std::vector<std::string> enabled_codecs,
     uint64_t generation) {
+    if (plan.ok() && GetVideoEncoderPreference() == "software") {
+        const auto constrain = [&](auto& layers) {
+            const auto level = SoftwareH264SendLevel();
+            if (!level) RejectH264Profile();
+            for (auto& layer : layers) {
+                const auto dimensions = detail::ConstrainH264Dimensions(*level,
+                    layer.width, layer.height, layer.max_fps);
+                if (!dimensions) RejectH264Profile();
+                layer.scale_resolution_down_by *= double(layer.width) / dimensions->first;
+                layer.width = dimensions->first;
+                layer.height = dimensions->second;
+            }
+        };
+        if (plan.effective_codec == "h264") constrain(plan.effective.layers);
+        for (auto& spec : plan.effective.simulcast_codecs)
+            if (CompareCodecName(spec.codec.c_str(), "h264") == 0) constrain(spec.layers);
+    }
+    if (plan.ok() && plan.effective_codec == "h265") {
+        const auto level = LocalH265SendLevel();
+        if (!level) RejectH265Profile();
+        const auto* limits = webrtc::external_encoder::FindAmfHevcLevelLimits(*level);
+        const auto constrain_budget = [&](auto& layers) {
+            for (auto& layer : layers) {
+                layer.max_bitrate_bps = std::min(layer.max_bitrate_bps,
+                    static_cast<int>(limits->max_main_tier_bitrate_bps));
+                if (detail::CheckH265LevelConstraints(*level, layer.width, layer.height,
+                        layer.max_fps, layer.max_bitrate_bps) != detail::H265LevelConstraintStatus::Supported)
+                    RejectH265Profile();
+            }
+        };
+        constrain_budget(plan.effective.layers);
+        for (auto& spec : plan.effective.simulcast_codecs) constrain_budget(spec.layers);
+        co_return PreflightedVideoPublishPlan{std::move(plan), {}};
+    }
     const auto preference = GetVideoEncoderPreference();
 #if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
     plan.requested_backend = preference;
@@ -7634,6 +8133,8 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             sender_bundle, generation);
         if (video_plan) {
             if (validate_video_preflight) validate_video_preflight();
+            co_await ReconcileNegotiatedVideoSendersAsync(sender_bundle, video_plan->effective,
+                generation, std::dynamic_pointer_cast<LocalVideoTrack>(track));
             co_await ValidateFinalVideoSendersAsync(sender_bundle, video_plan->effective,
                 generation, std::dynamic_pointer_cast<LocalVideoTrack>(track));
         }
@@ -8015,6 +8516,8 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 sender_bundles[index], generation);
             if (video_plans[index]) {
                 if (validate_video_preflights[index]) validate_video_preflights[index]();
+                co_await ReconcileNegotiatedVideoSendersAsync(sender_bundles[index], video_plans[index]->effective,
+                    generation, std::dynamic_pointer_cast<LocalVideoTrack>(items[index].track));
                 co_await ValidateFinalVideoSendersAsync(sender_bundles[index], video_plans[index]->effective,
                     generation, std::dynamic_pointer_cast<LocalVideoTrack>(items[index].track));
             }

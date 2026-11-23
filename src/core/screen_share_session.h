@@ -77,6 +77,9 @@ public:
         std::function<asio::awaitable<void>(std::shared_ptr<LocalAudioTrack>)> publish_audio;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalAudioTrack>)> unpublish_audio;
         std::function<void(std::shared_ptr<LocalAudioTrack>, bool)> mute_audio;
+        // Resolve the effective capture profile before changing sender or
+        // capture state. The requested quality remains the user's intent.
+        std::function<asio::awaitable<ScreenShareFrameProfile>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> resolve_quality;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> apply_quality;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> sync_quality;
         std::function<std::optional<ScreenBinding>(
@@ -131,6 +134,9 @@ private:
                                        std::shared_ptr<Run> run, DesktopSource source,
                                        VideoPublishOptions options);
     static asio::awaitable<void> ApplyQuality(std::shared_ptr<ScreenShareSession> self, std::shared_ptr<Run> run);
+    static asio::awaitable<std::optional<ScreenShareFrameProfile>> ApplyCaptureQuality(
+        std::shared_ptr<ScreenShareSession> self, std::shared_ptr<Run> run,
+        ScreenShareFrameProfile profile, uint64_t transport_revision, bool apply_sender);
     static asio::awaitable<void> DriveAudio(std::shared_ptr<ScreenShareSession> self,
                                            std::shared_ptr<Run> run, uint64_t audio_epoch);
     void SetState(ScreenShareState state, ScreenShareError error = ScreenShareError::None);

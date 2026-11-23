@@ -7,6 +7,7 @@
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkReply>
 #include <QtNetwork/QNetworkRequest>
+#include <chrono>
 #include <memory>
 #include "http_types.h"
 #include "meeting_types.h"
@@ -106,12 +107,15 @@ private:
                   std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
                   bool authenticated = true,
                   HttpRequestContext context = {});
+    struct PostAttemptContext;
     void sendPostToEndpoint(const QString &endpointBaseUrl,
                             const QString &path,
                             const QJsonObject &body,
                             std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
                             bool authenticated,
                             HttpRequestContext context = {});
+    void sendPostAttempt(const std::shared_ptr<PostAttemptContext> &attemptContext,
+                         int attempt);
 
     QString _baseUrl;
     QString _token;
@@ -119,6 +123,12 @@ private:
     quint64 _authRevision = 0;
     quint64 _authStateRevision = 0;
     std::unique_ptr<QNetworkAccessManager> _nam;
+    int _transferTimeoutMs = 12000;
+    int _idleConnectionCacheMaxAgeMs = 25000;
+    int _retryDelayMs = 150;
+    int _inFlightRequests = 0;
+    bool _hasNetworkActivity = false;
+    std::chrono::steady_clock::time_point _lastNetworkActivityAt{};
 };
 
 } // namespace OpenMeeting

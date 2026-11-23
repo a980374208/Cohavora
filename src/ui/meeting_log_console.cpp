@@ -494,14 +494,17 @@ void MeetingLogConsoleWindow::offer(const std::shared_ptr<SharedQueue> &queue,
 		entry.timeStr.capacity() + entry.severity.capacity() +
 		entry.component.capacity() + entry.sessionId.capacity() +
 		entry.operationId.capacity());
+	const bool active = g_activeConsole.load(std::memory_order_acquire) != nullptr;
+	const size_t maxEntries = active ? kMaxPendingEntries : kMaxDormantPendingEntries;
+	const size_t maxBytes = active ? kMaxPendingBytes : kMaxDormantPendingBytes;
 	std::lock_guard lock(queue->mutex);
-	if (queue->closed || entry.chargeBytes > kMaxPendingBytes) {
+	if (queue->closed || entry.chargeBytes > maxBytes) {
 		++queue->dropped;
 		return;
 	}
 	while (!queue->pending.empty() &&
-		(queue->pending.size() >= kMaxPendingEntries ||
-		 queue->pendingBytes + entry.chargeBytes > kMaxPendingBytes)) {
+		(queue->pending.size() >= maxEntries ||
+		 queue->pendingBytes + entry.chargeBytes > maxBytes)) {
 		queue->pendingBytes -= queue->pending.front().chargeBytes;
 		queue->pending.pop_front();
 		++queue->dropped;

@@ -9,6 +9,8 @@
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <map>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <system_error>
@@ -2218,6 +2220,8 @@ struct TelemetryHistoryStore::WorkerContext final {
     std::size_t current_record_bytes_ = 0;
     // Worker-owned; previous sessions survive current_records_ replacement.
     std::deque<PendingReport> pending_reports_;
+    std::map<std::string, TelemetryCheckpointVerifiedState> verified_checkpoints_;
+    bool initial_refresh_done_ = false;
     std::chrono::steady_clock::time_point next_history_refresh_{};
     std::deque<TelemetryLossRange> loss_ranges_pending_;
     unsigned loss_retry_count_ = 0;
@@ -2610,6 +2614,7 @@ void TelemetryHistoryStore::WorkerContext::RunLoop() {
                         current_records_.clear();
                         current_record_bytes_ = 0;
                         pending_reports_.clear();
+                        verified_checkpoints_.clear();
                         loss_ranges_pending_.clear();
                         status_.loss_ranges_pending = 0;
                         for (const auto& entry : status_.reports) {
@@ -2712,9 +2717,15 @@ void TelemetryHistoryStore::WorkerContext::FlushLossRanges(bool force) {
     try {
         // A loss burst must not trigger a full history scan after every
         // consumed job and amplify the admission stall that caused it.
+        bool queue_empty = false;
+        {
+            std::lock_guard lock(mutex_);
+            queue_empty = jobs_.empty();
+        }
         const auto owned = TelemetryHistoryOwnedBytes(root_);
         if (!owned || *owned > maximum_bytes_ ||
-            64 * 1024 > maximum_bytes_ - *owned || now >= next_history_refresh_)
+            64 * 1024 > maximum_bytes_ - *owned ||
+            ((force || queue_empty) && now >= next_history_refresh_))
             RefreshAndPruneReports(64 * 1024);
         const std::vector<TelemetryLossRange> batch(
             pending.begin(), pending.end());
@@ -2990,16 +3001,25 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
             status_.owned_scan_total_us += elapsed;
             status_.owned_scan_max_us = (std::max)(status_.owned_scan_max_us, elapsed);
         }
+        bool queue_empty = false;
+        {
+            std::lock_guard lock(mutex_);
+            queue_empty = jobs_.empty();
+        }
         if (!owned || *owned > maximum_bytes_ ||
-            reserve_bytes > maximum_bytes_ - *owned || now >= next_history_refresh_)
+            reserve_bytes > maximum_bytes_ - *owned ||
+            ((force || queue_empty) && now >= next_history_refresh_))
             RefreshAndPruneReports(reserve_bytes);
         if (Stopped()) return;
         const auto append_began = std::chrono::steady_clock::now();
         TelemetryCheckpointWork checkpoint_work;
+        const auto checkpoint_key = "cohavora-telemetry-v2-" + it->id;
+        auto& verified_state = verified_checkpoints_[checkpoint_key];
         const auto result = AppendTelemetryCheckpoint(
             root_, it->id, it->records,
-            (std::min)(maximum_bytes_ / 2, std::uint64_t{64} * 1024 * 1024),
-            process_run_id_, maximum_bytes_, control_.get(), &checkpoint_work);
+            (std::min)(maximum_bytes_ / 2, std::uint64_t{96} * 1024 * 1024),
+            process_run_id_, maximum_bytes_, control_.get(), &checkpoint_work,
+            &verified_state);
         {
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - append_began).count();
@@ -3056,6 +3076,7 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
             }
             it->next_attempt = now + std::chrono::seconds(15);
         } else {
+            verified_checkpoints_.erase(checkpoint_key);
             ++it->retry_count;
             if (it->first_failure == std::chrono::steady_clock::time_point{})
                 it->first_failure = now;
@@ -3158,7 +3179,10 @@ void TelemetryHistoryStore::WorkerContext::HandleClear(Job job) {
             removed = job.record_id.starts_with("cohavora-telemetry-v2-")
                 ? RemoveTelemetryCheckpoint(root_ / job.record_id)
                 : RemoveKnownReport(root_ / job.record_id);
-            if (removed) reason = "report_cleared";
+            if (removed) {
+                verified_checkpoints_.erase(job.record_id);
+                reason = "report_cleared";
+            }
         }
         RefreshAndPruneReports();
     } catch (...) {
@@ -3243,22 +3267,54 @@ void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
                 continue;
             }
             if (id.starts_with("cohavora-telemetry-v2-")) {
-                PruneTelemetryCheckpointOrphans(it->path());
                 const auto lock_path = it->path() / "writer.lock";
                 const bool has_lock = std::filesystem::exists(lock_path, error);
                 if (error) {
                     error.clear();
                     continue;
                 }
-                TelemetryCheckpointReadLease reader(it->path());
-                if (has_lock && !reader.acquired()) continue;
-                TelemetryCheckpointWork checkpoint_work;
-                const auto inspected = InspectTelemetryCheckpoint(it->path(), &checkpoint_work);
+                std::optional<TelemetryCheckpointStatus> cached_status;
+                bool used_cache = false;
                 {
-                    std::lock_guard lock(mutex_);
-                    status_.checkpoint_work.Add(checkpoint_work);
+                    TelemetryCheckpointReadLease reader(it->path());
+                    if (has_lock && !reader.acquired()) continue;
+                    if (initial_refresh_done_) {
+                        const auto cached = verified_checkpoints_.find(id);
+                        if (cached != verified_checkpoints_.end() &&
+                            TryVerifyTelemetryCheckpointFromState(
+                                it->path(), cached->second)) {
+                            cached_status = cached->second.status;
+                            used_cache = true;
+                        }
+                    }
+                    if (!cached_status) {
+                        TelemetryCheckpointWork checkpoint_work;
+                        cached_status = InspectTelemetryCheckpoint(
+                            it->path(), &checkpoint_work);
+                        std::lock_guard lock(mutex_);
+                        status_.checkpoint_work.Add(checkpoint_work);
+                    }
                 }
+                if (cached_status->valid && cached_status->orphan_files > 0) {
+                    if (PruneTelemetryCheckpointOrphans(it->path())) {
+                        const bool locked_now = std::filesystem::exists(lock_path, error);
+                        if (error) {
+                            error.clear();
+                            continue;
+                        }
+                        TelemetryCheckpointReadLease reader(it->path());
+                        if (locked_now && !reader.acquired()) continue;
+                        TelemetryCheckpointWork checkpoint_work;
+                        cached_status = InspectTelemetryCheckpoint(
+                            it->path(), &checkpoint_work);
+                        used_cache = false;
+                        std::lock_guard lock(mutex_);
+                        status_.checkpoint_work.Add(checkpoint_work);
+                    }
+                }
+                const auto& inspected = *cached_status;
                 if (!inspected.valid) {
+                    verified_checkpoints_.erase(id);
                     if (inspected.reason == "unsupported_version")
                         ++unsupported;
                     else {
@@ -3271,6 +3327,20 @@ void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
                         corrupt_bytes += bytes;
                     }
                     continue;
+                }
+                if (!used_cache) {
+                    if (inspected.orphan_files == 0) {
+                        TelemetryCheckpointVerifiedState state;
+                        if (CaptureVerifiedTelemetryCheckpointState(
+                                it->path(), inspected, &state)) {
+                            verified_checkpoints_.insert_or_assign(
+                                id, std::move(state));
+                        } else {
+                            verified_checkpoints_.erase(id);
+                        }
+                    } else {
+                        verified_checkpoints_.erase(id);
+                    }
                 }
                 TelemetryReportEntry entry;
                 entry.record_id = id;
@@ -3328,6 +3398,7 @@ void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
         if (corrupt_bytes <= kCorruptBudget &&
             item.modified >= corrupt_cutoff) break;
         if (DiscardCorruptTelemetryCheckpointArtifacts(item.path)) {
+            verified_checkpoints_.erase(item.path.filename().string());
             corrupt_bytes -= (std::min)(corrupt_bytes, item.bytes);
             ++corrupt_pruned;
         }
@@ -3358,6 +3429,7 @@ void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
             ? RemoveTelemetryCheckpoint(item.path)
             : RemoveKnownReport(item.path);
         if (removed) {
+            verified_checkpoints_.erase(item.path.filename().string());
             // Other runs may have written since the scan, and the index size
             // need not equal the owned bytes actually removed.
             const auto remaining = TelemetryHistoryOwnedBytes(root_);
@@ -3366,6 +3438,7 @@ void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
             item.entry.record_id.clear();
         }
     }
+    initial_refresh_done_ = true;
     std::lock_guard lock(mutex_);
     status_.reports.clear();
     for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {

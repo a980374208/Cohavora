@@ -199,9 +199,18 @@ private:
         winrt::check_hresult(screen_
             ? factory->CreateForMonitor(monitor_, winrt::guid_of<capture::GraphicsCaptureItem>(), winrt::put_abi(item_))
             : factory->CreateForWindow(window_, winrt::guid_of<capture::GraphicsCaptureItem>(), winrt::put_abi(item_)));
-        winrt::check_hresult(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
-            device_.put(), nullptr, context_.put()));
+        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr, 0, D3D11_SDK_VERSION, device_.put(), nullptr, context_.put());
+        if (FAILED(hr)) {
+            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
+                device_.put(), nullptr, context_.put());
+        }
+        winrt::check_hresult(hr);
+        if (auto mt = device_.try_as<ID3D10Multithread>()) {
+            mt->SetMultithreadProtected(TRUE);
+        }
         QueryD3d11AdapterLuid(device_.get(), &adapter_luid_);
         device_context_mutex_ = std::make_shared<std::mutex>();
         auto dxgi = device_.as<IDXGIDevice>();
@@ -443,7 +452,19 @@ private:
         adapter_luid_ = adapter_desc.AdapterLuid;
 
         D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
-        if (FAILED(D3D11CreateDevice(
+        HRESULT created = D3D11CreateDevice(
+            matched_adapter.Get(),
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            nullptr,
+            0,
+            D3D11_SDK_VERSION,
+            device_.GetAddressOf(),
+            &feature_level,
+            context_.GetAddressOf());
+        if (FAILED(created)) {
+            created = D3D11CreateDevice(
                 matched_adapter.Get(),
                 D3D_DRIVER_TYPE_UNKNOWN,
                 nullptr,
@@ -453,10 +474,15 @@ private:
                 D3D11_SDK_VERSION,
                 device_.GetAddressOf(),
                 &feature_level,
-                context_.GetAddressOf())) ||
-            !device_ || !context_) {
+                context_.GetAddressOf());
+        }
+        if (FAILED(created) || !device_ || !context_) {
             Close();
             return false;
+        }
+        Microsoft::WRL::ComPtr<ID3D10Multithread> mt;
+        if (SUCCEEDED(device_.As(&mt)) && mt) {
+            mt->SetMultithreadProtected(TRUE);
         }
 
         device_context_mutex_ = std::make_shared<std::mutex>();
