@@ -29,6 +29,7 @@ class QToolButton;
 namespace OpenMeeting {
 template <typename T> class QtCallbackGate;
 class AgentCoordinator;
+enum class AgentSpeechProtocolMode;
 enum class AgentSpeechSourceMode;
 struct AgentProfile;
 struct AgentSpeechProfile;
@@ -249,6 +250,7 @@ private:
 	void saveCopilotSttAppKey();
 	void clearCopilotSttAppKey();
 	void updateCopilotSttAppKeyStatus();
+	void applyCopilotSpeechProtocolPreset(OpenMeeting::AgentSpeechProtocolMode protocol, bool forceOverwrite);
 	void updateCopilotSttProtocolUi(bool refreshModelChoices = true);
 	void updateCopilotSttModelChoices(bool fromServerFetch = false);
 	void testCopilotConnection();

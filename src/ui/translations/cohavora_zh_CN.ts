@@ -7481,6 +7481,18 @@ Password: %6</source>
         <translation>火山引擎豆包流式</translation>
     </message>
     <message>
+        <source>DashScope Multimodal</source>
+        <translation>阿里云百炼多模态</translation>
+    </message>
+    <message>
+        <source>DashScope Inference</source>
+        <translation>阿里云百炼 Inference</translation>
+    </message>
+    <message>
+        <source>DashScope Qwen3 Realtime</source>
+        <translation>阿里云百炼 Qwen3 Realtime</translation>
+    </message>
+    <message>
         <source>Speech Source</source>
         <translation>语音来源</translation>
     </message>

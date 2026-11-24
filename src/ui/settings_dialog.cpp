@@ -3624,6 +3624,15 @@ QWidget *SettingsDialog::buildCopilotPage() {
 	});
 	connect(_copilotSttProtocolCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
 		this, [this, onSttFieldEdited, commitLive](int) {
+			if (!_updatingUi &&
+				selectedCopilotSpeechSourceMode() == OpenMeeting::AgentSpeechSourceMode::CustomProfile &&
+				_copilotSttProtocolCombo) {
+				const auto selectedProto = OpenMeeting::agentSpeechProtocolModeFromInt(
+					_copilotSttProtocolCombo->currentData().toInt());
+				if (selectedProto != OpenMeeting::AgentSpeechProtocolMode::Auto) {
+					applyCopilotSpeechProtocolPreset(selectedProto, /*forceOverwrite=*/true);
+				}
+			}
 			onSttFieldEdited();
 			updateCopilotSttProtocolUi();
 			updateCopilotSttKeyStatus();
@@ -4593,6 +4602,10 @@ void SettingsDialog::onCopilotSpeechSourceModeChanged(OpenMeeting::AgentSpeechSo
 		updateCopilotSttModeUi();
 		return;
 	}
+	const auto previousFollowProto =
+		(coord.speechSourceMode() == OpenMeeting::AgentSpeechSourceMode::FollowChat && _copilotSttProtocolCombo)
+			? OpenMeeting::agentSpeechProtocolModeFromInt(_copilotSttProtocolCombo->currentData().toInt())
+			: OpenMeeting::AgentSpeechProtocolMode::Auto;
 	const bool oldUpdating = _updatingUi;
 	_updatingUi = true;
 	// Commit any pending edits in the previous mode before switching cleanly.
@@ -4618,6 +4631,31 @@ void SettingsDialog::onCopilotSpeechSourceModeChanged(OpenMeeting::AgentSpeechSo
 	resetCopilotSttTestStatus();
 	syncCopilotControls();
 	if (mode == OpenMeeting::AgentSpeechSourceMode::CustomProfile) {
+		const auto &sp = coord.speechProfile();
+		const bool untouchedCustomProfile =
+			(sp.protocol == OpenMeeting::AgentSpeechProtocolMode::Auto) &&
+			sp.baseUrl.trimmed().isEmpty() &&
+			!coord.hasDictationApiKey();
+		if (untouchedCustomProfile && previousFollowProto != OpenMeeting::AgentSpeechProtocolMode::Auto) {
+			if (_copilotSttProtocolCombo) {
+				const QSignalBlocker protoBlocker(_copilotSttProtocolCombo);
+				const int pIdx = _copilotSttProtocolCombo->findData(static_cast<int>(previousFollowProto));
+				if (pIdx >= 0) {
+					_copilotSttProtocolCombo->setCurrentIndex(pIdx);
+				}
+			}
+			applyCopilotSpeechProtocolPreset(previousFollowProto, /*forceOverwrite=*/false);
+			updateCopilotSttProtocolUi();
+			updateCopilotSttKeyStatus();
+			commitCopilotProfile(false);
+		} else if (sp.protocol != OpenMeeting::AgentSpeechProtocolMode::Auto &&
+			_copilotSttBaseUrl &&
+			_copilotSttBaseUrl->text().trimmed().isEmpty()) {
+			applyCopilotSpeechProtocolPreset(sp.protocol, /*forceOverwrite=*/false);
+			updateCopilotSttProtocolUi();
+			updateCopilotSttKeyStatus();
+			commitCopilotProfile(false);
+		}
 		refreshCopilotSpeechModels(true);
 	}
 }
@@ -5233,6 +5271,54 @@ void SettingsDialog::updateCopilotSttAppKeyStatus() {
 			"Volcengine App Key loaded (session memory only).");
 	}
 	setHintIcon(_copilotSttAppKeyHintIcon, text);
+}
+
+void SettingsDialog::applyCopilotSpeechProtocolPreset(
+		OpenMeeting::AgentSpeechProtocolMode protocol,
+		bool forceOverwrite) {
+	if (selectedCopilotSpeechSourceMode() != OpenMeeting::AgentSpeechSourceMode::CustomProfile ||
+		protocol == OpenMeeting::AgentSpeechProtocolMode::Auto) {
+		return;
+	}
+	const QString defaultUrl = OpenMeeting::defaultSpeechEndpoint(protocol);
+	const QString defaultName = OpenMeeting::defaultSpeechProfileName(protocol);
+
+	if (_copilotSttBaseUrl && !defaultUrl.isEmpty() &&
+		(forceOverwrite || _copilotSttBaseUrl->text().trimmed().isEmpty())) {
+		const QSignalBlocker blocker(_copilotSttBaseUrl);
+		_copilotSttBaseUrl->setText(defaultUrl);
+	}
+
+	if (_copilotSttProfileName && !defaultName.isEmpty()) {
+		const QString currentName = _copilotSttProfileName->text().trimmed();
+		const auto isIndexedDefaultName = [&currentName](const QString &pattern) {
+			const int placeholderIdx = pattern.indexOf(QStringLiteral("%1"));
+			if (placeholderIdx < 0) {
+				return false;
+			}
+			const QString prefix = pattern.left(placeholderIdx);
+			const QString suffix = pattern.mid(placeholderIdx + 2);
+			if (!currentName.startsWith(prefix) || !currentName.endsWith(suffix)) {
+				return false;
+			}
+			const QString numStr = currentName.mid(
+				prefix.size(),
+				currentName.size() - prefix.size() - suffix.size()).trimmed();
+			bool ok = false;
+			const int num = numStr.toInt(&ok);
+			return ok && num > 0;
+		};
+		const bool isGenericDefaultName =
+			currentName.isEmpty() ||
+			currentName == QStringLiteral("Default Speech") ||
+			currentName == QCoreApplication::translate("MeetingUI", "Default Speech") ||
+			isIndexedDefaultName(QStringLiteral("Speech Profile %1")) ||
+			isIndexedDefaultName(QCoreApplication::translate("MeetingUI", "Speech Profile %1"));
+		if (forceOverwrite || isGenericDefaultName) {
+			const QSignalBlocker blocker(_copilotSttProfileName);
+			_copilotSttProfileName->setText(defaultName);
+		}
+	}
 }
 
 void SettingsDialog::updateCopilotSttProtocolUi(bool refreshModelChoices) {

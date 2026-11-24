@@ -630,6 +630,59 @@ struct AgentChatSessionData {
 	}
 }
 
+[[nodiscard]] inline QString defaultSpeechEndpoint(AgentSpeechProtocolMode mode) {
+	switch (mode) {
+	case AgentSpeechProtocolMode::OpenAiTranscriptions:
+		return QStringLiteral("https://api.openai.com/v1/audio/transcriptions");
+	case AgentSpeechProtocolMode::ChatInputAudio:
+		return QStringLiteral("https://api.openai.com/v1/chat/completions");
+	case AgentSpeechProtocolMode::DashScopeMultimodal:
+		return QStringLiteral("https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation");
+	case AgentSpeechProtocolMode::OpenAiRealtimeWs:
+	case AgentSpeechProtocolMode::DashScopeInferenceWs:
+	case AgentSpeechProtocolMode::DashScopeQwenRealtimeWs:
+	case AgentSpeechProtocolMode::DeepgramWs:
+	case AgentSpeechProtocolMode::AssemblyAiV3Ws:
+	case AgentSpeechProtocolMode::VolcengineBigModelWs:
+	case AgentSpeechProtocolMode::ElevenLabsScribeWs:
+	case AgentSpeechProtocolMode::XaiSttWs:
+		return defaultStreamingSpeechEndpoint(mode);
+	case AgentSpeechProtocolMode::Auto:
+	default:
+		return {};
+	}
+}
+
+[[nodiscard]] inline QString defaultSpeechProfileName(AgentSpeechProtocolMode mode) {
+	switch (mode) {
+	case AgentSpeechProtocolMode::OpenAiTranscriptions:
+		return QStringLiteral("OpenAI Transcriptions");
+	case AgentSpeechProtocolMode::ChatInputAudio:
+		return QStringLiteral("OpenAI Chat Audio");
+	case AgentSpeechProtocolMode::DashScopeMultimodal:
+		return QCoreApplication::translate("MeetingUI", "DashScope Multimodal");
+	case AgentSpeechProtocolMode::OpenAiRealtimeWs:
+		return QStringLiteral("OpenAI Realtime");
+	case AgentSpeechProtocolMode::DashScopeInferenceWs:
+		return QCoreApplication::translate("MeetingUI", "DashScope Inference");
+	case AgentSpeechProtocolMode::DashScopeQwenRealtimeWs:
+		return QCoreApplication::translate("MeetingUI", "DashScope Qwen3 Realtime");
+	case AgentSpeechProtocolMode::DeepgramWs:
+		return QStringLiteral("Deepgram");
+	case AgentSpeechProtocolMode::AssemblyAiV3Ws:
+		return QStringLiteral("AssemblyAI");
+	case AgentSpeechProtocolMode::VolcengineBigModelWs:
+		return QCoreApplication::translate("MeetingUI", "Volcengine SAUC");
+	case AgentSpeechProtocolMode::ElevenLabsScribeWs:
+		return QStringLiteral("ElevenLabs");
+	case AgentSpeechProtocolMode::XaiSttWs:
+		return QStringLiteral("xAI Grok STT");
+	case AgentSpeechProtocolMode::Auto:
+	default:
+		return {};
+	}
+}
+
 [[nodiscard]] inline AgentReasoningEffort reasoningEffortFromInt(int raw) {
 	switch (raw) {
 	case static_cast<int>(AgentReasoningEffort::Low):
