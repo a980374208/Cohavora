@@ -30,6 +30,7 @@ bool SameParticipantState(const PublicationCatalogParticipant& left,
                           const PublicationCatalogParticipant& right) {
     if (left.key != right.key || left.display_name != right.display_name ||
         left.speaking != right.speaking || left.audio_level != right.audio_level ||
+        left.is_agent != right.is_agent ||
         left.publications.size() != right.publications.size()) {
         return false;
     }
@@ -110,6 +111,7 @@ CatalogApplyResult PublicationCatalog::Apply(const ParticipantEvent& event) {
             ? event.participant.key.identity : event.participant.state.name;
         projected.speaking = event.participant.state.speaking;
         projected.audio_level = event.participant.state.audio_level;
+        projected.is_agent = IsRoomAgentParticipant(event.participant.state);
         projected.publications.reserve(event.participant.publications.size());
         for (const auto& publication : event.participant.publications) {
             if (!IsTrackTicketActive(publication.ticket, publication.key) ||

@@ -1,5 +1,6 @@
 #include <QtCore/QCoreApplication>
 #include "src/core/meeting_coordinator.h"
+#include "src/media/audio_vad.h"
 #include "src/rtc/webrtc_manager.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/meeting_log_console.h"
@@ -497,6 +498,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("uiProbeLateCallbacks"),
                   QVariant::fromValue<qulonglong>(snapshot.ui_probe_late_callbacks));
     result.insert(QStringLiteral("uiProbeInFlight"), snapshot.ui_probe_in_flight);
+    result.insert(QStringLiteral("statsSamplingEnabled"), snapshot.stats_sampling_enabled);
     result.insert(QStringLiteral("statsInFlight"), snapshot.stats_in_flight);
     result.insert(QStringLiteral("actualPcCount"), snapshot.actual_pc_count);
     result.insert(QStringLiteral("successfulPcCount"), snapshot.successful_pc_count);
@@ -902,6 +904,8 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qlonglong>(snapshot.last_connect_to_first_decoded_ms));
     result.insert(QStringLiteral("lastSubscribeToFirstDecodedMs"),
                   QVariant::fromValue<qlonglong>(snapshot.last_subscribe_to_first_decoded_ms));
+    result.insert(QStringLiteral("firstSubscribeToFirstDecodedMs"),
+                  QVariant::fromValue<qlonglong>(snapshot.first_subscribe_to_first_decoded_ms));
     result.insert(QStringLiteral("lastDecodedWidth"), snapshot.last_decoded_width);
     result.insert(QStringLiteral("lastDecodedHeight"), snapshot.last_decoded_height);
     result.insert(QStringLiteral("nativeVideoFreezeAvailability"), QString::fromLatin1(
@@ -1097,6 +1101,8 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qulonglong>(snapshot.stale_audio_binding_drops));
     result.insert(QStringLiteral("lastSubscribeToFirstPcmMs"),
                   QVariant::fromValue<qlonglong>(snapshot.last_subscribe_to_first_pcm_ms));
+    result.insert(QStringLiteral("firstSubscribeToFirstPcmMs"),
+                  QVariant::fromValue<qlonglong>(snapshot.first_subscribe_to_first_pcm_ms));
     result.insert(QStringLiteral("lastAudioSampleRate"), snapshot.last_audio_sample_rate);
     result.insert(QStringLiteral("lastAudioChannels"), snapshot.last_audio_channels);
     result.insert(QStringLiteral("audioQualityAvailability"), QString::fromLatin1(
@@ -1180,6 +1186,10 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qlonglong>(snapshot.last_connect_to_first_render_ms));
     result.insert(QStringLiteral("lastAdmissionToFirstRenderMs"),
                   QVariant::fromValue<qlonglong>(snapshot.last_admission_to_first_render_ms));
+    result.insert(QStringLiteral("firstAdmissionToFirstRenderMs"),
+                  QVariant::fromValue<qlonglong>(snapshot.first_admission_to_first_render_ms));
+    result.insert(QStringLiteral("firstSubscribeToFirstRenderMs"),
+                  QVariant::fromValue<qlonglong>(snapshot.first_subscribe_to_first_render_ms));
     result.insert(QStringLiteral("renderAverageIntervalMs"),
                   snapshot.render_average_interval_ms);
     result.insert(QStringLiteral("renderMaximumIntervalMs"),
@@ -1653,6 +1663,12 @@ static std::vector<livekit::SystemAudioOutput> DiscoverScreenShareAudioOutputs()
 static void CopyParticipantState(const livekit::ParticipantStateSnapshot &state,
                                  ParticipantInfo *info) {
     if (!info) return;
+    info->kind = state.kind;
+    info->isAgent = livekit::IsRoomAgentParticipant(state);
+    const auto agentStateIt = state.attributes.find("lk.agent.state");
+    info->agentState = agentStateIt != state.attributes.end()
+        ? QString::fromStdString(agentStateIt->second).trimmed()
+        : QString();
     info->connectionQuality = state.connection_quality;
     info->connectionQualityScore = state.connection_quality_score;
     info->permissions = state.permission;
@@ -1708,14 +1724,16 @@ public:
         if (!_uiGate || !_uiGate->active() || _generation == 0) return;
         if (livekit::PublicationCatalog::Consumes(event.kind)) {
             auto session = _session.lock();
-            if (!session || !session->post([gate = _uiGate, session,
-                                            room = _room, event] {
-                    if (session->updatePublicationCatalogOnStrand(event) ==
-                        livekit::CatalogApplyResult::Applied) {
-                        MeetingCoordinator::applyRemoteMediaDemandOnStrand(
-                            gate, session, room);
-                    }
-                })) {
+            if (!session || !session->enqueuePublicationCatalogEvent(
+                    session, event,
+                    [gate = _uiGate,
+                     weakSession = std::weak_ptr<MeetingSessionRuntime>(session),
+                     room = _room] {
+                        if (auto current = weakSession.lock()) {
+                            MeetingCoordinator::applyRemoteMediaDemandOnStrand(
+                                gate, current, room);
+                        }
+                    })) {
                 return;
             }
         }
@@ -2107,7 +2125,6 @@ public:
         QString realNick = ResolveParticipantNickname(p);
         _uiGate->Post([generation, id, realNick, p](MeetingCoordinator* coordinator) {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
-            MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_JOIN", QCoreApplication::translate("MeetingUI", "Participant joined: %1 (display name: %2)").arg(id).arg(realNick));
             ParticipantInfo info;
             info.identity = id;
             info.name = realNick;
@@ -2116,9 +2133,16 @@ public:
             info.isAudioMuted = true;
             info.isVideoEnabled = false;
             CopyParticipantState(p, &info);
+            if (!coordinator->_ignoredTranscriptionSenderIdentity.isEmpty() &&
+                id == coordinator->_ignoredTranscriptionSenderIdentity) {
+                info.isAgent = true;
+            }
             coordinator->_participants[id] = info;
             coordinator->updateParticipantListAndNotify();
-            emit coordinator->participantJoined(id, realNick);
+            if (!info.isAgent) {
+                MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_JOIN", QCoreApplication::translate("MeetingUI", "Participant joined: %1 (display name: %2)").arg(id).arg(realNick));
+                emit coordinator->participantJoined(id, realNick);
+            }
         });
     }
 
@@ -2138,8 +2162,13 @@ public:
                 if (!it->second.isLocal) {
                     it->second.name = realNick;
                 }
+                const bool isAgent = it->second.isAgent ||
+                    (!coordinator->_ignoredTranscriptionSenderIdentity.isEmpty() &&
+                     id == coordinator->_ignoredTranscriptionSenderIdentity);
                 coordinator->updateParticipantListAndNotify();
-                emit coordinator->participantJoined(id, realNick);
+                if (!isAgent) {
+                    emit coordinator->participantJoined(id, realNick);
+                }
             }
         });
     }
@@ -2150,11 +2179,16 @@ public:
         QString id = QString::fromStdString(p->identity());
         _uiGate->Post([generation, id](MeetingCoordinator* coordinator) {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
-            MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_LEFT", QCoreApplication::translate("MeetingUI", "Participant left: %1").arg(id));
+            const auto it = coordinator->_participants.find(id);
+            const bool wasAgent = (it != coordinator->_participants.end() && it->second.isAgent) ||
+                (!coordinator->_ignoredTranscriptionSenderIdentity.isEmpty() &&
+                 id == coordinator->_ignoredTranscriptionSenderIdentity);
             coordinator->_participants.erase(id);
             coordinator->updateParticipantListAndNotify();
-            emit coordinator->participantLeft(id);
-
+            if (!wasAgent) {
+                MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_LEFT", QCoreApplication::translate("MeetingUI", "Participant left: %1").arg(id));
+                emit coordinator->participantLeft(id);
+            }
         });
     }
 
@@ -2325,11 +2359,14 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
     const bool participantCleanup =
         event.kind == livekit::ParticipantEventKind::Departure;
     const bool trackCleanup =
-        event.kind == livekit::ParticipantEventKind::TrackUnavailable;
+        event.kind == livekit::ParticipantEventKind::TrackUnavailable ||
+        event.kind == livekit::ParticipantEventKind::DataTrackUnpublished;
     const bool requiresParticipantTicket =
         event.kind != livekit::ParticipantEventKind::ActiveSpeakers &&
         event.kind != livekit::ParticipantEventKind::DataReceived &&
-        !participantCleanup;
+        event.kind != livekit::ParticipantEventKind::TranscriptionReceived &&
+        !participantCleanup &&
+        !trackCleanup;
 
     if (requiresParticipantTicket &&
         !livekit::IsParticipantTicketActive(
@@ -2347,7 +2384,7 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
             eventRoomGeneration > _nativeRoomGeneration) {
             std::vector<QString> oldRemoteIdentities;
             for (const auto &[identity, info] : _participants) {
-                if (!info.isLocal) oldRemoteIdentities.push_back(identity);
+                if (!info.isLocal && !info.isAgent) oldRemoteIdentities.push_back(identity);
                 if (_mediaReconnectGeneration == 0 ||
                     eventRoomGeneration <= _mediaReconnectGeneration ||
                     info.participantKey.native_room_generation > _mediaReconnectGeneration)
@@ -2355,7 +2392,10 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
             }
             _nativeRoomGeneration = eventRoomGeneration;
             _participants.clear();
-            _remoteVideoTracks.clear();
+            if (!_remoteVideoTracks.empty()) {
+                _remoteVideoTracks.clear();
+                ++_remoteVideoTracksRevision;
+            }
             _participantEventSequences.clear();
             updateParticipantListAndNotify();
             if (!sessionStillCurrent()) return;
@@ -2408,8 +2448,15 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
             }
         }
         if (participantStillCurrent()) {
+            const auto existing = _participants.find(identity);
+            const bool wasAgent = (existing != _participants.end() && existing->second.isAgent) ||
+                (!_ignoredTranscriptionSenderIdentity.isEmpty() &&
+                 identity == _ignoredTranscriptionSenderIdentity);
             _participants.erase(identity);
-            _remoteVideoTracks.erase(identity);
+            removeRemoteAudioTracksForParticipant(identity);
+            if (_remoteVideoTracks.erase(identity) > 0) {
+                ++_remoteVideoTracksRevision;
+            }
             updateParticipantListAndNotify();
             if (!sessionStillCurrent()) return;
             for (const auto &trackSid : trackSids) {
@@ -2418,7 +2465,9 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
                 if (!sessionStillCurrent()) return;
             }
             if (owner->_participants.find(identity) != owner->_participants.end()) return;
-            emit participantLeft(identity);
+            if (!wasAgent) {
+                emit participantLeft(identity);
+            }
         }
         return;
     }
@@ -2440,6 +2489,13 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
             }
             it->second.isSpeaking = speaker.speaking;
             it->second.audioLevel = speaker.audio_level;
+            if (it->second.isLocal && !_localAudioLevelSubscription) {
+                const float lvl = std::clamp(speaker.audio_level, 0.0f, 1.0f);
+                if (std::abs(_localAudioLevel - lvl) > 0.005f) {
+                    _localAudioLevel = lvl;
+                    emit localAudioLevelChanged(lvl);
+                }
+            }
             accepted.push_back(speaker);
         }
         updateParticipantListAndNotify();
@@ -2472,6 +2528,95 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         return;
     }
 
+    if (event.kind == livekit::ParticipantEventKind::TranscriptionReceived) {
+        if (!event.sender.encryptionCurrent()) return;
+        const bool serverOrigin = event.sender.origin == livekit::SenderOrigin::Server;
+        const bool resolvedOrigin = event.sender.origin == livekit::SenderOrigin::Unresolved;
+        if (!serverOrigin && !resolvedOrigin &&
+            !livekit::IsParticipantTicketActive(
+                event.sender.ticket, event.sender.key)) {
+            return;
+        }
+        if (!event.transcription.has_value() || event.transcription->segments.empty()) {
+            return;
+        }
+        constexpr int kMaxStoredMeetingTranscripts = 120;
+        const auto &tr = *event.transcription;
+        const QString senderId = QString::fromStdString(tr.sender_identity);
+        if (!_ignoredTranscriptionSenderIdentity.isEmpty() &&
+            senderId == _ignoredTranscriptionSenderIdentity) {
+            return;
+        }
+        const QString speakerIdentity = QString::fromStdString(
+            !tr.transcribed_participant_identity.empty()
+                ? tr.transcribed_participant_identity
+                : tr.sender_identity);
+        QString speakerName = speakerIdentity;
+        bool isLocalSpeaker = (!speakerIdentity.isEmpty() && speakerIdentity == _sessionManager.userId());
+        if (const auto pit = _participants.find(speakerIdentity); pit != _participants.end()) {
+            isLocalSpeaker = pit->second.isLocal;
+            if (!pit->second.name.trimmed().isEmpty()) {
+                speakerName = pit->second.name.trimmed();
+            }
+        } else if (speakerIdentity.isEmpty() && !senderId.isEmpty()) {
+            speakerName = senderId;
+        }
+        if (speakerName.isEmpty()) {
+            speakerName = QCoreApplication::translate("MeetingUI", "Participant");
+        }
+
+        const QString trackSid = QString::fromStdString(tr.track_sid);
+        const auto segments = tr.segments;
+        for (const auto &seg : segments) {
+            if (!sessionStillCurrent()) return;
+            MeetingTranscriptItem item;
+            item.segmentId = QString::fromStdString(seg.id);
+            item.senderIdentity = senderId;
+            item.speakerIdentity = speakerIdentity;
+            item.speakerName = speakerName;
+            item.trackSid = trackSid;
+            item.text = QString::fromStdString(seg.text);
+            item.sourceText = QString::fromStdString(seg.source_text);
+            item.sourceLanguage = QString::fromStdString(seg.source_language);
+            item.language = QString::fromStdString(seg.language);
+            item.timestampMs = seg.last_received_time_ms > 0
+                ? static_cast<qint64>(seg.last_received_time_ms)
+                : QDateTime::currentMSecsSinceEpoch();
+            item.isFinal = seg.is_final;
+            item.isLocalSpeaker = isLocalSpeaker;
+            item.isAgentGenerated = tr.generated;
+            item.isTranslated = seg.is_translated;
+
+            if (!item.text.trimmed().isEmpty()) {
+                if (item.isLocalSpeaker) {
+                    _roomHasLocalTranscription = true;
+                }
+                int existingIdx = -1;
+                if (!item.segmentId.isEmpty()) {
+                    for (int idx = _recentTranscripts.size() - 1; idx >= 0; --idx) {
+                        const auto &existing = _recentTranscripts.at(idx);
+                        if (existing.segmentId == item.segmentId &&
+                            existing.speakerIdentity == item.speakerIdentity) {
+                            existingIdx = idx;
+                            break;
+                        }
+                    }
+                }
+                if (existingIdx >= 0) {
+                    _recentTranscripts[existingIdx] = item;
+                } else {
+                    _recentTranscripts.push_back(item);
+                    while (_recentTranscripts.size() > kMaxStoredMeetingTranscripts) {
+                        _recentTranscripts.removeFirst();
+                    }
+                }
+            }
+            emit transcriptionReceived(item);
+            if (!sessionStillCurrent()) return;
+        }
+        return;
+    }
+
     if (event.kind == livekit::ParticipantEventKind::TextStreamOpened ||
         event.kind == livekit::ParticipantEventKind::ByteStreamOpened) {
         if (!livekit::IsParticipantTicketActive(
@@ -2494,6 +2639,10 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
     if (event.kind == livekit::ParticipantEventKind::TrackUnavailable) {
         const QString trackSid = QString::fromStdString(
             event.track_key.publication_sid);
+        if (const auto audioIt = _remoteAudioTracks.find(trackSid);
+            audioIt != _remoteAudioTracks.end()) {
+            _remoteAudioTracks.erase(audioIt);
+        }
         auto participantTracks = _remoteVideoTracks.find(identity);
         if (participantTracks == _remoteVideoTracks.end()) return;
         const auto track = participantTracks->second.find(trackSid);
@@ -2507,12 +2656,32 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         if (participantTracks->second.empty()) {
             _remoteVideoTracks.erase(participantTracks);
         }
+        ++_remoteVideoTracksRevision;
         emit remoteVideoTrackUnavailable(identity, trackSid);
+        return;
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::DataTrackUnpublished) {
+        if (_nativeRoomGeneration != 0 && eventRoomGeneration != 0 &&
+            eventRoomGeneration < _nativeRoomGeneration) {
+            return;
+        }
+        const QString trackSid = QString::fromStdString(event.data_track_sid);
+        if (!identity.isEmpty() && !trackSid.isEmpty()) {
+            emit dataTrackUnpublished(identity, trackSid);
+        }
         return;
     }
 
     if (!livekit::IsParticipantTicketActive(
             event.participant.ticket, key)) {
+        return;
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::DataTrackPublished) {
+        if (!identity.isEmpty() && event.data_track) {
+            emit dataTrackPublished(identity, event.data_track);
+        }
         return;
     }
 
@@ -2525,16 +2694,23 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         const auto existing = _participants.find(identity);
         const bool replacing = existing != _participants.end() &&
             existing->second.participantKey != key;
+        const bool prevWasAgent = (existing != _participants.end() && !replacing)
+            ? existing->second.isAgent : false;
+        const bool replacedWasAgent = replacing && existing->second.isAgent;
         const bool isNew = existing == _participants.end() || replacing;
         if (replacing) {
             const auto oldKey = existing->second.participantKey;
             _participants.erase(existing);
-            _remoteVideoTracks.erase(identity);
+            if (_remoteVideoTracks.erase(identity) > 0) {
+                ++_remoteVideoTracksRevision;
+            }
             cancelInboundTransfersForParticipant(oldKey);
             updateParticipantListAndNotify();
             if (!valueStillCurrent() || owner->_participants.find(identity) != owner->_participants.end()) return;
-            emit participantLeft(identity);
-            if (!valueStillCurrent() || owner->_participants.find(identity) != owner->_participants.end()) return;
+            if (!replacedWasAgent) {
+                emit participantLeft(identity);
+                if (!valueStillCurrent() || owner->_participants.find(identity) != owner->_participants.end()) return;
+            }
         }
 
         ParticipantInfo info;
@@ -2557,6 +2733,10 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         info.participantTicket = event.participant.ticket;
         info.lastEventSequence = event.event_sequence;
         CopyParticipantState(event.participant.state, &info);
+        if (!_ignoredTranscriptionSenderIdentity.isEmpty() &&
+            identity == _ignoredTranscriptionSenderIdentity) {
+            info.isAgent = true;
+        }
         // Local effective state includes device readiness and newer UI intent.
         // An older publication snapshot must not re-enable a failed device.
         for (const auto &publication : event.participant.state.publications) {
@@ -2576,8 +2756,12 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
                     const auto video = participantTracks->second.find(QString::fromStdString(publication.sid));
                     if (video != participantTracks->second.end() &&
                         video->second.key.participant == key && video->second.track == publication.track) {
-                        video->second.muted = publication.muted;
-                        video->second.paused = publication.stream_state == livekit::TrackPublication::StreamState::Paused;
+                        const bool paused = publication.stream_state == livekit::TrackPublication::StreamState::Paused;
+                        if (video->second.muted != publication.muted || video->second.paused != paused) {
+                            video->second.muted = publication.muted;
+                            video->second.paused = paused;
+                            ++_remoteVideoTracksRevision;
+                        }
                     }
                 }
             }
@@ -2589,7 +2773,12 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         updateParticipantListAndNotify();
         if (!valueStillCurrent() || !participantStillCurrent()) return;
 
-        if (isNew && !info.isLocal) {
+        if (info.isAgent) {
+            if (!isNew && !prevWasAgent) {
+                emit participantLeft(identity);
+                if (!valueStillCurrent() || !participantStillCurrent()) return;
+            }
+        } else if ((isNew && !info.isLocal) || (!isNew && prevWasAgent)) {
             emit participantJoined(identity, info.name);
             if (!valueStillCurrent() || !participantStillCurrent()) return;
         }
@@ -2629,12 +2818,35 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
                 event.track_ticket, event.track_key) ||
             !livekit::IsMediaBindingTicketActive(
                 event.media_binding_ticket, event.media_binding_key) ||
-            event.publication.kind != livekit::TrackKind::Video ||
             !event.publication.track) {
             return;
         }
         const QString trackSid = QString::fromStdString(
             event.track_key.publication_sid);
+        if (event.publication.kind == livekit::TrackKind::Audio) {
+            if (!event.participant.is_local &&
+                IsMicrophoneSource(event.publication.source)) {
+                const auto pit = _participants.find(identity);
+                const bool isAgent = (pit != _participants.end() && pit->second.isAgent);
+                if (!isAgent) {
+                    QString speakerName = identity;
+                    if (pit != _participants.end() && !pit->second.name.trimmed().isEmpty()) {
+                        speakerName = pit->second.name.trimmed();
+                    }
+                    auto &entry = _remoteAudioTracks[trackSid];
+                    entry.subscription.reset();
+                    entry.speakerIdentity = identity;
+                    entry.speakerName = speakerName;
+                    entry.trackSid = trackSid;
+                    entry.track = event.publication.track;
+                    bindRemoteAudioTrackSubscription(entry);
+                }
+            }
+            return;
+        }
+        if (event.publication.kind != livekit::TrackKind::Video) {
+            return;
+        }
         const auto participantTracks = _remoteVideoTracks.find(identity);
         if (participantTracks != _remoteVideoTracks.end()) {
             const auto existing = participantTracks->second.find(trackSid);
@@ -2653,6 +2865,7 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
             event.publication.track,
             event.publication.muted,
             event.publication.stream_state == livekit::TrackPublication::StreamState::Paused};
+        ++_remoteVideoTracksRevision;
         emit remoteVideoTrackAvailable(identity, event.publication.track);
     }
 }
@@ -2740,10 +2953,12 @@ MeetingCoordinator::MeetingCoordinator(SessionManager &sessionManager,
     (void)SessionShutdownService::Instance();
     qRegisterMetaType<livekit::RoomDisconnectReason>("livekit::RoomDisconnectReason");
     qRegisterMetaType<MeetingRoomInfo>("OpenMeeting::MeetingRoomInfo");
+    qRegisterMetaType<MeetingTranscriptItem>("OpenMeeting::MeetingTranscriptItem");
     qRegisterMetaType<ScreenShareAudioOutputsSnapshot>("OpenMeeting::ScreenShareAudioOutputsSnapshot");
     qRegisterMetaType<livekit::ParticipantPermission>("livekit::ParticipantPermission");
     qRegisterMetaType<std::shared_ptr<livekit::TextStreamReader>>("std::shared_ptr<livekit::TextStreamReader>");
     qRegisterMetaType<std::shared_ptr<livekit::ByteStreamReader>>("std::shared_ptr<livekit::ByteStreamReader>");
+    qRegisterMetaType<std::shared_ptr<livekit::RemoteDataTrack>>("std::shared_ptr<livekit::RemoteDataTrack>");
     _localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
     _localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 
@@ -2772,6 +2987,10 @@ MeetingCoordinator::MeetingCoordinator(SessionManager &sessionManager,
             this, [this](SessionInvalidationReason reason) {
                 handleSessionInvalidated(reason);
             }, Qt::QueuedConnection);
+    connect(&_sessionManager, &SessionManager::preferencesChanged,
+            this, [this](const MediaPreferences &prefs) {
+                applyContinuousStatsSamplingPreference(prefs.enableContinuousStatsSampling);
+            });
     connect(&_sessionManager, &SessionManager::loggedOut, this, [this]() {
         if (!_sessionManager.isSessionInvalidating())
             handleSessionInvalidated(SessionInvalidationReason::UserLogout);
@@ -3003,6 +3222,35 @@ void MeetingCoordinator::finishStartupTelemetry(
     }
     _startupTelemetryOperationId.clear();
     _startupTelemetry.reset();
+}
+
+void MeetingCoordinator::applyContinuousStatsSamplingPreference(bool enabled) {
+    auto session = _sessionRuntime;
+    auto room = _room;
+    if (!session || !room || !_sessionRunning.load(std::memory_order_acquire)) {
+        return;
+    }
+    session->post([session, room, enabled] {
+        auto telemetry = session->telemetry();
+        if (!telemetry) {
+            return;
+        }
+        if (enabled) {
+            if (!telemetry->IsStatsSamplingEnabledOnStrand()) {
+                telemetry->StartStatsSamplingOnStrand(
+                    [weak_room = std::weak_ptr<livekit::Room>(room)](
+                        livekit::telemetry::SessionTelemetry::LateCompletion late_completion)
+                        -> asio::awaitable<livekit::RoomStatsReport> {
+                        if (auto current = weak_room.lock()) {
+                            co_return co_await current->GetStats(std::move(late_completion));
+                        }
+                        co_return livekit::RoomStatsReport{};
+                    });
+            }
+        } else if (telemetry->IsStatsSamplingEnabledOnStrand()) {
+            telemetry->StopStatsSamplingOnStrand();
+        }
+    });
 }
 
 void MeetingCoordinator::publishDetachedAdmissionTelemetry(
@@ -3906,17 +4154,21 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
         auto session = _sessionRuntime;
         auto room = _room;
         const auto generation = session->generation();
-        session->post([gate = _sessionUiGate, session, room, generation] {
+        const bool continuousStatsEnabled =
+            _sessionManager.mediaPreferences().enableContinuousStatsSampling;
+        session->post([gate = _sessionUiGate, session, room, generation, continuousStatsEnabled] {
             auto telemetry = session->telemetry();
-            telemetry->StartStatsSamplingOnStrand(
-                [weak_room = std::weak_ptr<livekit::Room>(room)](
-                    livekit::telemetry::SessionTelemetry::LateCompletion late_completion)
-                    -> asio::awaitable<livekit::RoomStatsReport> {
-                    if (auto current = weak_room.lock()) {
-                        co_return co_await current->GetStats(std::move(late_completion));
-                    }
-                    co_return livekit::RoomStatsReport{};
-                });
+            if (continuousStatsEnabled) {
+                telemetry->StartStatsSamplingOnStrand(
+                    [weak_room = std::weak_ptr<livekit::Room>(room)](
+                        livekit::telemetry::SessionTelemetry::LateCompletion late_completion)
+                        -> asio::awaitable<livekit::RoomStatsReport> {
+                        if (auto current = weak_room.lock()) {
+                            co_return co_await current->GetStats(std::move(late_completion));
+                        }
+                        co_return livekit::RoomStatsReport{};
+                    });
+            }
             auto process_resource_sampler =
                 std::make_shared<livekit::telemetry::ProcessResourceSampler>();
             telemetry->StartRuntimeSamplingOnStrand(
@@ -3971,6 +4223,43 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     if (!_localAudioSource) {
         _localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
     }
+    _roomHasLocalTranscription = false;
+    _recentTranscripts.clear();
+    _localAudioLevel = 0.0f;
+    _lastLocalAudioLevelEmitNs.store(0, std::memory_order_release);
+    if (_localAudioLevelSubscription) {
+        _localAudioLevelSubscription->disconnect();
+        _localAudioLevelSubscription.reset();
+    }
+#ifdef _WIN32
+    {
+        auto gate = _sessionUiGate;
+        const auto sessionGeneration = _sessionRuntime ? _sessionRuntime->generation() : 0;
+        auto *lastNsPtr = &_lastLocalAudioLevelEmitNs;
+        _localAudioLevelSubscription = _localAudioSource->subscribe(
+            [gate, sessionGeneration, lastNsPtr](const livekit::AudioFrame &frame) {
+                if (!gate || !gate->active() || sessionGeneration == 0) return;
+                const auto nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                auto prevNs = lastNsPtr->load(std::memory_order_relaxed);
+                constexpr int64_t kIntervalNs = 33LL * 1000LL * 1000LL;
+                if (prevNs != 0 && nowNs - prevNs < kIntervalNs) return;
+                if (!lastNsPtr->compare_exchange_strong(
+                        prevNs, nowNs, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                    return;
+                }
+                const auto &pcm = frame.data();
+                const float rms = livekit::AudioVad::CalculateRmsPcm16(pcm.data(), pcm.size());
+                const float level = livekit::AudioVad::RmsToAudioLevel(rms);
+                gate->Post([sessionGeneration, level](MeetingCoordinator *self) {
+                    if (!self->isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+                    const float effective = self->_audioMuted ? 0.0f : level;
+                    self->_localAudioLevel = effective;
+                    emit self->localAudioLevelChanged(effective);
+                });
+            });
+    }
+#endif
     if (!_localVideoSource) {
         _localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
     }
@@ -4110,9 +4399,13 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                 const QString diagnostic = QString::fromStdString(
                     livekit::secure_log::ExceptionSummary("meeting_startup"));
                 const bool mediaBegan = startup.mediaStartupBegan();
-                const QString err = mediaBegan
-                    ? QCoreApplication::translate("MeetingUI", "Local audio and video could not be started. Please leave the meeting and try joining again.")
-                    : diagnostic;
+                const bool degradedJoin =
+                    mediaBegan && encryption.mode == livekit::MeetingEncryptionMode::Off;
+                const QString err = degradedJoin
+                    ? QCoreApplication::translate("MeetingUI", "Local audio and video could not be started")
+                    : (mediaBegan
+                        ? QCoreApplication::translate("MeetingUI", "Local audio and video could not be started. Please leave the meeting and try joining again.")
+                        : diagnostic);
                 const QString title = mediaBegan
                     ? QCoreApplication::translate("MeetingUI", "Local Media Startup Failed")
                     : QCoreApplication::translate("MeetingUI", "Room Connection Failed");
@@ -4121,7 +4414,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                 }
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Error, "STARTUP_TRANSACTION",
                                         QString("%1: %2").arg(title, diagnostic));
-                if (mediaBegan && encryption.mode == livekit::MeetingEncryptionMode::Off) {
+                if (degradedJoin) {
                     // 房间本身连接正常，仅本地媒体硬件发布异常：降级为无媒体参会，不强制断开会议
                     gate->Post([sessionGeneration, title, err](MeetingCoordinator* self) {
                         self->completeRoomStartupDegradedOnUiThread(sessionGeneration, title, err);
@@ -4387,6 +4680,15 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
                 resources->retiredMedia.push_back(presentation.track);
     }
     _roomListener.reset();
+    if (_localAudioLevelSubscription) {
+        _localAudioLevelSubscription->disconnect();
+        _localAudioLevelSubscription.reset();
+    }
+    _localAudioLevel = 0.0f;
+    _roomHasLocalTranscription = false;
+    _recentTranscripts.clear();
+    _ignoredTranscriptionSenderIdentity.clear();
+    clearRemoteAudioTracks();
     _room.reset();
     _sessionRuntime.reset();
     _ioContext.reset();
@@ -4394,7 +4696,10 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
     _localVideoTrack.reset();
     _localAudioSource.reset();
     _localVideoSource.reset();
-    _remoteVideoTracks.clear();
+    if (!_remoteVideoTracks.empty()) {
+        _remoteVideoTracks.clear();
+        ++_remoteVideoTracksRevision;
+    }
     _acceptedVideoDemandPlan = {};
     _participantEventSequences.clear();
     _nativeRoomGeneration = 0;
@@ -4764,6 +5069,12 @@ void MeetingCoordinator::applyLocalAudioState() {
         }
     }
     updateParticipantListAndNotify();
+    if (muted && owner && owner->_nextSessionGeneration == generation) {
+        _lastLocalAudioLevelEmitNs = 0;
+        if (std::exchange(_localAudioLevel, 0.0f) != 0.0f) {
+            emit owner->localAudioLevelChanged(0.0f);
+        }
+    }
     if (owner && owner->_nextSessionGeneration == generation && owner->_audioMuted == muted) {
         emit owner->localAudioMuteChanged(muted);
     }
@@ -5334,11 +5645,18 @@ std::vector<ParticipantInfo> MeetingCoordinator::participants() const {
     return list;
 }
 
+std::optional<ParticipantInfo> MeetingCoordinator::participantInfo(const QString &identity) const {
+    const auto it = _participants.find(identity);
+    if (it == _participants.end()) return std::nullopt;
+    return it->second;
+}
+
 std::vector<ParticipantPresentation> MeetingCoordinator::participantPresentations() const {
     Q_ASSERT(QThread::currentThread() == thread());
     std::vector<ParticipantPresentation> result;
     result.reserve(_participants.size());
     for (const auto &[identity, info] : _participants) {
+        if (info.isAgent) continue;
         ParticipantPresentation presentation;
         presentation.participant = info;
         presentation.coordinatorSession = _nextSessionGeneration;
@@ -5354,6 +5672,25 @@ std::vector<ParticipantPresentation> MeetingCoordinator::participantPresentation
         result.push_back(std::move(presentation));
     }
     return result;
+}
+
+std::optional<ParticipantPresentation> MeetingCoordinator::participantPresentation(const QString &identity) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto it = _participants.find(identity);
+    if (it == _participants.end() || it->second.isAgent) return std::nullopt;
+    ParticipantPresentation presentation;
+    presentation.participant = it->second;
+    presentation.coordinatorSession = _nextSessionGeneration;
+    if (!isParticipantPresentationCurrent(presentation)) return std::nullopt;
+    const auto tracks = _remoteVideoTracks.find(identity);
+    if (tracks != _remoteVideoTracks.end()) {
+        for (const auto &[trackSid, value] : tracks->second) {
+            if (isParticipantPresentationCurrent(presentation, &value)) {
+                presentation.videoTracks.push_back(value);
+            }
+        }
+    }
+    return presentation;
 }
 
 void MeetingCoordinator::submitViewportIntent(livekit::ViewportIntent intent) {
@@ -5405,6 +5742,7 @@ void MeetingCoordinator::applyRemoteMediaDemandOnStrand(
         !session->acceptsDataOnStrand()) {
         return;
     }
+    session->syncPendingCatalogBeforeDemandOnStrand();
     if (!session->hasViewportIntentOnStrand()) return;
     const auto nativeGeneration =
         session->publicationCatalogOnStrand().native_room_generation;
@@ -6374,6 +6712,128 @@ std::shared_ptr<livekit::ByteStreamWriter> MeetingCoordinator::createByteStreamW
     return _room->CreateByteStreamWriter(
         name.toStdString(), topic.toStdString(), attributes, streamId.toStdString(),
         totalSize, mimeType.toStdString(), destinationIdentities);
+}
+
+void MeetingCoordinator::setIgnoredTranscriptionSenderIdentity(const QString &senderIdentity) {
+    _ignoredTranscriptionSenderIdentity = senderIdentity.trimmed();
+    if (_ignoredTranscriptionSenderIdentity.isEmpty()) {
+        return;
+    }
+    auto it = _participants.find(_ignoredTranscriptionSenderIdentity);
+    if (it != _participants.end() && !it->second.isAgent) {
+        it->second.isAgent = true;
+        const QString agentIdentity = it->first;
+        updateParticipantListAndNotify();
+        emit participantLeft(agentIdentity);
+    }
+}
+
+void MeetingCoordinator::ingestLocalTranscriptItem(const MeetingTranscriptItem &item) {
+    constexpr int kMaxStoredMeetingTranscripts = 120;
+    if (item.text.trimmed().isEmpty()) {
+        return;
+    }
+    int existingIdx = -1;
+    if (!item.segmentId.isEmpty()) {
+        for (int idx = _recentTranscripts.size() - 1; idx >= 0; --idx) {
+            const auto &existing = _recentTranscripts.at(idx);
+            if (existing.segmentId == item.segmentId &&
+                existing.speakerIdentity == item.speakerIdentity) {
+                existingIdx = idx;
+                break;
+            }
+        }
+    }
+    if (existingIdx >= 0) {
+        _recentTranscripts[existingIdx] = item;
+    } else {
+        _recentTranscripts.push_back(item);
+        while (_recentTranscripts.size() > kMaxStoredMeetingTranscripts) {
+            _recentTranscripts.removeFirst();
+        }
+    }
+    emit transcriptionReceived(item);
+}
+
+void MeetingCoordinator::bindRemoteAudioTrackSubscription(RemoteAudioTrackEntry &entry) {
+    entry.subscription.reset();
+    if (!_remoteAudioFrameCallback || !entry.track) {
+        return;
+    }
+    auto cbPtr = _remoteAudioFrameCallback;
+    const QString speakerId = entry.speakerIdentity;
+    const QString speakerName = entry.speakerName;
+    const QString trackSid = entry.trackSid;
+    entry.subscription = entry.track->subscribeAudioFrames(
+        [cbPtr, speakerId, speakerName, trackSid](const livekit::AudioFrame &frame) {
+            if (cbPtr && *cbPtr) {
+                (*cbPtr)(speakerId, speakerName, trackSid, frame);
+            }
+        });
+}
+
+void MeetingCoordinator::clearRemoteAudioTracks() {
+    for (auto &[sid, entry] : _remoteAudioTracks) {
+        entry.subscription.reset();
+    }
+    _remoteAudioTracks.clear();
+}
+
+void MeetingCoordinator::removeRemoteAudioTracksForParticipant(const QString &identity) {
+    for (auto it = _remoteAudioTracks.begin(); it != _remoteAudioTracks.end();) {
+        if (it->second.speakerIdentity == identity) {
+            it->second.subscription.reset();
+            it = _remoteAudioTracks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void MeetingCoordinator::setRemoteAudioFrameCallback(RemoteAudioFrameCallback callback) {
+    if (!callback) {
+        _remoteAudioFrameCallback.reset();
+        for (auto &[sid, entry] : _remoteAudioTracks) {
+            entry.subscription.reset();
+        }
+        return;
+    }
+    _remoteAudioFrameCallback = std::make_shared<RemoteAudioFrameCallback>(std::move(callback));
+    // Re-scan currently connected remote participants so tracks that arrived before
+    // enabling the translator are picked up immediately.
+    if (_room) {
+        for (const auto &[pSid, remote] : _room->remote_participants()) {
+            if (!remote) continue;
+            if (livekit::IsRoomAgentParticipant(remote->SnapshotState())) continue;
+            const QString identity = QString::fromStdString(remote->identity());
+            QString speakerName = QString::fromStdString(remote->name()).trimmed();
+            if (speakerName.isEmpty()) {
+                if (const auto pit = _participants.find(identity);
+                    pit != _participants.end() && !pit->second.name.trimmed().isEmpty()) {
+                    speakerName = pit->second.name.trimmed();
+                } else {
+                    speakerName = identity;
+                }
+            }
+            for (const auto &[tSid, pub] : remote->tracks()) {
+                if (!pub || !pub->track()) continue;
+                auto track = pub->track();
+                if (track->kind() != livekit::TrackKind::Audio ||
+                    !IsMicrophoneSource(track->source())) {
+                    continue;
+                }
+                const QString qTrackSid = QString::fromStdString(tSid);
+                auto &entry = _remoteAudioTracks[qTrackSid];
+                entry.speakerIdentity = identity;
+                entry.speakerName = speakerName;
+                entry.trackSid = qTrackSid;
+                entry.track = track;
+            }
+        }
+    }
+    for (auto &[sid, entry] : _remoteAudioTracks) {
+        bindRemoteAudioTrackSubscription(entry);
+    }
 }
 
 } // namespace OpenMeeting

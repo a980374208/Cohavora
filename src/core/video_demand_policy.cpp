@@ -424,6 +424,7 @@ std::vector<VideoDemandPolicy::SeatCandidate> VideoDemandPolicy::OrderedSeats() 
     std::vector<const PublicationCatalogParticipant*> participants;
     participants.reserve(catalog_->participants.size());
     for (const auto& participant : catalog_->participants) {
+        if (participant.is_agent) continue;
         if (participant.key.native_room_generation == catalog_->native_room_generation) {
             participants.push_back(&participant);
         }

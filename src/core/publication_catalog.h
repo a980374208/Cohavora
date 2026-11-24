@@ -33,6 +33,7 @@ struct PublicationCatalogParticipant {
     bool speaking = false;
     float audio_level = 0.0f;
     std::vector<RemotePublicationInfo> publications;
+    bool is_agent = false;
 };
 
 struct PublicationCatalogSnapshot {

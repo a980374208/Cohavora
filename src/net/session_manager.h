@@ -51,6 +51,17 @@ enum class ParticipantNameDisplayMode {
     OnHover,
 };
 
+enum class MeetingTranslationRoleMode {
+    LocalOnly = 0,
+    RoomAgentIfAvailable = 1,
+};
+
+enum class LiveCaptionDisplayMode {
+    Bilingual = 0,
+    TranslatedOnly = 1,
+    OriginalOnly = 2,
+};
+
 QString normalizeVideoCodecPreference(const QString &codec);
 QString normalizeVideoEncoderPreference(const QString &encoder);
 
@@ -62,8 +73,22 @@ struct MediaPreferences {
     VideoMirrorMode mirrorMode = VideoMirrorMode::Off;
     bool quitOnMainWindowClose = true;
     bool showActiveSpeaker = true;
+    bool showLiveCaptions = true;
+    bool enableLocalMeetingTranslation = false;
+    MeetingTranslationRoleMode meetingTranslationRoleMode = MeetingTranslationRoleMode::LocalOnly;
+    bool preferRoomAgentTranscript = true;
+    bool enableTranslationOutput = false;
+    QString translationTargetLanguage = QStringLiteral("zh");
+    QString translationProfileId;
+    QString translationModelOverride;
+    QString translationSystemPrompt;
+    LiveCaptionDisplayMode liveCaptionDisplayMode = LiveCaptionDisplayMode::Bilingual;
+    bool translateLocalMicrophone = true;
+    int maxConcurrentStreamingAsr = 3;
+    int streamingIdleReleaseMs = 12000;
     ParticipantNameDisplayMode participantNameDisplay = ParticipantNameDisplayMode::Auto;
     bool stayInMeetingWhenLocked = true;
+    bool enableContinuousStatsSampling = false;
     bool pushToTalkWhenMuted = false;
     bool echoCancellation = true;
     bool noiseSuppression = true;

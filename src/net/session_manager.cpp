@@ -63,8 +63,18 @@ constexpr auto kMigratedSettingsKeys = std::to_array<const char *>({
     "media/videoCaptureFps",
     "general/quitOnMainWindowClose",
     "general/showActiveSpeaker",
+    "general/showLiveCaptions",
+    "general/liveCaptionDisplayMode",
+    "translation/enableLocal",
+    "translation/roleMode",
+    "translation/preferRoomAgent",
+    "translation/translateEnabled",
+    "translation/targetLanguage",
+    "translation/includeLocalMic",
+    "translation/maxConcurrentStreams",
     "general/participantNameDisplay",
     "general/stayInMeetingWhenLocked",
+    "general/enableContinuousStatsSampling",
     "auth/account",
 #if !defined(__linux__)
     "auth/protectedSessionV2",
@@ -289,6 +299,15 @@ void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
     _mediaPrefs.screenShareResolution = std::clamp(_mediaPrefs.screenShareResolution,
         static_cast<int>(livekit::ScreenShareResolution::Auto),
         static_cast<int>(livekit::ScreenShareResolution::P2160));
+    _mediaPrefs.translationTargetLanguage = _mediaPrefs.translationTargetLanguage.trimmed().left(64);
+    if (_mediaPrefs.translationTargetLanguage.isEmpty()) {
+        _mediaPrefs.translationTargetLanguage = QStringLiteral("zh");
+    }
+    _mediaPrefs.translationProfileId = _mediaPrefs.translationProfileId.trimmed();
+    _mediaPrefs.translationModelOverride = _mediaPrefs.translationModelOverride.trimmed().left(256);
+    _mediaPrefs.translationSystemPrompt = _mediaPrefs.translationSystemPrompt.trimmed().left(4000);
+    _mediaPrefs.maxConcurrentStreamingAsr = std::clamp(_mediaPrefs.maxConcurrentStreamingAsr, 1, 8);
+    _mediaPrefs.streamingIdleReleaseMs = std::clamp(_mediaPrefs.streamingIdleReleaseMs, 3000, 120000);
     if (_mediaPrefs.screenShareFps != 15 && _mediaPrefs.screenShareFps != 20 && _mediaPrefs.screenShareFps != 30)
         _mediaPrefs.screenShareFps = 20;
     saveToSettings();
@@ -954,10 +973,48 @@ void SessionManager::loadFromSettings() {
         _settings->value("general/quitOnMainWindowClose", true).toBool();
     _mediaPrefs.showActiveSpeaker =
         _settings->value("general/showActiveSpeaker", true).toBool();
+    _mediaPrefs.showLiveCaptions =
+        _settings->value("general/showLiveCaptions", true).toBool();
+    const int captionModeVal = _settings->value(
+        "general/liveCaptionDisplayMode", static_cast<int>(LiveCaptionDisplayMode::Bilingual)).toInt();
+    _mediaPrefs.liveCaptionDisplayMode = (captionModeVal >= static_cast<int>(LiveCaptionDisplayMode::Bilingual) &&
+                                          captionModeVal <= static_cast<int>(LiveCaptionDisplayMode::OriginalOnly))
+        ? static_cast<LiveCaptionDisplayMode>(captionModeVal)
+        : LiveCaptionDisplayMode::Bilingual;
+    _mediaPrefs.enableLocalMeetingTranslation =
+        _settings->value("translation/enableLocal", false).toBool();
+    const int roleModeVal = _settings->value(
+        "translation/roleMode", static_cast<int>(MeetingTranslationRoleMode::LocalOnly)).toInt();
+    _mediaPrefs.meetingTranslationRoleMode = (roleModeVal == static_cast<int>(MeetingTranslationRoleMode::RoomAgentIfAvailable))
+        ? MeetingTranslationRoleMode::RoomAgentIfAvailable
+        : MeetingTranslationRoleMode::LocalOnly;
+    _mediaPrefs.preferRoomAgentTranscript =
+        _settings->value("translation/preferRoomAgent", true).toBool();
+    _mediaPrefs.enableTranslationOutput =
+        _settings->value("translation/translateEnabled", false).toBool();
+    _mediaPrefs.translationTargetLanguage =
+        _settings->value("translation/targetLanguage", QStringLiteral("zh")).toString().trimmed().left(64);
+    if (_mediaPrefs.translationTargetLanguage.isEmpty()) {
+        _mediaPrefs.translationTargetLanguage = QStringLiteral("zh");
+    }
+    _mediaPrefs.translationProfileId =
+        _settings->value("translation/profileId").toString().trimmed();
+    _mediaPrefs.translationModelOverride =
+        _settings->value("translation/modelOverride").toString().trimmed().left(256);
+    _mediaPrefs.translationSystemPrompt =
+        _settings->value("translation/systemPrompt").toString().trimmed().left(4000);
+    _mediaPrefs.translateLocalMicrophone =
+        _settings->value("translation/includeLocalMic", true).toBool();
+    _mediaPrefs.maxConcurrentStreamingAsr = std::clamp(
+        _settings->value("translation/maxConcurrentStreams", 3).toInt(), 1, 8);
+    _mediaPrefs.streamingIdleReleaseMs = std::clamp(
+        _settings->value("translation/streamingIdleReleaseMs", 12000).toInt(), 3000, 120000);
     _mediaPrefs.participantNameDisplay = participantNameDisplayFromId(
         _settings->value("general/participantNameDisplay", QStringLiteral("auto")).toString());
     _mediaPrefs.stayInMeetingWhenLocked =
         _settings->value("general/stayInMeetingWhenLocked", true).toBool();
+    _mediaPrefs.enableContinuousStatsSampling =
+        _settings->value("general/enableContinuousStatsSampling", false).toBool();
     _mediaPrefs.pushToTalkWhenMuted =
         _settings->value("media/pushToTalkWhenMuted", false).toBool();
     _mediaPrefs.echoCancellation =
@@ -1053,9 +1110,25 @@ void SessionManager::saveToSettings() {
     _settings->remove("media/videoMirroring");
     _settings->setValue("general/quitOnMainWindowClose", _mediaPrefs.quitOnMainWindowClose);
     _settings->setValue("general/showActiveSpeaker", _mediaPrefs.showActiveSpeaker);
+    _settings->setValue("general/showLiveCaptions", _mediaPrefs.showLiveCaptions);
+    _settings->setValue("general/liveCaptionDisplayMode", static_cast<int>(_mediaPrefs.liveCaptionDisplayMode));
+    _settings->setValue("translation/enableLocal", _mediaPrefs.enableLocalMeetingTranslation);
+    _settings->setValue("translation/roleMode", static_cast<int>(_mediaPrefs.meetingTranslationRoleMode));
+    _settings->setValue("translation/preferRoomAgent", _mediaPrefs.preferRoomAgentTranscript);
+    _settings->setValue("translation/translateEnabled", _mediaPrefs.enableTranslationOutput);
+    _settings->setValue("translation/targetLanguage", _mediaPrefs.translationTargetLanguage);
+    _settings->setValue("translation/profileId", _mediaPrefs.translationProfileId);
+    _settings->setValue("translation/modelOverride", _mediaPrefs.translationModelOverride);
+    _settings->setValue("translation/systemPrompt", _mediaPrefs.translationSystemPrompt);
+    _settings->setValue("translation/includeLocalMic", _mediaPrefs.translateLocalMicrophone);
+    _settings->setValue("translation/maxConcurrentStreams",
+        std::clamp(_mediaPrefs.maxConcurrentStreamingAsr, 1, 8));
+    _settings->setValue("translation/streamingIdleReleaseMs",
+        std::clamp(_mediaPrefs.streamingIdleReleaseMs, 3000, 120000));
     _settings->setValue("general/participantNameDisplay",
         participantNameDisplayId(_mediaPrefs.participantNameDisplay));
     _settings->setValue("general/stayInMeetingWhenLocked", _mediaPrefs.stayInMeetingWhenLocked);
+    _settings->setValue("general/enableContinuousStatsSampling", _mediaPrefs.enableContinuousStatsSampling);
     _settings->setValue("media/pushToTalkWhenMuted", _mediaPrefs.pushToTalkWhenMuted);
     _settings->setValue("media/echoCancellation", _mediaPrefs.echoCancellation);
     _settings->setValue("media/noiseSuppression", _mediaPrefs.noiseSuppression);

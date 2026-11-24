@@ -6,6 +6,8 @@
 #include <optional>
 #include <vector>
 
+#include "http_types.h"
+
 namespace OpenMeeting {
 
 enum class MeetingStatus {
@@ -79,6 +81,7 @@ struct MeetingBookingRequest {
     QString timeZone;
     MeetingSettings settings;
     MeetingRepeatRule repeatRule;
+    bool allowCustomRepeatRule = false;
 };
 
 struct MeetingUpdateRequest {
@@ -98,6 +101,7 @@ struct MeetingUpdateRequest {
     std::optional<bool> audioEncouragement;
     std::optional<bool> videoMirroring;
     std::optional<MeetingRepeatRule> repeatRule;
+    bool allowCustomRepeatRule = false;
 };
 
 QString meetingStatusToWire(MeetingStatus status);
@@ -107,7 +111,8 @@ MeetingRepeatType meetingRepeatTypeFromWire(const QString &type);
 bool isMeetingRepeatTypeSupportedForCreate(MeetingRepeatType type);
 bool isMeetingRepeatRuleSupportedForWrite(
     const MeetingRepeatRule &rule,
-    QString *errorMessage = nullptr);
+    QString *errorMessage = nullptr,
+    bool allowCustomRepeat = false);
 
 bool parseMeetingCatalogDetail(const QJsonObject &object, MeetingCatalogDetail *detail,
                                QString *errorMessage);
@@ -117,5 +122,42 @@ bool validateMeetingBookingRequest(const MeetingBookingRequest &request, QString
 bool validateMeetingUpdateRequest(const MeetingUpdateRequest &request, QString *errorMessage);
 QJsonObject meetingBookingToJson(const MeetingBookingRequest &request, const QString &creatorUserId);
 QJsonObject meetingUpdateToJson(const MeetingUpdateRequest &request, const QString &updatingUserId);
+
+constexpr int kMeetingAgentAlreadyOnlineCode = 200005;
+constexpr int kMeetingAgentClaimBusyCode = 200006;
+
+struct MeetingAgentTokenRequest {
+    QString meetingId;
+    QString role = QStringLiteral("translator"); // "transcriber" or "translator"
+    QString displayName;
+    QString sourceLanguage = QStringLiteral("auto");
+    QString targetLanguage;
+    bool forceTakeover = false;
+};
+
+struct ExistingRoomAgentInfo {
+    QString identity;
+    QString name;
+    QString ownerUserId;
+    QString role;
+    QString state;
+    QString targetLanguage;
+};
+
+struct MeetingAgentTokenResponse {
+    QString meetingId;
+    QString agentIdentity;
+    LiveKitAuthInfo liveKit;
+    qint64 expiresAtSeconds = 0;
+    QString replacedAgentIdentity;
+    bool conflict = false;
+    ExistingRoomAgentInfo existingAgent;
+};
+
+struct RoomAgentStatusResponse {
+    QString meetingId;
+    bool hasOnlineAgent = false;
+    std::vector<ExistingRoomAgentInfo> agents;
+};
 
 } // namespace OpenMeeting

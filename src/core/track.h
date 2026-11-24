@@ -189,6 +189,7 @@ private:
             rtc_track_->set_enabled(!muted() && !playout_muted() && volume_ > 0.001);
         }
     }
+    struct AudioSinkRegistry;
     struct I420VideoSinkRegistry;
 
 public:
@@ -236,6 +237,40 @@ public:
             VideoFrameAdmission::Permit permit;
         };
         std::vector<Recipient> recipients_;
+    };
+
+    // Move-only token. Destroying or resetting it unregisters the audio sink without
+    // depending on the Track object's lifetime.
+    class AudioFrameSubscription {
+    public:
+        AudioFrameSubscription() = default;
+        ~AudioFrameSubscription() { reset(); }
+
+        AudioFrameSubscription(const AudioFrameSubscription&) = delete;
+        AudioFrameSubscription& operator=(const AudioFrameSubscription&) = delete;
+
+        AudioFrameSubscription(AudioFrameSubscription&& other) noexcept
+            : registry_(std::move(other.registry_)), id_(std::exchange(other.id_, 0)) {}
+
+        AudioFrameSubscription& operator=(AudioFrameSubscription&& other) noexcept {
+            if (this != &other) {
+                reset();
+                registry_ = std::move(other.registry_);
+                id_ = std::exchange(other.id_, 0);
+            }
+            return *this;
+        }
+
+        void reset() noexcept;
+        bool active() const noexcept { return id_ != 0 && !registry_.expired(); }
+
+    private:
+        friend class Track;
+        AudioFrameSubscription(std::weak_ptr<AudioSinkRegistry> registry, uint64_t id)
+            : registry_(std::move(registry)), id_(id) {}
+
+        std::weak_ptr<AudioSinkRegistry> registry_;
+        uint64_t id_ = 0;
     };
 
     // Move-only token. Destroying or resetting it unregisters the sink without
@@ -335,6 +370,15 @@ public:
         if (sink) audio_sinks_.push_back(sink);
     }
 
+    AudioFrameSubscription subscribeAudioFrames(AudioFrameSink sink) {
+        if (!sink) return {};
+        auto registry = audio_sink_registry_;
+        std::lock_guard<std::mutex> lock(registry->mutex);
+        const uint64_t id = registry->next_id++;
+        registry->sinks.emplace(id, std::move(sink));
+        return AudioFrameSubscription(registry, id);
+    }
+
     void addVideoSink(VideoFrameSink sink) {
         std::lock_guard<std::mutex> lock(sink_mutex_);
         if (sink) video_sinks_.push_back(sink);
@@ -392,7 +436,16 @@ public:
             std::lock_guard<std::mutex> lock(sink_mutex_);
             sinks = audio_sinks_;
         }
+        std::vector<AudioFrameSink> managed_sinks;
+        if (auto registry = audio_sink_registry_) {
+            std::lock_guard<std::mutex> lock(registry->mutex);
+            managed_sinks.reserve(registry->sinks.size());
+            for (const auto& [id, sink] : registry->sinks) {
+                managed_sinks.push_back(sink);
+            }
+        }
         for (const auto& s : sinks) s(frame);
+        for (const auto& s : managed_sinks) s(frame);
     }
 
     void setRemoteVideoEndpoint(const std::shared_ptr<render::RemoteVideoFrameEndpoint>& endpoint) {
@@ -433,6 +486,12 @@ public:
     }
 
 private:
+    struct AudioSinkRegistry {
+        std::mutex mutex;
+        uint64_t next_id = 1;
+        std::unordered_map<uint64_t, AudioFrameSink> sinks;
+    };
+
     struct I420VideoSinkRegistry {
         std::mutex mutex;
         uint64_t next_id = 1;
@@ -453,9 +512,19 @@ private:
     std::mutex sink_mutex_;
     std::vector<AudioFrameSink> audio_sinks_;
     std::vector<VideoFrameSink> video_sinks_;
+    std::shared_ptr<AudioSinkRegistry> audio_sink_registry_ = std::make_shared<AudioSinkRegistry>();
     std::shared_ptr<I420VideoSinkRegistry> i420_video_sink_registry_ = std::make_shared<I420VideoSinkRegistry>();
     std::weak_ptr<render::RemoteVideoFrameEndpoint> remote_video_endpoint_;
 };
+
+inline void Track::AudioFrameSubscription::reset() noexcept {
+    const uint64_t id = std::exchange(id_, 0);
+    if (auto registry = registry_.lock()) {
+        std::lock_guard<std::mutex> lock(registry->mutex);
+        registry->sinks.erase(id);
+    }
+    registry_.reset();
+}
 
 inline void Track::I420VideoFrameSubscription::reset() noexcept {
     const uint64_t id = std::exchange(id_, 0);

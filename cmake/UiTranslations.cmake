@@ -113,7 +113,9 @@ function(livekit_add_ui_translations target)
         "${source_root}/src/ui/whiteboard/*.cpp"
         "${source_root}/src/ui/whiteboard/*.h"
         "${source_root}/src/net/*.cpp"
-        "${source_root}/src/net/*.h")
+        "${source_root}/src/net/*.h"
+        "${source_root}/src/agent/*.cpp"
+        "${source_root}/src/agent/*.h")
     list(APPEND ui_translation_sources
         "${source_root}/src/app/main_meeting_app.cpp"
         "${source_root}/src/core/meeting_coordinator.cpp"

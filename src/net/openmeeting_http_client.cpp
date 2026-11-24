@@ -715,4 +715,117 @@ void OpenMeetingHttpClient::setMeetingHost(const QString &meetingId, const QStri
         }, true, std::move(context));
 }
 
+namespace {
+
+ExistingRoomAgentInfo parseExistingAgentInfo(const QJsonObject &obj) {
+    ExistingRoomAgentInfo info;
+    info.identity = obj.value(QStringLiteral("identity")).toString();
+    info.name = obj.value(QStringLiteral("name")).toString();
+    info.ownerUserId = obj.value(QStringLiteral("ownerUserID")).toString();
+    info.role = obj.value(QStringLiteral("role")).toString();
+    info.state = obj.value(QStringLiteral("state")).toString();
+    info.targetLanguage = obj.value(QStringLiteral("targetLanguage")).toString();
+    return info;
+}
+
+} // namespace
+
+void OpenMeetingHttpClient::requestMeetingAgentToken(const MeetingAgentTokenRequest &request,
+                                                     ResultCallback<MeetingAgentTokenResponse> callback,
+                                                     HttpRequestContext context) {
+    QJsonObject body;
+    body[QStringLiteral("meetingID")] = request.meetingId;
+    body[QStringLiteral("userID")] = _currentUser.userId;
+    body[QStringLiteral("role")] = request.role.trimmed().isEmpty()
+        ? QStringLiteral("translator")
+        : request.role.trimmed();
+    if (!request.displayName.trimmed().isEmpty()) {
+        body[QStringLiteral("displayName")] = request.displayName.trimmed();
+    }
+    if (!request.sourceLanguage.trimmed().isEmpty()) {
+        body[QStringLiteral("sourceLanguage")] = request.sourceLanguage.trimmed();
+    }
+    if (!request.targetLanguage.trimmed().isEmpty()) {
+        body[QStringLiteral("targetLanguage")] = request.targetLanguage.trimmed();
+    }
+    body[QStringLiteral("forceTakeover")] = request.forceTakeover;
+
+    const QString meetingId = request.meetingId;
+    sendPost(QStringLiteral("/meeting/request_agent_token"), body,
+        [callback, meetingId](bool ok, const QJsonValue &data, const HttpError &err) {
+            MeetingAgentTokenResponse resp;
+            resp.meetingId = meetingId;
+            if (!ok && err.businessCode == kMeetingAgentAlreadyOnlineCode) {
+                resp.conflict = true;
+                if (data.isObject()) {
+                    const QJsonObject root = data.toObject();
+                    if (!root.value(QStringLiteral("meetingID")).toString().isEmpty()) {
+                        resp.meetingId = root.value(QStringLiteral("meetingID")).toString();
+                    }
+                    const QJsonValue existingVal = root.value(QStringLiteral("existingAgent"));
+                    if (existingVal.isObject()) {
+                        resp.existingAgent = parseExistingAgentInfo(existingVal.toObject());
+                    }
+                }
+                if (callback) callback(true, resp, HttpError{});
+                return;
+            }
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, resp, err);
+                return;
+            }
+            const QJsonObject root = data.toObject();
+            if (!root.value(QStringLiteral("meetingID")).toString().isEmpty()) {
+                resp.meetingId = root.value(QStringLiteral("meetingID")).toString();
+            }
+            resp.conflict = root.value(QStringLiteral("conflict")).toBool(false);
+            if (resp.conflict) {
+                const QJsonValue existingVal = root.value(QStringLiteral("existingAgent"));
+                if (existingVal.isObject()) {
+                    resp.existingAgent = parseExistingAgentInfo(existingVal.toObject());
+                }
+                if (callback) callback(true, resp, HttpError{});
+                return;
+            }
+            resp.agentIdentity = root.value(QStringLiteral("agentIdentity")).toString();
+            resp.expiresAtSeconds = static_cast<qint64>(root.value(QStringLiteral("expiresAtSeconds")).toDouble(0));
+            resp.replacedAgentIdentity = root.value(QStringLiteral("replacedAgentIdentity")).toString();
+            const QJsonObject liveKit = root.value(QStringLiteral("liveKit")).toObject();
+            resp.liveKit.url = liveKit.value(QStringLiteral("url")).toString();
+            resp.liveKit.token = liveKit.value(QStringLiteral("token")).toString();
+            resp.liveKit.meetingId = resp.meetingId;
+            if (callback) callback(true, resp, err);
+        }, true, std::move(context));
+}
+
+void OpenMeetingHttpClient::getMeetingAgentStatus(const QString &meetingId,
+                                                  ResultCallback<RoomAgentStatusResponse> callback,
+                                                  HttpRequestContext context) {
+    QJsonObject body;
+    body[QStringLiteral("meetingID")] = meetingId;
+    body[QStringLiteral("userID")] = _currentUser.userId;
+
+    sendPost(QStringLiteral("/meeting/get_agent_status"), body,
+        [callback, meetingId](bool ok, const QJsonValue &data, const HttpError &err) {
+            RoomAgentStatusResponse resp;
+            resp.meetingId = meetingId;
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, resp, err);
+                return;
+            }
+            const QJsonObject root = data.toObject();
+            if (!root.value(QStringLiteral("meetingID")).toString().isEmpty()) {
+                resp.meetingId = root.value(QStringLiteral("meetingID")).toString();
+            }
+            resp.hasOnlineAgent = root.value(QStringLiteral("hasOnlineAgent")).toBool(false);
+            const QJsonArray arr = root.value(QStringLiteral("agents")).toArray();
+            for (const QJsonValue &val : arr) {
+                if (val.isObject()) {
+                    resp.agents.push_back(parseExistingAgentInfo(val.toObject()));
+                }
+            }
+            if (callback) callback(true, resp, err);
+        }, true, std::move(context));
+}
+
 } // namespace OpenMeeting

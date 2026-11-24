@@ -51,6 +51,8 @@ set_target_properties(cohavora_remote_control PROPERTIES AUTOMOC OFF FOLDER "mee
 
 add_library(cohavora_meeting_runtime STATIC
     ${PROJECT_SOURCE_DIR}/src/core/remote_control/meeting_remote_control.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.h
+    ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.cpp
     ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.h
     ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.cpp)
 
@@ -70,4 +72,50 @@ set_target_properties(cohavora_meeting_runtime PROPERTIES
 if(MSVC)
     target_compile_options(cohavora_meeting_network PRIVATE /utf-8)
     target_compile_options(cohavora_meeting_runtime PRIVATE /utf-8)
+endif()
+
+add_library(cohavora_agent STATIC
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_types.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_secret_store.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_secret_store.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_session_store.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_session_store.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_transport.h
+    ${PROJECT_SOURCE_DIR}/src/agent/openai_compatible_transport.h
+    ${PROJECT_SOURCE_DIR}/src/agent/openai_compatible_transport.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/meeting_tool_registry.h
+    ${PROJECT_SOURCE_DIR}/src/agent/meeting_tool_registry.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_coordinator.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_coordinator.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_speech_service.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_speech_service.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/streaming_asr_session.h
+    ${PROJECT_SOURCE_DIR}/src/agent/streaming_asr_session.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/streaming_asr_adapters.h
+    ${PROJECT_SOURCE_DIR}/src/agent/streaming_asr_adapters.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/meeting_translator_service.h
+    ${PROJECT_SOURCE_DIR}/src/agent/meeting_translator_service.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/room_agent_publisher.h
+    ${PROJECT_SOURCE_DIR}/src/agent/room_agent_publisher.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_ui_grounding.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_ui_grounding.cpp)
+
+target_include_directories(cohavora_agent PUBLIC
+    ${PROJECT_SOURCE_DIR}
+    ${GEN_DIR})
+target_link_libraries(cohavora_agent PUBLIC
+    cohavora_meeting_network
+    cohavora_meeting_runtime
+    cohavora_core
+    cohavora::qt_network_runtime
+    PRIVATE
+    OpenSSL::Crypto)
+if(WIN32)
+    target_link_libraries(cohavora_agent PRIVATE crypt32)
+endif()
+set_target_properties(cohavora_agent PROPERTIES
+    AUTOMOC ON
+    FOLDER "meeting")
+if(MSVC)
+    target_compile_options(cohavora_agent PRIVATE /utf-8)
 endif()

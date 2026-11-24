@@ -63,6 +63,16 @@ public:
     void getMeetingToken(const QString &meetingId, ResultCallback<LiveKitAuthInfo> callback,
                          HttpRequestContext context = {});
 
+    // 5.1 申请会中翻译/转录 Agent Token（服务端查重并签发最小权限 AGENT JWT）
+    void requestMeetingAgentToken(const MeetingAgentTokenRequest &request,
+                                  ResultCallback<MeetingAgentTokenResponse> callback,
+                                  HttpRequestContext context = {});
+
+    // 5.2 查询房间当前在线 Agent 状态
+    void getMeetingAgentStatus(const QString &meetingId,
+                               ResultCallback<RoomAgentStatusResponse> callback,
+                               HttpRequestContext context = {});
+
     // 6. 查询会议列表
     void getMeetings(const std::vector<MeetingStatus> &statusList, ResultCallback<MeetingList> callback);
 

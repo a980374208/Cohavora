@@ -24,6 +24,7 @@
 #include "src/core/room.h"
 #include "src/e2ee/meeting_encryption.h"
 #include "src/core/data_stream.h"
+#include "src/core/data_track.h"
 #include "src/core/local_audio_track.h"
 #include "src/core/local_video_track.h"
 #include "src/core/meeting_session_runtime.h"
@@ -99,12 +100,33 @@ struct MeetingRoomInfo {
     bool activeRecording = false;
 };
 
+struct MeetingTranscriptItem {
+    QString segmentId;
+    QString senderIdentity;
+    QString speakerIdentity;
+    QString speakerName;
+    QString trackSid;
+    QString text;
+    QString sourceText;
+    QString sourceLanguage;
+    QString language;
+    qint64 timestampMs = 0;
+    bool isFinal = false;
+    bool isLocalSpeaker = false;
+    bool isAgentGenerated = false;
+    bool isTranslated = false;
+    bool isLocalTranslator = false;
+};
+
 // 参会人实时属性实体
 struct ParticipantInfo {
     QString identity;
     QString name;
     bool isLocal = false;
     bool isHost = false;
+    livekit::ParticipantKind kind = livekit::ParticipantKind::Standard;
+    bool isAgent = false;
+    QString agentState;
     bool isAudioMuted = false;
     bool hasScreenShareAudio = false;
     bool isScreenShareAudioMuted = true;
@@ -209,6 +231,21 @@ public:
     void setLocalVideoAvailable(bool available);
     bool isLocalAudioMuted() const { return _audioMuted; }
     bool isLocalVideoEnabled() const { return _videoEnabled; }
+    float localAudioLevel() const { return _localAudioLevel; }
+    bool hasRoomLocalTranscription() const { return _roomHasLocalTranscription; }
+    const QVector<MeetingTranscriptItem> &recentTranscripts() const { return _recentTranscripts; }
+    QString localAudioTrackSid() const {
+        return _localAudioTrack ? QString::fromStdString(_localAudioTrack->sid()) : QString();
+    }
+    void setIgnoredTranscriptionSenderIdentity(const QString &senderIdentity);
+    void ingestLocalTranscriptItem(const MeetingTranscriptItem &item);
+
+    using RemoteAudioFrameCallback = std::function<void(
+        const QString &speakerIdentity,
+        const QString &speakerName,
+        const QString &trackSid,
+        const livekit::AudioFrame &frame)>;
+    void setRemoteAudioFrameCallback(RemoteAudioFrameCallback callback);
     bool isMeetingReady() const {
         return _sessionRuntime && _sessionRunning && _startupCommitted &&
             !_startupReconnectPending && _state == MeetingState::InMeeting;
@@ -269,7 +306,10 @@ public:
 
     // 参会人列表读取
     std::vector<ParticipantInfo> participants() const;
+    std::optional<ParticipantInfo> participantInfo(const QString &identity) const;
     std::vector<ParticipantPresentation> participantPresentations() const;
+    std::optional<ParticipantPresentation> participantPresentation(const QString &identity) const;
+    uint64_t remoteVideoTracksRevision() const { return _remoteVideoTracksRevision; }
     bool isParticipantPresentationCurrent(const ParticipantPresentation &presentation,
         const RemoteVideoTrackPresentation *track = nullptr) const;
     void submitViewportIntent(livekit::ViewportIntent intent);
@@ -396,6 +436,10 @@ signals:
     // 现代数据流 (DataStream) 接收信号
     void textStreamReceived(std::shared_ptr<livekit::TextStreamReader> reader, const QString &senderIdentity);
     void byteStreamReceived(std::shared_ptr<livekit::ByteStreamReader> reader, const QString &senderIdentity);
+    void dataTrackPublished(const QString &participantIdentity, std::shared_ptr<livekit::RemoteDataTrack> track);
+    void dataTrackUnpublished(const QString &participantIdentity, const QString &trackSid);
+    void transcriptionReceived(const OpenMeeting::MeetingTranscriptItem &item);
+    void localAudioLevelChanged(float level);
 
     // Immutable UI projection. Snapshot bytes are parsed into a value-only
     // Document on the Qt thread; no runtime or Room lifetime crosses this signal.
@@ -453,6 +497,7 @@ private:
         uint64_t admissionGeneration,
         livekit::telemetry::OperationOutcome outcome);
     void finishStartupTelemetry(livekit::telemetry::OperationOutcome outcome);
+    void applyContinuousStatsSamplingPreference(bool enabled);
     void finishActiveStabilitySession();
     HttpRequestContext admissionHttpContext() const;
     void publishDetachedAdmissionTelemetry(
@@ -617,6 +662,7 @@ private:
 
     std::map<QString, ParticipantInfo> _participants;
     std::map<QString, std::map<QString, RemoteVideoTrackPresentation>> _remoteVideoTracks;
+    uint64_t _remoteVideoTracksRevision = 0;
     std::map<QString, uint64_t> _participantEventSequences;
     std::map<QString, std::pair<InboundTransferKey, bool>> _inboundTransferLedger;
     uint64_t _nativeRoomGeneration = 0;
@@ -704,6 +750,25 @@ private:
     std::shared_ptr<livekit::LocalVideoTrack> _localVideoTrack;
     std::shared_ptr<livekit::AudioSource> _localAudioSource;
     std::shared_ptr<livekit::VideoSource> _localVideoSource;
+    std::shared_ptr<livekit::AudioSource::Subscription> _localAudioLevelSubscription;
+    std::atomic<int64_t> _lastLocalAudioLevelEmitNs{0};
+    float _localAudioLevel = 0.0f;
+    bool _roomHasLocalTranscription = false;
+    QVector<MeetingTranscriptItem> _recentTranscripts;
+    QString _ignoredTranscriptionSenderIdentity;
+
+    struct RemoteAudioTrackEntry {
+        QString speakerIdentity;
+        QString speakerName;
+        QString trackSid;
+        std::shared_ptr<livekit::Track> track;
+        livekit::Track::AudioFrameSubscription subscription;
+    };
+    void bindRemoteAudioTrackSubscription(RemoteAudioTrackEntry &entry);
+    void clearRemoteAudioTracks();
+    void removeRemoteAudioTracksForParticipant(const QString &identity);
+    std::shared_ptr<RemoteAudioFrameCallback> _remoteAudioFrameCallback;
+    std::map<QString, RemoteAudioTrackEntry> _remoteAudioTracks;
 };
 
 } // namespace OpenMeeting
@@ -711,5 +776,7 @@ private:
 Q_DECLARE_METATYPE(livekit::RoomDisconnectReason)
 Q_DECLARE_METATYPE(OpenMeeting::ScreenShareAudioOutputsSnapshot)
 Q_DECLARE_METATYPE(OpenMeeting::MeetingRoomInfo)
+Q_DECLARE_METATYPE(OpenMeeting::MeetingTranscriptItem)
 Q_DECLARE_METATYPE(livekit::ParticipantPermission)
 Q_DECLARE_METATYPE(livekit::remote_control::Projection)
+Q_DECLARE_METATYPE(std::shared_ptr<livekit::RemoteDataTrack>)

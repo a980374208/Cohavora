@@ -232,12 +232,32 @@ bool isMeetingRepeatTypeSupportedForCreate(MeetingRepeatType type) {
 }
 
 bool isMeetingRepeatRuleSupportedForWrite(
-        const MeetingRepeatRule &rule, QString *errorMessage) {
-    if (!isMeetingRepeatTypeSupportedForCreate(rule.type)) {
-        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat type is read-only and cannot be submitted."));
-    }
+        const MeetingRepeatRule &rule, QString *errorMessage, bool allowCustomRepeat) {
     if (!safeRequestInteger(rule.endDateSeconds)) {
         return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat end date is invalid."));
+    }
+    if (allowCustomRepeat && rule.type == MeetingRepeatType::Custom) {
+        const QString unit = rule.unitType.trimmed();
+        if (unit != QStringLiteral("Day") &&
+            unit != QStringLiteral("Week") &&
+            unit != QStringLiteral("Month")) {
+            return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Custom repeat unit must be Day, Week, or Month."));
+        }
+        if (rule.interval < 1 || rule.interval > 365) {
+            return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Custom repeat interval must be between 1 and 365."));
+        }
+        if (rule.repeatTimes < 0 || rule.repeatTimes > 1000) {
+            return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Custom repeat count must be between 0 and 1000."));
+        }
+        for (const int day : rule.daysOfWeek) {
+            if (day < 0 || day > 6) {
+                return fail(errorMessage, QCoreApplication::translate("MeetingUI", "repeatInfo.repeatDaysOfWeek contains an invalid day."));
+            }
+        }
+        return true;
+    }
+    if (!isMeetingRepeatTypeSupportedForCreate(rule.type)) {
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat type is read-only and cannot be submitted."));
     }
     if (rule.repeatTimes != 0) {
         return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat count is not supported."));
@@ -334,7 +354,7 @@ bool validateMeetingBookingRequest(const MeetingBookingRequest &request, QString
     if (request.timeZone.isEmpty() || !QTimeZone(request.timeZone.toUtf8()).isValid()) {
         return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting time zone is invalid."));
     }
-    if (!isMeetingRepeatRuleSupportedForWrite(request.repeatRule, errorMessage)) return false;
+    if (!isMeetingRepeatRuleSupportedForWrite(request.repeatRule, errorMessage, request.allowCustomRepeatRule)) return false;
     if (request.repeatRule.type != MeetingRepeatType::None &&
         request.repeatRule.endDateSeconds != 0 &&
         request.repeatRule.endDateSeconds < request.scheduledTimeSeconds) {
@@ -367,8 +387,9 @@ bool validateMeetingUpdateRequest(const MeetingUpdateRequest &request, QString *
         return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting time zone is invalid."));
     }
     if (request.repeatRule &&
-        !isMeetingRepeatRuleSupportedForWrite(*request.repeatRule, errorMessage)) return false;
-    if (request.scheduledTimeSeconds && request.repeatRule->type != MeetingRepeatType::None &&
+        !isMeetingRepeatRuleSupportedForWrite(*request.repeatRule, errorMessage, request.allowCustomRepeatRule)) return false;
+    if (request.scheduledTimeSeconds && request.repeatRule &&
+        request.repeatRule->type != MeetingRepeatType::None &&
         request.repeatRule->endDateSeconds != 0 &&
         request.repeatRule->endDateSeconds < *request.scheduledTimeSeconds) {
         return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat end date precedes the first meeting."));
