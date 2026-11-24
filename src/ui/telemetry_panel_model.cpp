@@ -1,6 +1,8 @@
 #include "telemetry_panel_model.h"
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -387,15 +389,38 @@ TimelineView BuildTimelineView(TimelineFramePtr source,const std::string& operat
         if(e.event_name.ends_with(".started"))starts.try_emplace(e.operation_id,i);
         if(e.event_name.ends_with(".terminal") || e.event_name.ends_with(".completed"))ends[e.operation_id]=i;
     }
+    struct FirstObservedGroupKey {
+        std::string measurementPoint;
+        std::uint64_t roomGeneration = 0;
+        std::uint64_t recoveryEpoch = 0;
+        std::string parentOperationId;
+        std::string outcome;
+        bool operator<(const FirstObservedGroupKey &other) const {
+            return std::tie(measurementPoint, roomGeneration, recoveryEpoch, parentOperationId, outcome)
+                < std::tie(other.measurementPoint, other.roomGeneration, other.recoveryEpoch, other.parentOperationId, other.outcome);
+        }
+    };
+    std::map<FirstObservedGroupKey, std::vector<size_t>> firstObservedGroups;
     result.items.reserve(events.size());
+    result.tableEvents.reserve(events.size());
     for(size_t i=0;i<events.size();++i) {
         const auto &e=events[i];if(!selected(e))continue;
+        result.tableEvents.push_back(i);
+        // 渲染停顿区间统一由「视频诊断」页的逐绑定停顿图与并发热力带承接，避免在会话时间线中堆叠并拉扁时间轴。
+        if(e.event_name=="render.stall.interval") {
+            ++result.excludedStallCount;
+            continue;
+        }
+        if(e.event_name=="media.first_observed" && e.source_monotonic_us!=0) {
+            firstObservedGroups[{e.measurement_point, e.room_generation, e.recovery_epoch, e.parent_operation_id, e.outcome}].push_back(i);
+            continue;
+        }
         const bool start=e.event_name.ends_with(".started");
         const bool end=e.event_name.ends_with(".terminal") || e.event_name.ends_with(".completed");
         if(end && starts.count(e.operation_id)
             && events[starts[e.operation_id]].source_monotonic_us
             && e.source_monotonic_us>=events[starts[e.operation_id]].source_monotonic_us)continue;
-        TimelineVisualItem item{i,i,e.source_monotonic_us,e.source_monotonic_us,lane(e.event_name),start,end,!start&&!end};
+        TimelineVisualItem item{i,i,e.source_monotonic_us,e.source_monotonic_us,lane(e.event_name),start,end,!start&&!end,false,{}};
         if(start) {
             if(starts[e.operation_id]!=i)continue;
             const auto terminal=ends.find(e.operation_id);
@@ -404,9 +429,52 @@ TimelineView BuildTimelineView(TimelineFramePtr source,const std::string& operat
             }
         }
         if(item.begin && (!result.begin || item.begin<result.begin))result.begin=item.begin;
-        result.end=std::max(result.end,item.end);result.items.push_back(item);
+        result.end=std::max(result.end,item.end);result.items.push_back(std::move(item));
     }
-    std::stable_sort(result.items.begin(),result.items.end(),[](const auto &a,const auto &b){return a.begin<b.begin;});
+    constexpr std::uint64_t kFirstObservedBatchGapUs = 1'500'000;
+    for(auto &[key, indices] : firstObservedGroups) {
+        (void)key;
+        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+            return std::tie(events[a].source_monotonic_us, events[a].event_sequence)
+                < std::tie(events[b].source_monotonic_us, events[b].event_sequence);
+        });
+        size_t batchStart = 0;
+        while(batchStart < indices.size()) {
+            size_t batchEnd = batchStart + 1;
+            while(batchEnd < indices.size()
+                && events[indices[batchEnd]].source_monotonic_us - events[indices[batchEnd - 1]].source_monotonic_us <= kFirstObservedBatchGapUs) {
+                ++batchEnd;
+            }
+            const size_t firstIdx = indices[batchStart];
+            const size_t lastIdx = indices[batchEnd - 1];
+            const auto beginUs = events[firstIdx].source_monotonic_us;
+            const auto endUs = events[lastIdx].source_monotonic_us;
+            const bool clustered = (batchEnd - batchStart) >= 2;
+            TimelineVisualItem item{
+                firstIdx, lastIdx, beginUs, endUs, TimelineLane::Receive,
+                clustered, clustered, !clustered, clustered, {}
+            };
+            if(clustered) {
+                item.members.assign(indices.begin() + std::ptrdiff_t(batchStart),
+                                    indices.begin() + std::ptrdiff_t(batchEnd));
+            }
+            if(item.begin && (!result.begin || item.begin < result.begin)) result.begin = item.begin;
+            result.end = std::max(result.end, item.end);
+            result.items.push_back(std::move(item));
+            batchStart = batchEnd;
+        }
+    }
+    const auto measurementOrder = [&](const TimelineVisualItem &item) {
+        const auto &e = events[item.first];
+        if(e.event_name != "media.first_observed") return 0;
+        if(e.measurement_point == "first_decoded") return 1;
+        if(e.measurement_point == "first_pcm") return 2;
+        return 3;
+    };
+    std::stable_sort(result.items.begin(),result.items.end(),[&](const auto &a,const auto &b){
+        if(a.begin != b.begin) return a.begin < b.begin;
+        return measurementOrder(a) < measurementOrder(b);
+    });
     return result;
 }
 

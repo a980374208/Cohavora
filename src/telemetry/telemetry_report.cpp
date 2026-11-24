@@ -1447,14 +1447,19 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("render.decode_to_first", Signed(s.last_decode_to_render_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
-    group("render.subscribe_to_first", Signed(s.last_subscribe_to_first_render_ms), "ms",
+    group("render.subscribe_to_first",
+          Signed(s.first_subscribe_to_first_render_ms >= 0
+                     ? s.first_subscribe_to_first_render_ms
+                     : s.last_subscribe_to_first_render_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
     group("render.connect_to_first", Signed(s.last_connect_to_first_render_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
     group("render.admission_to_first",
-          Signed(s.last_admission_to_first_render_ms), "ms",
+          Signed(s.first_admission_to_first_render_ms >= 0
+                     ? s.first_admission_to_first_render_ms
+                     : s.last_admission_to_first_render_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
     group("render.interval.average", Ratio(s.render_average_interval_ms), "ms",

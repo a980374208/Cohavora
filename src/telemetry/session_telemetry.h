@@ -592,6 +592,7 @@ struct Snapshot {
     std::uint64_t ui_probe_late_callbacks = 0;
     bool ui_probe_in_flight = false;
 
+    bool stats_sampling_enabled = false;
     bool stats_in_flight = false;
     std::uint32_t actual_pc_count = 0;
     std::uint32_t successful_pc_count = 0;
@@ -902,6 +903,7 @@ struct Snapshot {
     std::int64_t room_connect_to_first_decoded_ms = -1;
     std::int64_t last_connect_to_first_decoded_ms = -1;
     std::int64_t last_subscribe_to_first_decoded_ms = -1;
+    std::int64_t first_subscribe_to_first_decoded_ms = -1;
     std::uint32_t last_decoded_width = 0;
     std::uint32_t last_decoded_height = 0;
 
@@ -934,6 +936,7 @@ struct Snapshot {
     std::uint64_t remote_audio_first_frames = 0;
     std::uint64_t stale_audio_binding_drops = 0;
     std::int64_t last_subscribe_to_first_pcm_ms = -1;
+    std::int64_t first_subscribe_to_first_pcm_ms = -1;
     std::uint32_t last_audio_sample_rate = 0;
     std::uint32_t last_audio_channels = 0;
 
@@ -981,6 +984,8 @@ struct Snapshot {
     std::int64_t last_subscribe_to_first_render_ms = -1;
     std::int64_t last_connect_to_first_render_ms = -1;
     std::int64_t last_admission_to_first_render_ms = -1;
+    std::int64_t first_admission_to_first_render_ms = -1;
+    std::int64_t first_subscribe_to_first_render_ms = -1;
     std::uint64_t render_timeline_event_drops = 0;
     double render_average_interval_ms = -1.0;
     std::int64_t render_maximum_interval_ms = -1;
@@ -1287,6 +1292,8 @@ public:
     void StartStatsSamplingOnStrand(
         StatsProvider provider,
         std::chrono::milliseconds interval = std::chrono::seconds(1));
+    void StopStatsSamplingOnStrand();
+    [[nodiscard]] bool IsStatsSamplingEnabledOnStrand() const noexcept;
     void RequestStatsSampleOnStrand();
     void StartRuntimeSamplingOnStrand(
         ResourceProvider resource_provider,

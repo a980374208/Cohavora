@@ -69,6 +69,7 @@
 #include <limits>
 #if defined(_WIN32)
 #include <objbase.h>
+#include <mmdeviceapi.h>
 #else
 #include <strings.h>
 #endif
@@ -327,6 +328,9 @@ public:
     SingleStreamVideoEncoderFactory(EncoderPreference preference,
                                    detail::LinuxHardwareEncoderPlan plan)
         : frozen_preference_(preference), frozen_linux_plan_(std::move(plan)) {}
+#else
+    explicit SingleStreamVideoEncoderFactory(bool stable_formats = false)
+        : stable_formats_(stable_formats) {}
 #endif
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         std::vector<webrtc::SdpVideoFormat> formats{
@@ -337,16 +341,32 @@ public:
 #else
         const auto preference = video_encoder_preference.load(std::memory_order_relaxed);
 #endif
-        for (auto format : BackendFormats(preference)) {
-            if (CodecNameEquals(format, "H264")) {
-                formats.push_back(std::move(format));
-            } else if (CodecNameEquals(format, "H265") &&
-                       webrtc::IsBackendH265FormatSupported(format) &&
-                       H265SendingAvailable()) {
-                format.scalability_modes = {webrtc::ScalabilityMode::kL1T1};
-                formats.push_back(std::move(format));
+        const auto append_backend_formats = [&](const std::vector<webrtc::SdpVideoFormat>& source) {
+            for (auto format : source) {
+                if (CodecNameEquals(format, "H264")) {
+                    if (!format.IsCodecInList(formats)) {
+                        formats.push_back(std::move(format));
+                    }
+                } else if (CodecNameEquals(format, "H265") &&
+                           webrtc::IsBackendH265FormatSupported(format) &&
+                           H265SendingAvailable()) {
+                    format.scalability_modes = {webrtc::ScalabilityMode::kL1T1};
+                    if (!format.IsCodecInList(formats)) {
+                        formats.push_back(std::move(format));
+                    }
+                }
             }
+        };
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+        if (stable_formats_) {
+            append_backend_formats(CachedBackendFormats());
+            append_backend_formats(CachedSoftwareFormats());
+        } else {
+            append_backend_formats(BackendFormats(preference));
         }
+#else
+        append_backend_formats(BackendFormats(preference));
+#endif
 #else
         if (webrtc::H264Encoder::IsSupported()) {
             auto h264 = webrtc::SupportedH264Codecs();
@@ -492,6 +512,8 @@ private:
     }
     std::optional<EncoderPreference> frozen_preference_;
     std::optional<detail::LinuxHardwareEncoderPlan> frozen_linux_plan_;
+#else
+    bool stable_formats_ = false;
 #endif
 };
 
@@ -549,8 +571,8 @@ public:
           linux_approved_h264_(std::move(approved)),
           simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>(preference, linux_plan_)) {}
 #else
-    CustomVideoEncoderFactory()
-        : simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>()) {}
+    explicit CustomVideoEncoderFactory(bool stable_formats = false)
+        : simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>(stable_formats)) {}
 #endif
 
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
@@ -1865,7 +1887,11 @@ bool WebRTCManager::Initialize() {
 
     auto audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
     auto audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+    auto video_encoder_factory = std::make_unique<CustomVideoEncoderFactory>(true);
+#else
     auto video_encoder_factory = CreateVideoEncoderFactory();
+#endif
     auto video_decoder_factory = CreateVideoDecoderFactory();
 
     auto env = webrtc::CreateEnvironment();
@@ -1902,8 +1928,14 @@ bool WebRTCManager::Initialize() {
                 }
 #if defined(_WIN32)
                 playout_device_selected_ = playout_selected;
+                playout_device_is_default_ = true;
+                windows_default_playout_should_resume_ = false;
+                StartDefaultPlayoutWatcherOnWorker();
+                windows_default_playout_id_ = playout_selected
+                    ? QueryDefaultPlayoutDeviceIdOnWorker() : std::wstring{};
 #else
                 playout_device_selected_ = playout_device_identity_.has_value();
+                playout_device_is_default_ = true;
 #endif
                 playout_device_index_ = 0;
             }
@@ -1939,7 +1971,249 @@ bool WebRTCManager::Initialize() {
     return true;
 }
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+struct WebRTCManager::WindowsDefaultPlayoutWatcher {
+    struct SharedState {
+        std::mutex mutex;
+        webrtc::Thread* worker_thread = nullptr;
+        WebRTCManager* owner = nullptr;
+        bool active = false;
+        bool refresh_pending = false;
+    };
+
+    class NotificationClient final : public IMMNotificationClient {
+    public:
+        explicit NotificationClient(std::shared_ptr<SharedState> state)
+            : state_(std::move(state)) {}
+
+        ULONG STDMETHODCALLTYPE AddRef() override {
+            return static_cast<ULONG>(
+                ref_count_.fetch_add(1, std::memory_order_relaxed) + 1);
+        }
+
+        ULONG STDMETHODCALLTYPE Release() override {
+            const ULONG next = static_cast<ULONG>(
+                ref_count_.fetch_sub(1, std::memory_order_acq_rel) - 1);
+            if (next == 0) {
+                delete this;
+            }
+            return next;
+        }
+
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+            if (!ppvObject) return E_POINTER;
+            if (riid == __uuidof(IUnknown) || riid == __uuidof(IMMNotificationClient)) {
+                *ppvObject = static_cast<IMMNotificationClient*>(this);
+                AddRef();
+                return S_OK;
+            }
+            *ppvObject = nullptr;
+            return E_NOINTERFACE;
+        }
+
+        HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override {
+            return S_OK;
+        }
+
+        HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override {
+            return S_OK;
+        }
+
+        HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override {
+            return S_OK;
+        }
+
+        HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(
+                LPCWSTR, const PROPERTYKEY) override {
+            return S_OK;
+        }
+
+        HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(
+                EDataFlow flow, ERole role, LPCWSTR /*pwstrDefaultDeviceId*/) override {
+            if (flow != eRender || role != eConsole) {
+                return S_OK;
+            }
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            if (!state_->active || !state_->worker_thread || !state_->owner ||
+                state_->refresh_pending) {
+                return S_OK;
+            }
+            state_->refresh_pending = true;
+            struct RefreshTask {
+                std::shared_ptr<SharedState> state;
+                WebRTCManager* owner = nullptr;
+            };
+            auto* task = new RefreshTask{state_, state_->owner};
+            // Keep the cross-library task capture pointer-only, as in the existing ABI boundary.
+            state_->worker_thread->PostTask([task]() {
+                std::unique_ptr<RefreshTask> owned(task);
+                {
+                    std::lock_guard<std::mutex> task_lock(owned->state->mutex);
+                    owned->state->refresh_pending = false;
+                    if (!owned->state->active) return;
+                }
+                owned->owner->RefreshDefaultPlayoutOnWorker();
+            });
+            return S_OK;
+        }
+
+    private:
+        std::atomic<long> ref_count_{1};
+        std::shared_ptr<SharedState> state_;
+    };
+
+    std::shared_ptr<SharedState> state;
+    IMMDeviceEnumerator* enumerator = nullptr;
+    NotificationClient* client = nullptr;
+    bool registered = false;
+};
+
+void WebRTCManager::StartDefaultPlayoutWatcherOnWorker() {
+    StopDefaultPlayoutWatcherOnWorker();
+    if (!worker_thread_) return;
+
+    IMMDeviceEnumerator* enumerator = nullptr;
+    const HRESULT hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        __uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator));
+    if (FAILED(hr) || !enumerator) {
+        return;
+    }
+
+    auto watcher = std::make_unique<WindowsDefaultPlayoutWatcher>();
+    watcher->state = std::make_shared<WindowsDefaultPlayoutWatcher::SharedState>();
+    watcher->state->worker_thread = worker_thread_.get();
+    watcher->state->owner = this;
+    watcher->state->active = true;
+    watcher->enumerator = enumerator;
+    watcher->client = new WindowsDefaultPlayoutWatcher::NotificationClient(watcher->state);
+    if (SUCCEEDED(enumerator->RegisterEndpointNotificationCallback(watcher->client))) {
+        watcher->registered = true;
+    } else {
+        watcher->state->active = false;
+        watcher->client->Release();
+        watcher->client = nullptr;
+    }
+    default_playout_watcher_ = std::move(watcher);
+}
+
+void WebRTCManager::StopDefaultPlayoutWatcherOnWorker() {
+    if (!default_playout_watcher_) return;
+    if (default_playout_watcher_->state) {
+        std::lock_guard<std::mutex> lock(default_playout_watcher_->state->mutex);
+        default_playout_watcher_->state->active = false;
+        default_playout_watcher_->state->worker_thread = nullptr;
+        default_playout_watcher_->state->owner = nullptr;
+    }
+    if (default_playout_watcher_->enumerator && default_playout_watcher_->client &&
+        default_playout_watcher_->registered) {
+        default_playout_watcher_->enumerator->UnregisterEndpointNotificationCallback(
+            default_playout_watcher_->client);
+        default_playout_watcher_->registered = false;
+    }
+    if (default_playout_watcher_->client) {
+        default_playout_watcher_->client->Release();
+        default_playout_watcher_->client = nullptr;
+    }
+    if (default_playout_watcher_->enumerator) {
+        default_playout_watcher_->enumerator->Release();
+        default_playout_watcher_->enumerator = nullptr;
+    }
+    default_playout_watcher_.reset();
+}
+
+std::wstring WebRTCManager::QueryDefaultPlayoutDeviceIdOnWorker() const {
+    IMMDeviceEnumerator* enumerator = default_playout_watcher_
+        ? default_playout_watcher_->enumerator : nullptr;
+    IMMDeviceEnumerator* temp_enumerator = nullptr;
+    if (!enumerator) {
+        if (FAILED(CoCreateInstance(
+                __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                __uuidof(IMMDeviceEnumerator),
+                reinterpret_cast<void**>(&temp_enumerator))) || !temp_enumerator) {
+            return {};
+        }
+        enumerator = temp_enumerator;
+    }
+
+    std::wstring device_id;
+    IMMDevice* device = nullptr;
+    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) && device) {
+        LPWSTR raw_id = nullptr;
+        if (SUCCEEDED(device->GetId(&raw_id)) && raw_id) {
+            device_id.assign(raw_id);
+            CoTaskMemFree(raw_id);
+        }
+        device->Release();
+    }
+    if (temp_enumerator) {
+        temp_enumerator->Release();
+    }
+    return device_id;
+}
+
+bool WebRTCManager::RefreshDefaultPlayoutOnWorker() {
+    if (!adm_) return false;
+    if (!playout_device_is_default_) return playout_device_selected_;
+
+    const auto* playout = static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get());
+    if (!playout->HasAudioCallback()) {
+        windows_default_playout_should_resume_ = false;
+    }
+
+    const std::wstring current_default_id = QueryDefaultPlayoutDeviceIdOnWorker();
+    const bool was_playing = adm_->Playing();
+    if (was_playing) {
+        windows_default_playout_should_resume_ = true;
+    }
+
+    if (current_default_id.empty()) {
+        if (was_playing || adm_->PlayoutIsInitialized()) {
+            adm_->StopPlayout();
+        }
+        windows_default_playout_id_.clear();
+        playout_device_selected_ = false;
+        return false;
+    }
+
+    const bool same_device = playout_device_selected_ &&
+        !windows_default_playout_id_.empty() &&
+        _wcsicmp(current_default_id.c_str(), windows_default_playout_id_.c_str()) == 0;
+    if (same_device) {
+        if (!was_playing && windows_default_playout_should_resume_ &&
+            playout->HasAudioCallback()) {
+            if (!adm_->PlayoutIsInitialized()) {
+                if (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0) {
+                    return false;
+                }
+            }
+            return adm_->StartPlayout() == 0 && adm_->Playing();
+        }
+        return true;
+    }
+
+    const bool applied = detail::ApplyPlayoutDevice(
+        *adm_, std::nullopt, [this] { ResetApmProcessor(); });
+    if (!applied) {
+        playout_device_selected_ = false;
+        windows_default_playout_id_.clear();
+        return false;
+    }
+
+    playout_device_selected_ = true;
+    windows_default_playout_id_ = current_default_id;
+    if (!adm_->Playing() && windows_default_playout_should_resume_ &&
+        playout->HasAudioCallback()) {
+        if (!adm_->PlayoutIsInitialized()) {
+            if (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0) {
+                return false;
+            }
+        }
+        return adm_->StartPlayout() == 0 && adm_->Playing();
+    }
+    return true;
+}
+#else
 bool WebRTCManager::RefreshDefaultPlayoutOnWorker() {
     if (!playout_device_is_default_) return playout_device_selected_;
     const auto identity = AudioDeviceIdentityAtIndex(*adm_, false, 0);
@@ -2013,7 +2287,14 @@ bool WebRTCManager::SetPlayoutDevice(uint16_t index) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!adm_ || !worker_thread_) return false;
     return worker_thread_->BlockingCall([this, index]() {
-        return detail::ApplyPlayoutDevice(*adm_, index, [this] { ResetApmProcessor(); });
+        const bool applied = detail::ApplyPlayoutDevice(*adm_, index, [this] { ResetApmProcessor(); });
+        if (applied) {
+            playout_device_selected_ = true;
+            playout_device_is_default_ = false;
+            windows_default_playout_id_.clear();
+            windows_default_playout_should_resume_ = false;
+        }
+        return applied;
     });
 #endif
 }
@@ -2032,6 +2313,17 @@ PlayoutSwitchResult WebRTCManager::SwitchPlayoutDeviceById(
 #if defined(_WIN32)
         const bool applied = detail::SelectPlayoutDeviceById(
             *adm_, device_id, [this] { ResetApmProcessor(); });
+        if (applied) {
+            playout_device_selected_ = true;
+            playout_device_is_default_ = device_id.empty();
+            if (playout_device_is_default_) {
+                windows_default_playout_id_ = QueryDefaultPlayoutDeviceIdOnWorker();
+                windows_default_playout_should_resume_ = adm_->Playing();
+            } else {
+                windows_default_playout_id_.clear();
+                windows_default_playout_should_resume_ = false;
+            }
+        }
         return PlayoutSwitchResult{
             applied, applied ? PlayoutSelection::Requested : PlayoutSelection::Unknown,
             adm_->Playing(), adm_->PlayoutIsInitialized()};
@@ -2316,7 +2608,11 @@ bool WebRTCManager::EnsurePlayout() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!adm_ || !worker_thread_) return false;
     return worker_thread_->BlockingCall([this]() {
-#if !defined(_WIN32)
+#if defined(_WIN32)
+        if (playout_device_is_default_ && !RefreshDefaultPlayoutOnWorker()) {
+            return false;
+        }
+#else
         if (playout_device_is_default_ && !RefreshDefaultPlayoutOnWorker()) {
             return false;
         }
@@ -2338,14 +2634,27 @@ bool WebRTCManager::EnsurePlayout() {
         // Keep output closed until a PeerConnection binds that callback.
         const auto* playout = static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get());
         if (!playout->HasAudioCallback()) return false;
-        if (adm_->Playing()) return true;
+        if (adm_->Playing()) {
+#if defined(_WIN32)
+            if (playout_device_is_default_) {
+                windows_default_playout_should_resume_ = true;
+            }
+#endif
+            return true;
+        }
         if (!adm_->PlayoutIsInitialized()) {
 #if defined(_WIN32)
             if (adm_->InitSpeaker() != 0) return false;
 #endif
             if (adm_->InitPlayout() != 0) return false;
         }
-        return adm_->StartPlayout() == 0 && adm_->Playing();
+        const bool playing = adm_->StartPlayout() == 0 && adm_->Playing();
+#if defined(_WIN32)
+        if (playing && playout_device_is_default_) {
+            windows_default_playout_should_resume_ = true;
+        }
+#endif
+        return playing;
     });
 }
 
@@ -2356,6 +2665,20 @@ void WebRTCManager::Deinitialize() {
 
 void WebRTCManager::DeinitializeLocked() {
     if (!ssl_initialized_ && !initialized_) return;
+
+#if defined(_WIN32)
+    if (default_playout_watcher_) {
+        if (worker_thread_) {
+            worker_thread_->BlockingCall([this]() {
+                StopDefaultPlayoutWatcherOnWorker();
+            });
+        } else {
+            StopDefaultPlayoutWatcherOnWorker();
+        }
+    }
+    windows_default_playout_id_.clear();
+    windows_default_playout_should_resume_ = false;
+#endif
 
     // Stop native callbacks before destroying the VoiceEngine/AudioTransport.
     if (adm_) {

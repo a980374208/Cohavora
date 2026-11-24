@@ -117,6 +117,7 @@ public:
         : _executorLifetime(std::move(executorLifetime))
         , _strand(context.get_executor())
         , _videoDemandTimer(_strand)
+        , _catalogDemandCoalesceTimer(_strand)
         , _remoteControlTimer(_strand)
         , _generation(generation)
         , _localUserId(std::move(localUserId))
@@ -142,6 +143,44 @@ public:
     void revokeCallbacks() {
         std::lock_guard lock(_callbackMutex);
         _callbacksAccepted = false;
+        _pendingCatalogEvents.clear();
+        _catalogDrainPosted = false;
+    }
+
+    bool enqueuePublicationCatalogEvent(
+        const std::shared_ptr<MeetingSessionRuntime>& self,
+        livekit::ParticipantEvent event,
+        std::function<void()> applyDemand) {
+        bool shouldPost = false;
+        {
+            std::lock_guard lock(_callbackMutex);
+            if (!_callbacksAccepted) return false;
+            _pendingCatalogEvents.push_back(std::move(event));
+            if (!_catalogDrainPosted) {
+                _catalogDrainPosted = true;
+                shouldPost = true;
+            }
+        }
+        if (shouldPost) {
+            asio::post(_strand, [self, applyDemand = std::move(applyDemand)]() mutable {
+                self->drainPublicationCatalogEventsOnStrand(self, std::move(applyDemand));
+            });
+        }
+        return true;
+    }
+
+    void syncPendingCatalogBeforeDemandOnStrand() {
+        assertOnStrand();
+        if (!_catalogDemandDirty && !_catalogDemandCoalesceActive) return;
+        std::error_code ignored;
+        _catalogDemandCoalesceTimer.cancel(ignored);
+        _catalogDemandCoalesceActive = false;
+        _pendingCatalogDemandApply = nullptr;
+        if (_catalogDemandDirty) {
+            _catalogDemandDirty = false;
+            _videoDemandPolicy.UpdateCatalog(_publicationCatalog.snapshot());
+            completePendingRemoteMediaRecoveryOnStrand();
+        }
     }
     template <typename F> bool postRemoteControl(F&& callback) {
         if (_remotePending.fetch_add(1) >= 128) {
@@ -415,7 +454,8 @@ public:
         }
         const auto current_generation =
             _publicationCatalog.snapshot().native_room_generation;
-        if (current_generation == request.native_room_generation) {
+        if (current_generation == request.native_room_generation &&
+            !_catalogDemandDirty && !_catalogDemandCoalesceActive) {
             completion(buildRemoteMediaPlanOnStrand(request));
             return;
         }
@@ -433,6 +473,10 @@ public:
         assertOnStrand();
         std::error_code ignored;
         _videoDemandTimer.cancel(ignored);
+        _catalogDemandCoalesceTimer.cancel(ignored);
+        _catalogDemandDirty = false;
+        _catalogDemandCoalesceActive = false;
+        _pendingCatalogDemandApply = nullptr;
         _pendingRemoteMediaRecovery.reset();
         _hasViewportIntent = false;
         if (_videoPolicyTelemetry.coordinator_session != 0 &&
@@ -547,6 +591,62 @@ private:
         RemoteMediaRecoveryCompletion completion;
     };
 
+    static constexpr std::chrono::milliseconds kCatalogDemandCoalesceWindow{15};
+
+    void drainPublicationCatalogEventsOnStrand(
+        const std::shared_ptr<MeetingSessionRuntime>& self,
+        std::function<void()> applyDemand) {
+        assertOnStrand();
+        std::vector<livekit::ParticipantEvent> batch;
+        {
+            std::lock_guard lock(_callbackMutex);
+            batch.swap(_pendingCatalogEvents);
+            _catalogDrainPosted = false;
+        }
+        if (!_acceptingData || batch.empty()) return;
+        bool anyApplied = false;
+        for (const auto& event : batch) {
+            if (_publicationCatalog.Apply(event) == livekit::CatalogApplyResult::Applied) {
+                anyApplied = true;
+            }
+        }
+        if (!anyApplied) return;
+        _catalogDemandDirty = true;
+        if (applyDemand) {
+            _pendingCatalogDemandApply = std::move(applyDemand);
+        }
+        scheduleCatalogDemandFlushOnStrand(self);
+    }
+
+    void scheduleCatalogDemandFlushOnStrand(
+        const std::shared_ptr<MeetingSessionRuntime>& self) {
+        assertOnStrand();
+        if (!_acceptingData || _catalogDemandCoalesceActive) return;
+        _catalogDemandCoalesceActive = true;
+        _catalogDemandCoalesceTimer.expires_after(kCatalogDemandCoalesceWindow);
+        _catalogDemandCoalesceTimer.async_wait(asio::bind_executor(
+            _strand,
+            [weak = std::weak_ptr<MeetingSessionRuntime>(self)](
+                const std::error_code& error) {
+                if (error) return;
+                if (auto current = weak.lock()) {
+                    current->flushCatalogDemandOnStrand();
+                }
+            }));
+    }
+
+    void flushCatalogDemandOnStrand() {
+        assertOnStrand();
+        _catalogDemandCoalesceActive = false;
+        if (!_acceptingData || !_catalogDemandDirty) return;
+        _catalogDemandDirty = false;
+        _videoDemandPolicy.UpdateCatalog(_publicationCatalog.snapshot());
+        completePendingRemoteMediaRecoveryOnStrand();
+        auto apply = std::move(_pendingCatalogDemandApply);
+        _pendingCatalogDemandApply = nullptr;
+        if (apply) apply();
+    }
+
     void completePendingRemoteMediaRecoveryOnStrand() {
         assertOnStrand();
         if (!_pendingRemoteMediaRecovery) return;
@@ -567,12 +667,15 @@ private:
     const std::shared_ptr<void> _executorLifetime;
     std::mutex _callbackMutex;
     bool _callbacksAccepted = true;
+    std::vector<livekit::ParticipantEvent> _pendingCatalogEvents;
+    bool _catalogDrainPosted = false;
     std::atomic<unsigned> _remotePending{0};
     std::atomic<bool> _remoteOverflow{false};
     std::atomic<uint64_t> _remoteEpoch{1};
     std::atomic<uint64_t> _remoteInputEpoch{1};
     Strand _strand;
     asio::steady_timer _videoDemandTimer;
+    asio::steady_timer _catalogDemandCoalesceTimer;
     asio::steady_timer _remoteControlTimer;
     const uint64_t _generation;
     const QString _localUserId;
@@ -580,6 +683,9 @@ private:
     livekit::VideoDemandPolicy _videoDemandPolicy;
     VideoPolicyTelemetryState _videoPolicyTelemetry;
     bool _hasViewportIntent = false;
+    bool _catalogDemandDirty = false;
+    bool _catalogDemandCoalesceActive = false;
+    std::function<void()> _pendingCatalogDemandApply;
     std::optional<PendingRemoteMediaRecovery> _pendingRemoteMediaRecovery;
     std::shared_ptr<livekit::telemetry::SessionTelemetry> _telemetry;
     bool _acceptingData = true;

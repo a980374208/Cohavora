@@ -71,11 +71,14 @@ struct TimelineVisualItem {
     std::size_t first = 0, last = 0;
     std::uint64_t begin = 0, end = 0;
     TimelineLane lane = TimelineLane::Other;
-    bool hasBegin = false, hasEnd = false, milestone = false;
+    bool hasBegin = false, hasEnd = false, milestone = false, isCluster = false;
+    std::vector<std::size_t> members;
 };
 struct TimelineView {
     TimelineFramePtr source;
     std::vector<TimelineVisualItem> items;
+    std::vector<std::size_t> tableEvents;
+    std::size_t excludedStallCount = 0;
     std::uint64_t begin = 0, end = 0;
 };
 TimelineView BuildTimelineView(TimelineFramePtr source, const std::string& operation = {});

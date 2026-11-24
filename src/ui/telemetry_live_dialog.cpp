@@ -70,8 +70,14 @@ public:
                 timelineTable_=new QTableWidget(content);timelineTable_->setObjectName(QStringLiteral("telemetryTimeline"));
                 timelineTable_->setColumnCount(5);timelineTable_->setHorizontalHeaderLabels({QStringLiteral("相对时间"),QStringLiteral("事件"),QStringLiteral("操作"),QStringLiteral("父操作"),QStringLiteral("状态")});
                 timelineTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);timelineTable_->verticalHeader()->hide();
-                timelineTable_->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-                timelineTable_->horizontalHeader()->setStretchLastSection(true);timelineTable_->setMinimumHeight(440);grid->addWidget(timelineTable_,4,0);
+                auto *timelineHeader=timelineTable_->horizontalHeader();
+                timelineHeader->setSectionResizeMode(QHeaderView::Interactive);
+                timelineHeader->setStretchLastSection(true);
+                timelineTable_->setColumnWidth(0,96);
+                timelineTable_->setColumnWidth(1,170);
+                timelineTable_->setColumnWidth(2,120);
+                timelineTable_->setColumnWidth(3,120);
+                timelineTable_->setMinimumHeight(440);grid->addWidget(timelineTable_,4,0);
                 connect(timelineTable_,&QTableWidget::cellClicked,this,[this](int row,int column){if(auto *item=timelineTable_->item(row,column))timelineDetail_->setText(item->toolTip());});
                 auto *note=new QLabel(QStringLiteral("按事件浏览整个已保留会话；并行操作通过父操作关联，不将各阶段耗时相加。\n缺少开始/结束的操作不推算耗时。关闭页面不删除会话证据，重开会重新装载；裁剪不等于没有发生。"),content);
                 note->setWordWrap(true);grid->addWidget(note,5,0);
@@ -201,18 +207,23 @@ private:
         for(int page=0;page<4;++page) {
             int start=page==0?0:page==1?7:page==2?10:17;
             auto *table=detailTables_[page];if(page!=tabs_->currentIndex() || !table->isVisible())continue;
+            table->setUpdatesEnabled(false);
             for(int row=0;row<table->rowCount();++row) {
                 auto id=static_cast<MetricId>(start+row);const auto &r=frame->readings[start+row];
-                table->item(row,1)->setText(text(id));
+                const auto valueText=text(id);
+                if(table->item(row,1)->text()!=valueText)table->item(row,1)->setText(valueText);
                 auto age=r.freshnessAt==TelemetryClock::time_point{}?QStringLiteral("—"):
                     QString::number(std::chrono::duration<double>(frame->end-r.freshnessAt).count(),'f',1)+QStringLiteral(" 秒");
-                table->item(row,2)->setText(TelemetryAvailabilityText(r.display)+QStringLiteral(" / ")+age);
+                auto statusText=TelemetryAvailabilityText(r.display)+QStringLiteral(" / ")+age;
                 if(id==MetricId::Threads && r.sampledAt!=TelemetryClock::time_point{})
-                    table->item(row,2)->setText(TelemetryAvailabilityText(r.display)+QStringLiteral(" / 缓存龄 %1 秒")
-                        .arg(std::chrono::duration<double>(frame->end-r.sampledAt).count(),0,'f',1));
-                table->item(row,2)->setToolTip(QStringLiteral("原生状态：%1；%2；值版本 %3").arg(TelemetryAvailabilityText(r.native),
-                    r.observedTime?QStringLiteral("首次观察时间"):QStringLiteral("源采样时间")).arg(r.sourceRevision));
+                    statusText=TelemetryAvailabilityText(r.display)+QStringLiteral(" / 缓存龄 %1 秒")
+                        .arg(std::chrono::duration<double>(frame->end-r.sampledAt).count(),0,'f',1);
+                if(table->item(row,2)->text()!=statusText)table->item(row,2)->setText(statusText);
+                const auto tipText=QStringLiteral("原生状态：%1；%2；值版本 %3").arg(TelemetryAvailabilityText(r.native),
+                    r.observedTime?QStringLiteral("首次观察时间"):QStringLiteral("源采样时间")).arg(r.sourceRevision);
+                if(table->item(row,2)->toolTip()!=tipText)table->item(row,2)->setToolTip(tipText);
             }
+            table->setUpdatesEnabled(true);
         }
     }
     void PresentTimeline(TimelineFramePtr frame) {
@@ -242,8 +253,7 @@ private:
             timelineFilter_->setCurrentIndex(std::max(0,index));
         }
         auto view=BuildTimelineView(frame,timelineFilter_->currentData().toString().toStdString());
-        std::set<size_t> visible;
-        for(const auto &item:view.items){visible.insert(item.first);visible.insert(item.last);}
+        const auto visible=view.tableEvents;
         timelineLanes_->SetFrame(std::move(view));
         QString admission=QStringLiteral("入会 → 可用：证据未齐");
         for(const auto &terminal:frame->events) {
@@ -258,6 +268,7 @@ private:
             .arg(frame->events.size()).arg(frame->omitted).arg(frame->admissionDrops).arg(lastFrame_?lastFrame_->renderEventDrops:0));
         std::uint64_t origin=(std::numeric_limits<std::uint64_t>::max)();std::set<std::string> starts;
         for(const auto &e:frame->events) {if(e.source_monotonic_us)origin=std::min(origin,e.source_monotonic_us);if(e.event_name.ends_with(".started"))starts.insert(e.operation_id);}
+        timelineTable_->setUpdatesEnabled(false);
         timelineTable_->setRowCount(int(visible.size()));
         int row=0;
         for(const auto index:visible) {
@@ -281,16 +292,19 @@ private:
             }
             const QStringList values={e.source_monotonic_us?QStringLiteral("%1 秒").arg(double(e.source_monotonic_us-origin)/1e6,0,'f',3):QStringLiteral("时间未知"),
                 name,QString::fromStdString(e.operation_id.substr(0,12)),QString::fromStdString(e.parent_operation_id.substr(0,12)),state};
+            const QString tip=QStringLiteral("operation: %1\nparent: %2\n会话代际 %3 · 房间代际 %4 · 绑定 %5 · 事件 %6\n安全原因 %7 / %8 · 结果 %9\n测量端点 %10 · 恢复代际 %11")
+                .arg(QString::fromStdString(e.operation_id),QString::fromStdString(e.parent_operation_id))
+                .arg(e.session_generation).arg(e.room_generation).arg(e.binding_epoch).arg(e.event_sequence)
+                .arg(QString::fromStdString(e.error_code),QString::fromStdString(e.error_layer),QString::fromStdString(e.outcome),QString::fromStdString(e.measurement_point)).arg(e.recovery_epoch);
             for(int col=0;col<5;++col) {
-                if(!timelineTable_->item(row,col))timelineTable_->setItem(row,col,new QTableWidgetItem);
-                timelineTable_->item(row,col)->setText(values[col]);
-                timelineTable_->item(row,col)->setToolTip(QStringLiteral("operation: %1\nparent: %2\n会话代际 %3 · 房间代际 %4 · 绑定 %5 · 事件 %6\n安全原因 %7 / %8 · 结果 %9\n测量端点 %10 · 恢复代际 %11")
-                    .arg(QString::fromStdString(e.operation_id),QString::fromStdString(e.parent_operation_id))
-                    .arg(e.session_generation).arg(e.room_generation).arg(e.binding_epoch).arg(e.event_sequence)
-                    .arg(QString::fromStdString(e.error_code),QString::fromStdString(e.error_layer),QString::fromStdString(e.outcome),QString::fromStdString(e.measurement_point)).arg(e.recovery_epoch));
+                auto *item=timelineTable_->item(row,col);
+                if(!item){item=new QTableWidgetItem;timelineTable_->setItem(row,col,item);}
+                if(item->text()!=values[col])item->setText(values[col]);
+                if(item->toolTip()!=tip)item->setToolTip(tip);
             }
             ++row;
         }
+        timelineTable_->setUpdatesEnabled(true);
     }
     struct Chart {int page;TelemetryTimeSeriesWidget *widget;std::vector<MetricId> ids;};
     PanelFramePtr lastFrame_;

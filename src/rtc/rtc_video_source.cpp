@@ -32,8 +32,9 @@ webrtc::scoped_refptr<RtcVideoSource> RtcVideoSource::Create(std::shared_ptr<Vid
 RtcVideoSource::RtcVideoSource(std::shared_ptr<VideoSource> source, bool screencast)
     : lk_source_(source), screencast_(screencast) {
     if (lk_source_) {
+        worker_thread_ = std::thread([this] { WorkerLoop(); });
         subscription_ = lk_source_->subscribe([this](const VideoFrame& frame, const VideoCaptureOptions& options) {
-            OnVideoFrame(frame, options);
+            EnqueueFrame(frame, options);
         });
     }
     live_rtc_video_sources.fetch_add(1, std::memory_order_relaxed);
@@ -41,6 +42,13 @@ RtcVideoSource::RtcVideoSource(std::shared_ptr<VideoSource> source, bool screenc
 
 RtcVideoSource::~RtcVideoSource() {
     if (subscription_) subscription_->disconnect();
+    {
+        std::lock_guard<std::mutex> lock(mailbox_mutex_);
+        stopping_ = true;
+        pending_frame_.reset();
+    }
+    mailbox_cv_.notify_one();
+    if (worker_thread_.joinable()) worker_thread_.join();
     SetTelemetryProbe({});
     live_rtc_video_sources.fetch_sub(1, std::memory_order_relaxed);
 }
@@ -63,10 +71,52 @@ VideoFrameDiagnostics RtcVideoSource::frame_diagnostics() const noexcept {
     return result;
 }
 
-void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
+void RtcVideoSource::EnqueueFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
     input_frames_.fetch_add(1, std::memory_order_relaxed);
-    int width = frame.width();
-    int height = frame.height();
+    if (frame.width() <= 0 || frame.height() <= 0 || frame.dataSize() == 0) {
+        dropped_frames_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    // Sample the WebRTC system clock at capture-callback arrival so worker
+    // scheduling/conversion latency never skews TimestampAligner.
+    const std::int64_t arrival_system_us = webrtc::TimeMicros();
+    std::optional<PendingFrame> overwritten;
+    {
+        std::lock_guard<std::mutex> lock(mailbox_mutex_);
+        if (stopping_) return;
+        if (pending_frame_.has_value()) {
+            overwritten = std::move(pending_frame_);
+            dropped_frames_.fetch_add(1, std::memory_order_relaxed);
+        }
+        pending_frame_.emplace(PendingFrame{frame, options, arrival_system_us});
+    }
+    overwritten.reset();
+    mailbox_cv_.notify_one();
+}
+
+void RtcVideoSource::WorkerLoop() {
+    for (;;) {
+        std::optional<PendingFrame> next;
+        {
+            std::unique_lock<std::mutex> lock(mailbox_mutex_);
+            mailbox_cv_.wait(lock, [this] {
+                return stopping_ || pending_frame_.has_value();
+            });
+            if (stopping_) break;
+            next = std::move(pending_frame_);
+            pending_frame_.reset();
+        }
+        if (next) {
+            ProcessFrame(next->frame, next->options, next->arrival_system_us);
+        }
+    }
+}
+
+void RtcVideoSource::ProcessFrame(const VideoFrame& frame, const VideoCaptureOptions& options,
+                                  std::int64_t arrival_system_us) {
+    const int width = frame.width();
+    const int height = frame.height();
     if (width <= 0 || height <= 0 || frame.dataSize() == 0) {
         dropped_frames_.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -76,7 +126,8 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
     // timestamps can be relative to a capture session and reset on restart.
     // Mixing them with a system-clock fallback makes the encoder discard every
     // subsequent frame as old after a reset or a missing capture timestamp.
-    const int64_t system_timestamp_us = webrtc::TimeMicros();
+    const int64_t system_timestamp_us = arrival_system_us > 0
+        ? arrival_system_us : webrtc::TimeMicros();
     const int64_t capture_timestamp_us = options.timestamp_us > 0
         ? options.timestamp_us : system_timestamp_us;
     const int64_t timestamp_us = timestamp_aligner_.TranslateTimestamp(

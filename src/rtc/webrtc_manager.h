@@ -272,12 +272,19 @@ public:
         std::shared_ptr<diagnostic::SdpNegotiationTrace> trace = {});
 
 private:
+#if defined(_WIN32)
+    struct WindowsDefaultPlayoutWatcher;
+#endif
     WebRTCManager() = default;
     ~WebRTCManager();
     void DeinitializeLocked();
-#if !defined(_WIN32)
-    // Called only on the ADM worker while mutex_ is held.
+    // Called only on the ADM worker thread.
     bool RefreshDefaultPlayoutOnWorker();
+#if defined(_WIN32)
+    void StartDefaultPlayoutWatcherOnWorker();
+    void StopDefaultPlayoutWatcherOnWorker();
+    std::wstring QueryDefaultPlayoutDeviceIdOnWorker() const;
+#else
     bool RefreshDefaultRecordingOnWorker();
 #endif
 
@@ -294,12 +301,16 @@ private:
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
     uint16_t playout_device_index_ = 0;
     bool playout_device_selected_ = false;
+    bool playout_device_is_default_ = true;
     uint16_t recording_device_index_ = 0;
     bool recording_device_selected_ = false;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    std::unique_ptr<WindowsDefaultPlayoutWatcher> default_playout_watcher_;
+    std::wstring windows_default_playout_id_;
+    bool windows_default_playout_should_resume_ = false;
+#else
     std::optional<std::string> playout_device_identity_;
     std::optional<std::string> recording_device_identity_;
-    bool playout_device_is_default_ = true;
     bool recording_device_is_default_ = true;
 #endif
 

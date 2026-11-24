@@ -67,9 +67,13 @@ void VideoCanvas::updateFrame(const std::string& key, VideoRenderFrame::Ptr fram
         previous->second->SetRenderExpected(
             false, RenderExpectationReason::BindingEnded);
     }
+    const bool expected = surface_render_expected_ && visible_tile_keys_.contains(key);
+    frame->SetRenderExpected(
+        expected,
+        expected ? RenderExpectationReason::SurfaceVisible
+                 : hidden_expectation_reason_);
     telemetry_frames_[key] = frame;
     submitFrame(key, std::move(frame));
-    updateRenderExpectations();
     frame_dirty_.store(true, std::memory_order_release);
 }
 void VideoCanvas::setVideoDestination(const std::string& key, const QRectF& rect) {
@@ -268,6 +272,7 @@ bool VideoCanvas::event(QEvent* event) {
     switch (event->type()) {
     case QEvent::Show:
     case QEvent::Hide:
+    case QEvent::Resize:
     case QEvent::WindowStateChange:
     case QEvent::ParentChange:
         updateRenderExpectations();
@@ -280,26 +285,28 @@ bool VideoCanvas::event(QEvent* event) {
 
 void VideoCanvas::updateRenderExpectations() {
     const bool minimized = window() && window()->isMinimized();
-    const bool surface_visible = isVisible() && !minimized &&
+    surface_render_expected_ = isVisible() && !minimized &&
         width() > 0 && height() > 0 && !renderer_unavailable_emitted_;
-    std::set<std::string> visible_keys;
-    if (surface_visible) {
+    hidden_expectation_reason_ = minimized
+        ? RenderExpectationReason::WindowMinimized
+        : RenderExpectationReason::SurfaceHidden;
+    visible_tile_keys_.clear();
+    if (surface_render_expected_) {
         for (const auto& tile : tiles_) {
             auto visible = QRect(tile.x, tile.y, tile.width, tile.height).intersected(rect());
             if (tile.clip) visible = visible.intersected(
                 QRect(tile.clip->x, tile.clip->y, tile.clip->width, tile.clip->height));
             if (tile.hasVideo && !visible.isEmpty()) {
-                visible_keys.insert(tile.identity);
+                visible_tile_keys_.insert(tile.identity);
             }
         }
     }
     for (const auto& [key, frame] : telemetry_frames_) {
-        const bool expected = visible_keys.contains(key);
+        const bool expected = visible_tile_keys_.contains(key);
         frame->SetRenderExpected(
             expected,
             expected ? RenderExpectationReason::SurfaceVisible
-                     : minimized ? RenderExpectationReason::WindowMinimized
-                                 : RenderExpectationReason::SurfaceHidden);
+                     : hidden_expectation_reason_);
     }
 }
 void VideoCanvas::setTilesLayout(const std::vector<VideoTileRect>& tiles) {
@@ -347,9 +354,14 @@ void VideoCanvas::setTileDecoration(const std::string& identity,
 
 void VideoCanvas::updateTilePresentation(const std::string& identity, bool hasVideo) {
     Q_ASSERT(QThread::currentThread() == thread());
+    bool changed = false;
     for (auto& tile : tiles_) {
-        if (tile.identity == identity) tile.hasVideo = hasVideo;
+        if (tile.identity == identity && tile.hasVideo != hasVideo) {
+            tile.hasVideo = hasVideo;
+            changed = true;
+        }
     }
+    if (changed) updateRenderExpectations();
     if (hovered_tile_ == identity) updateTileToolTip();
     frame_dirty_.store(true, std::memory_order_release);
 }

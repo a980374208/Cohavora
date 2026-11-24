@@ -12,6 +12,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <vector>
 
 class ParticipantWindowInspectionAccess;
@@ -116,6 +117,9 @@ private:
     QString visible_tool_tip_;
     std::atomic<bool> frame_dirty_{false};
     bool renderer_unavailable_emitted_ = false;
+    bool surface_render_expected_ = false;
+    RenderExpectationReason hidden_expectation_reason_ = RenderExpectationReason::SurfaceHidden;
+    std::set<std::string> visible_tile_keys_;
     std::unique_ptr<RenderDiagnostics> diagnostics_;
     void updateRenderExpectations();
 };

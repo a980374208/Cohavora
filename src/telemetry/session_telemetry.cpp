@@ -994,12 +994,33 @@ void SessionTelemetry::StartStatsSamplingOnStrand(
     StatsProvider provider,
     std::chrono::milliseconds interval) {
     AssertOnStrand();
+    if (!accepting_.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::error_code ignored;
+    stats_timer_.cancel(ignored);
     stats_provider_ = std::move(provider);
     stats_interval_ = (std::max)(std::chrono::milliseconds(10), interval);
     stale_after_ = (std::max)(stats_interval_ * 3, std::chrono::milliseconds(100));
     stats_started_ = true;
     RequestStatsSampleOnStrand();
     ScheduleNextStatsTickOnStrand();
+}
+
+void SessionTelemetry::StopStatsSamplingOnStrand() {
+    AssertOnStrand();
+    if (!stats_started_) {
+        return;
+    }
+    stats_started_ = false;
+    std::error_code ignored;
+    stats_timer_.cancel(ignored);
+    PublishSnapshotOnStrand(Clock::now());
+}
+
+bool SessionTelemetry::IsStatsSamplingEnabledOnStrand() const noexcept {
+    AssertOnStrand();
+    return stats_started_;
 }
 
 void SessionTelemetry::RequestStatsSampleOnStrand() {
@@ -1800,6 +1821,10 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                 event.source_time >= media->second.subscription_accepted) {
                 state_.last_subscribe_to_first_decoded_ms = MillisecondsBetween(
                     media->second.subscription_accepted, event.source_time);
+                if (state_.first_subscribe_to_first_decoded_ms < 0) {
+                    state_.first_subscribe_to_first_decoded_ms =
+                        state_.last_subscribe_to_first_decoded_ms;
+                }
             }
             UpdateFirstFrameAvailabilityOnStrand();
         }
@@ -1924,6 +1949,10 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                 event.source_time >= media->second.subscription_accepted) {
                 state_.last_subscribe_to_first_pcm_ms = MillisecondsBetween(
                     media->second.subscription_accepted, event.source_time);
+                if (state_.first_subscribe_to_first_pcm_ms < 0) {
+                    state_.first_subscribe_to_first_pcm_ms =
+                        state_.last_subscribe_to_first_pcm_ms;
+                }
             }
             UpdateAudioFirstFrameAvailabilityOnStrand();
         }
@@ -2089,6 +2118,10 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                 event.source_time >= render.subscription_accepted) {
                 state_.last_subscribe_to_first_render_ms = MillisecondsBetween(
                     render.subscription_accepted, event.source_time);
+                if (state_.first_subscribe_to_first_render_ms < 0) {
+                    state_.first_subscribe_to_first_render_ms =
+                        state_.last_subscribe_to_first_render_ms;
+                }
             }
             const auto connect = room_connect_starts_.find(event.room_generation);
             if (connect != room_connect_starts_.end() &&
@@ -2098,6 +2131,10 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             }
             if (latest_admission_accepted_at_ != Clock::time_point{} &&
                 event.source_time >= latest_admission_accepted_at_) {
+                if (state_.first_admission_to_first_render_ms < 0) {
+                    state_.first_admission_to_first_render_ms = MillisecondsBetween(
+                        latest_admission_accepted_at_, event.source_time);
+                }
                 state_.last_admission_to_first_render_ms = MillisecondsBetween(
                     latest_admission_accepted_at_, event.source_time);
             }
@@ -5817,6 +5854,7 @@ Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
     snapshot.runtime_stale_after_ms = runtime_stale_after_.count();
     snapshot.generated_at = now;
     snapshot.session_complete = stop_finalized_;
+    snapshot.stats_sampling_enabled = stats_started_;
     snapshot.stats_in_flight = stats_in_flight_;
     snapshot.revision = state_.revision;
     const auto duration_end = session_stopped_at_ == Clock::time_point{}
