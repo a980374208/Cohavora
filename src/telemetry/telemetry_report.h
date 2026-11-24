@@ -241,9 +241,13 @@ public:
     // Real catalog/page transitions publish >100 revisions in 100 ms. Keep
     // that burst within the existing retained-memory budget; the byte limit
     // below remains authoritative for large snapshots and callbacks.
+    // 200 MiB total store quota allows the active report up to 96 MiB on disk
+    // so fine-histogram page bursts (>100 x ~470 KiB revisions) do not prune
+    // active segments faster than the external archiver can copy them while
+    // keeping exported diagnostic bundles below the 100 MiB bundle ceiling.
     static constexpr std::size_t kDefaultQueueCapacity = 256;
     static constexpr std::size_t kDefaultQueueBytes = 16 * 1024 * 1024;
-    static constexpr std::uint64_t kDefaultMaximumBytes = 100ull * 1024ull * 1024ull;
+    static constexpr std::uint64_t kDefaultMaximumBytes = 200ull * 1024ull * 1024ull;
     static constexpr auto kDefaultRetention = std::chrono::hours(24 * 7);
 
     explicit TelemetryHistoryStore(

@@ -87,85 +87,47 @@ inline H264LevelConstraintStatus CheckH264LevelConstraints(
     return Status::Supported;
 }
 
-// Scales dimensions proportionally to the largest even pair accepted by `level`
-// at `framerate_fps`, returning the input untouched when already supported.
 inline std::optional<std::pair<int, int>> ConstrainH264Dimensions(
-        webrtc::H264Level level, int width, int height,
-        std::uint32_t framerate_fps) noexcept {
-    if (width <= 0 || height <= 0 || framerate_fps == 0 || !FindH264LevelLimits(level)) {
+        webrtc::H264Level level, int width, int height, std::uint32_t fps) {
+    if (width < 2 || height < 2 || width > 16384 || height > 16384 || !fps)
         return std::nullopt;
-    }
-    if (CheckH264LevelConstraints(level, width, height, framerate_fps) ==
-        H264LevelConstraintStatus::Supported) {
-        return std::pair{width, height};
-    }
+    // Preserve aspect and frame rate, shrinking only the longer dimension.
+    // The actual negotiated sender format is still validated independently.
     const bool landscape = width >= height;
-    const int major = landscape ? width : height;
-    const int minor = landscape ? height : width;
-    if (major < 2 || minor < 2) {
-        return std::nullopt;
+    const int longest = landscape ? width : height;
+    for (int bound = longest & ~1; bound >= 2; bound -= 2) {
+        const int w = landscape ? bound : int(std::int64_t(width) * bound / height) & ~1;
+        const int h = landscape ? int(std::int64_t(height) * bound / width) & ~1 : bound;
+        if (w < 2 || h < 2) break;
+        if (CheckH264LevelConstraints(level, w, h, fps) == H264LevelConstraintStatus::Supported)
+            return std::pair{w, h};
     }
-    int low = 1;
-    int high = major / 2;
-    int best_major = 0;
-    int best_minor = 0;
-    while (low <= high) {
-        const int mid = low + (high - low) / 2;
-        const int cand_major = mid * 2;
-        const int cand_minor = static_cast<int>(
-            (std::int64_t(minor) * cand_major) / major) & ~1;
-        if (cand_minor < 2) {
-            low = mid + 1;
-            continue;
-        }
-        const int cand_w = landscape ? cand_major : cand_minor;
-        const int cand_h = landscape ? cand_minor : cand_major;
-        if (CheckH264LevelConstraints(level, cand_w, cand_h, framerate_fps) ==
-            H264LevelConstraintStatus::Supported) {
-            best_major = cand_major;
-            best_minor = cand_minor;
-            low = mid + 1;
-        } else {
-            high = mid - 1;
-        }
-    }
-    if (best_major < 2 || best_minor < 2) {
-        return std::nullopt;
-    }
-    return landscape ? std::pair{best_major, best_minor}
-                     : std::pair{best_minor, best_major};
+    return std::nullopt;
 }
 
 inline std::optional<ScreenShareFrameProfile> ConstrainH264ScreenShareProfile(
-        const ScreenShareFrameProfile& profile, webrtc::H264Level level) noexcept {
-    if (!profile.quality.valid() || profile.width < 2 || profile.height < 2) {
+        const ScreenShareFrameProfile& requested, webrtc::H264Level level) {
+    if (!requested.quality.valid() || requested.width < 2 || requested.height < 2)
         return std::nullopt;
+    const auto legal = [&](const ScreenShareFrameProfile& profile) {
+        return profile.width <= requested.width && profile.height <= requested.height &&
+            CheckH264LevelConstraints(level, profile.width, profile.height,
+                profile.quality.fps) == H264LevelConstraintStatus::Supported;
+    };
+    const auto original = ResolveScreenShareProfile(requested.source_width,
+        requested.source_height, requested.quality, requested.revision);
+    if (!original) return std::nullopt;
+    if (original->width == requested.width && original->height == requested.height && legal(requested))
+        return requested;
+    for (const auto mode : {ScreenShareResolution::P2160, ScreenShareResolution::P1440,
+                           ScreenShareResolution::P1080, ScreenShareResolution::P720}) {
+        auto quality = requested.quality;
+        quality.resolution = mode;
+        const auto profile = ResolveScreenShareProfile(requested.source_width,
+            requested.source_height, quality, requested.revision);
+        if (profile && legal(*profile)) return profile;
     }
-    const auto fps = static_cast<std::uint32_t>(profile.quality.fps);
-    if (CheckH264LevelConstraints(level, profile.width, profile.height, fps) ==
-        H264LevelConstraintStatus::Supported) {
-        return profile;
-    }
-    const auto constrained_dims =
-        ConstrainH264Dimensions(level, profile.width, profile.height, fps);
-    if (!constrained_dims) {
-        return std::nullopt;
-    }
-    ScreenShareFrameProfile constrained = profile;
-    constrained.width = constrained_dims->first;
-    constrained.height = constrained_dims->second;
-    const int long_side = std::max(constrained.width, constrained.height);
-    const int short_side = std::min(constrained.width, constrained.height);
-    if (long_side <= 1280 && short_side <= 720) {
-        constrained.quality.resolution = ScreenShareResolution::P720;
-    } else if (long_side <= 1920 && short_side <= 1080) {
-        constrained.quality.resolution = ScreenShareResolution::P1080;
-    } else if (long_side <= 2560 && short_side <= 1440 &&
-               (profile.quality.resolution == ScreenShareResolution::Native ||
-                profile.quality.resolution == ScreenShareResolution::P2160)) {
-        constrained.quality.resolution = ScreenShareResolution::P1440;
-    }
-    return constrained;
+    return std::nullopt;
 }
 
 } // namespace livekit::detail

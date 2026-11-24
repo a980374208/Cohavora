@@ -7,11 +7,28 @@
 #include "logger/options.pb.h"
 #include <sstream>
 #include <algorithm>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <zlib.h>
 
 namespace livekit {
 
 namespace {
+
+bool IsRetryableSignalConnectError(const std::error_code& error) {
+    if (!error) return false;
+    if (WebSocketHttpStatus(error).has_value()) return false;
+    if (error == std::make_error_code(std::errc::permission_denied) ||
+        error == std::make_error_code(std::errc::invalid_argument) ||
+        error == asio::error::operation_aborted) {
+        return false;
+    }
+    if (error.category() == asio::error::get_ssl_category() &&
+        ERR_GET_REASON(error.value()) == SSL_R_CERTIFICATE_VERIFY_FAILED) {
+        return false;
+    }
+    return true;
+}
 
 struct JoinWaitState {
     std::mutex mutex;
@@ -687,10 +704,41 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrl
 
     std::optional<std::error_code> first_error;
     std::shared_ptr<proto::JoinResponse> response;
-    try {
-        response = co_await TryConnectInternal(v1_or_v0_url);
-    } catch (const std::system_error& error) {
-        first_error = error.code();
+    const size_t max_attempts = 1 + options_.initial_connect_retries;
+    for (size_t attempt = 0; attempt < max_attempts; ++attempt) {
+        first_error.reset();
+        try {
+            response = co_await TryConnectInternal(v1_or_v0_url);
+            break;
+        } catch (const std::system_error& error) {
+            first_error = error.code();
+        }
+        if (use_v1 && IsWebSocketHttpStatus(*first_error, 404)) {
+            break;
+        }
+        const bool can_retry = attempt + 1 < max_attempts &&
+                               !closed_.load(std::memory_order_acquire) &&
+                               IsRetryableSignalConnectError(*first_error);
+        if (!can_retry) {
+            break;
+        }
+        try {
+            co_await ValidateInternal(v1_or_v0_url, token_);
+        } catch (const std::system_error& validate_error) {
+            if (validate_error.code() == std::make_error_code(std::errc::permission_denied) ||
+                validate_error.code() == std::make_error_code(std::errc::invalid_argument)) {
+                throw;
+            }
+        }
+        if (options_.initial_connect_retry_delay > std::chrono::milliseconds::zero()) {
+            auto executor = co_await asio::this_coro::executor;
+            asio::steady_timer retry_timer(executor);
+            retry_timer.expires_after(options_.initial_connect_retry_delay);
+            co_await retry_timer.async_wait(asio::use_awaitable);
+        }
+        if (closed_.load(std::memory_order_acquire)) {
+            throw std::system_error(asio::error::operation_aborted);
+        }
     }
 
     if (response) {
@@ -1005,8 +1053,12 @@ asio::awaitable<void> SignalClient::ValidateInternal(const std::string& url_str,
     url.path = std::move(val_path);
     const std::string val_url = FormatCredentialUrl(url);
 
+    const auto validate_timeout = options_.initial_connect_retries > 0
+        ? std::min(options_.connect_timeout,
+                   std::chrono::milliseconds(std::chrono::seconds(8)))
+        : std::chrono::milliseconds(std::chrono::seconds(3));
     HttpResponse res = co_await HttpClient::Get(
-        *ssl_ctx_, val_url, token, std::chrono::seconds(3), policy);
+        *ssl_ctx_, val_url, token, validate_timeout, policy);
     if (res.status_code >= 400) {
         throw std::system_error(std::make_error_code(std::errc::permission_denied));
     }

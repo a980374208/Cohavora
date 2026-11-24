@@ -1,5 +1,5 @@
 #include "dx11_renderer.h"
-#include "dx11_shaders.h"
+#include "dx11_shader_bytecode.h"
 #include <atomic>
 #include <cstring>
 
@@ -215,12 +215,12 @@ bool Dx11Renderer::CreateRenderTarget() {
 }
 
 bool Dx11Renderer::CreateShadersAndPipeline() {
-    // 1. 编译并创建 Vertex Shader
-    ComPtr<ID3DBlob> vsBlob;
-    if (!CompileShader(kVertexShaderSource, "main", "vs_5_0", vsBlob.GetAddressOf())) {
-        return false;
-    }
-    HRESULT hr = device_->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, vertex_shader_.GetAddressOf());
+    // 1. 使用构建期预编译的 DXBC 创建 Vertex Shader（运行时不加载 D3DCOMPILER_47.dll）
+    HRESULT hr = device_->CreateVertexShader(
+        kVertexShaderBytecode.data(),
+        kVertexShaderBytecode.size(),
+        nullptr,
+        vertex_shader_.GetAddressOf());
     if (FAILED(hr)) return false;
 
     // 2. 创建 Input Layout
@@ -231,31 +231,39 @@ bool Dx11Renderer::CreateShadersAndPipeline() {
     hr = device_->CreateInputLayout(
         layoutDesc,
         static_cast<UINT>(sizeof(layoutDesc) / sizeof(layoutDesc[0])),
-        vsBlob->GetBufferPointer(),
-        vsBlob->GetBufferSize(),
+        kVertexShaderBytecode.data(),
+        kVertexShaderBytecode.size(),
         input_layout_.GetAddressOf()
     );
     if (FAILED(hr)) return false;
 
-    // 3. 编译并创建各格式 Pixel Shader
-    ComPtr<ID3DBlob> psBlob;
-    if (!CompileShader(kPixelShaderI420Source, "main", "ps_5_0", psBlob.GetAddressOf())) return false;
-    hr = device_->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, ps_i420_.GetAddressOf());
+    // 3. 使用预编译 DXBC 创建各格式 Pixel Shader
+    hr = device_->CreatePixelShader(
+        kPixelShaderI420Bytecode.data(),
+        kPixelShaderI420Bytecode.size(),
+        nullptr,
+        ps_i420_.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    psBlob.Reset();
-    if (!CompileShader(kPixelShaderNV12Source, "main", "ps_5_0", psBlob.GetAddressOf())) return false;
-    hr = device_->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, ps_nv12_.GetAddressOf());
+    hr = device_->CreatePixelShader(
+        kPixelShaderNV12Bytecode.data(),
+        kPixelShaderNV12Bytecode.size(),
+        nullptr,
+        ps_nv12_.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    psBlob.Reset();
-    if (!CompileShader(kPixelShaderRGBASource, "main", "ps_5_0", psBlob.GetAddressOf())) return false;
-    hr = device_->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, ps_rgba_.GetAddressOf());
+    hr = device_->CreatePixelShader(
+        kPixelShaderRGBABytecode.data(),
+        kPixelShaderRGBABytecode.size(),
+        nullptr,
+        ps_rgba_.GetAddressOf());
     if (FAILED(hr)) return false;
 
-    psBlob.Reset();
-    if (!CompileShader(kPixelShaderSolidColorSource, "main", "ps_5_0", psBlob.GetAddressOf())) return false;
-    hr = device_->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, ps_solid_color_.GetAddressOf());
+    hr = device_->CreatePixelShader(
+        kPixelShaderSolidColorBytecode.data(),
+        kPixelShaderSolidColorBytecode.size(),
+        nullptr,
+        ps_solid_color_.GetAddressOf());
     if (FAILED(hr)) return false;
 
     // 4. 创建 Quad 顶点缓冲 (Triangle Strip 覆盖 [-1, 1])

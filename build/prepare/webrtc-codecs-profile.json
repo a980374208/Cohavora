@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "package_id": "webrtc-306121acd4-cohavora-bssl-codecs-v1",
+  "package_id": "webrtc-7f7e8b6-cohavora-bssl-dual-v5",
   "boringssl_prefix": "cohavora_bssl",
   "compile_definitions": [
     "RTC_ENABLE_H265"
   ],
   "configurations": {
     "Debug": {
-      "library_sha256": "a3f4da2a59f14950bb17de6553ce2950d4a4e891bcde3080cf6880ac055ba9f4",
+      "library_sha256": "1fe64ea7db8705c0944176898e3a6f1acea9d20686a1f1267710e60f688d56f9",
       "runtime_library": "MTd_StaticDebug",
       "iterator_debug_level": 2,
       "external_static_libraries": {
@@ -22,7 +22,7 @@
       }
     },
     "Release": {
-      "library_sha256": "e137514da1b5a61cb42657c11a66c2c65174900e6a1876dcf42a5d04a9127968",
+      "library_sha256": "c54378891a25c62be43e94ae72356de8436d8f4787c9f469705c24e9e1ce6029",
       "runtime_library": "MT_StaticRelease",
       "iterator_debug_level": 0,
       "external_static_libraries": {

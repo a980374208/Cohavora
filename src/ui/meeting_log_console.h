@@ -150,6 +150,8 @@ private:
 	static constexpr size_t kMaxCacheBytes = 8 * 1024 * 1024;
 	static constexpr size_t kMaxPendingEntries = 2048;
 	static constexpr size_t kMaxPendingBytes = 2 * 1024 * 1024;
+	static constexpr size_t kMaxDormantPendingEntries = 256;
+	static constexpr size_t kMaxDormantPendingBytes = 256 * 1024;
 
 	std::shared_ptr<SharedQueue> _queue = sharedQueue();
 	QTimer *_drainTimer = nullptr;

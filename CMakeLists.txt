@@ -425,6 +425,7 @@ set(LIVEKIT_HEADERS
     src/telemetry/crash_evidence_provider.h
     src/telemetry/build_identity.h
     src/platform/system_hardware_info.h
+    src/platform/openssl_thread_cleanup.h
     src/telemetry/bounded_callback.h
     src/telemetry/diagnostic_event.h
     src/telemetry/diagnostic_file_sink.h
@@ -474,6 +475,16 @@ add_library(cohavora_core STATIC
 target_link_libraries(cohavora_core PUBLIC cohavora_media_diagnostics)
 
 if(WIN32)
+    target_sources(cohavora_core PRIVATE
+        src/platform/win/openssl_thread_cleanup.cpp)
+    if(MSVC)
+        # Pull the static-OpenSSL DLL_THREAD_DETACH PE TLS callback into every
+        # Windows executable linking cohavora_core so short-lived worker threads
+        # release their OpenSSL 3 thread-local DRBG and sparse-array state.
+        target_link_options(cohavora_core INTERFACE
+            "/INCLUDE:_tls_used"
+            "/INCLUDE:cohavora_openssl_tls_callback")
+    endif()
     set_property(SOURCE
         src/telemetry/crash_evidence_provider.cpp
         APPEND PROPERTY COMPILE_DEFINITIONS
@@ -584,7 +595,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED)
        AND NOT retained_vp8_sdk_hash STREQUAL
             "f4c5ebfbf50a609b8f4f3e22e246b911cec9eecea66606a27a94836f0f25e202"
        AND NOT retained_vp8_sdk_hash STREQUAL
-            "35c7a45caf749d1825ee3b4019e6a2ab1afb4d16fe5b96bb029b7a230280d8a2")
+            "35c7a45caf749d1825ee3b4019e6a2ab1afb4d16fe5b96bb029b7a230280d8a2"
+       AND NOT retained_vp8_sdk_hash STREQUAL
+            "ed2603a8f1b150f4445120046884a1671098f8bc20a45e1dbdd75a0f04f30a64")
         message(FATAL_ERROR
             "Linux system audio requires a validated audio-isolation Release SDK. "
             "Use that SDK or set COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED=OFF.")
@@ -599,7 +612,8 @@ endif()
 # These exact Release archives use the audited VP8 pool/refcount ownership.
 if(retained_vp8_sdk_hash STREQUAL "5f0cf912e593c9a279ee61a7e41400e38d633d0a8921216bed76cfd00d8b9022"
         OR retained_vp8_sdk_hash STREQUAL "e137514da1b5a61cb42657c11a66c2c65174900e6a1876dcf42a5d04a9127968"
-        OR retained_vp8_sdk_hash STREQUAL "6a625fc50e05e4845ac3fe2fe69d2570c23b6df99b592abbf739f3b5d85db533")
+        OR retained_vp8_sdk_hash STREQUAL "6a625fc50e05e4845ac3fe2fe69d2570c23b6df99b592abbf739f3b5d85db533"
+        OR retained_vp8_sdk_hash STREQUAL "c54378891a25c62be43e94ae72356de8436d8f4787c9f469705c24e9e1ce6029")
     if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
         set_property(SOURCE src/rtc/retained_vp8_decoder.cpp APPEND PROPERTY COMPILE_DEFINITIONS
             "$<$<NOT:$<CONFIG:Debug>>:COHAVORA_CERTIFIED_VP8=1>")

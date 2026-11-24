@@ -31,14 +31,15 @@ endif()
 if(WIN32)
     add_library(cohavora_render_dx11 MODULE
         modules/dx11_backend.cpp
-        ${PROJECT_SOURCE_DIR}/src/ui/dx11/dx11_renderer.cpp)
+        ${PROJECT_SOURCE_DIR}/src/ui/dx11/dx11_renderer.cpp
+        ${PROJECT_SOURCE_DIR}/src/ui/dx11/dx11_shader_bytecode.h)
     set_target_properties(cohavora_render_dx11 PROPERTIES AUTOMOC OFF
         PREFIX "" OUTPUT_NAME "cohavora-render-dx11" CXX_VISIBILITY_PRESET hidden)
     target_include_directories(cohavora_render_dx11 PRIVATE
         ${PROJECT_SOURCE_DIR}
         ${PROJECT_SOURCE_DIR}/src)
     target_compile_definitions(cohavora_render_dx11 PRIVATE LK_RENDER_MODULE_BUILD)
-    target_link_libraries(cohavora_render_dx11 PRIVATE d3d11 dxgi d3dcompiler)
+    target_link_libraries(cohavora_render_dx11 PRIVATE d3d11 dxgi)
     if(MSVC)
         target_compile_options(cohavora_render_dx11 PRIVATE /utf-8)
     endif()

@@ -225,6 +225,10 @@ def portable_gn_args(path, configuration):
 
 
 def build_v4(args):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.archive_root):
+        raise ValueError("Invalid support archive root name")
+    if not re.fullmatch(r"v[0-9]+", args.release_label):
+        raise ValueError("Invalid support release label")
     source = args.source_root.resolve()
     sdk = args.sdk_root.resolve()
     project = args.project_root.resolve() if args.project_root else Path(__file__).resolve().parents[2]
@@ -315,7 +319,7 @@ def build_v4(args):
     add_file("licenses/onevpl/LICENSE", vpl_source / "LICENSE")
     add_file("licenses/webrtc/LICENSE", source / "LICENSE")
     add_file("licenses/webrtc/PATENTS", source / "PATENTS")
-    readme = """# Cohavora WebRTC Windows x64 构建支持 v4
+    readme = f"""# Cohavora WebRTC Windows x64 构建支持 {args.release_label}
 
 源码直接使用 https://github.com/a980374208/webrtc_hardEncoder 的
 `m_144_hard_encoder` 分支。本包不含 WebRTC 源码；不再从旧 aaeeee8 checkout
@@ -379,7 +383,8 @@ packaging 包含 SDK 打包入口、匹配下载 metadata 和 ABI profile。
     entries["metadata/package.json"] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     entries["metadata/checksums.sha256"] = "".join(
         sha256(content) + "  " + name + "\n" for name, content in sorted(entries.items())).encode("ascii")
-    archive_root = "cohavora-webrtc-build-support-m144-cohavora-bssl-dual-v4"
+    archive_root = args.archive_root
+    zip_time = (2026, 11, 13, 0, 0, 0) if args.release_label == "v4" else (2026, 11, 25, 0, 0, 0)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         raise ValueError("Use a new support archive output path")
@@ -389,7 +394,7 @@ packaging 包含 SDK 打包入口、匹配下载 metadata 和 ABI profile。
     try:
         with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
             for name, content in sorted(entries.items()):
-                info = zipfile.ZipInfo(archive_root + "/" + name, (2026, 11, 13, 0, 0, 0))
+                info = zipfile.ZipInfo(archive_root + "/" + name, zip_time)
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = 0o100644 << 16
                 info.create_system = 3
@@ -415,6 +420,9 @@ def parse_args():
     parser.add_argument("--package-metadata", type=Path)
     parser.add_argument("--sdk-root", type=Path)
     parser.add_argument("--sdk-metadata", type=Path)
+    parser.add_argument("--archive-root",
+                        default="cohavora-webrtc-build-support-m144-cohavora-bssl-dual-v4")
+    parser.add_argument("--release-label", default="v4")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     required = ("sdk_root", "sdk_metadata") if args.v4 else (

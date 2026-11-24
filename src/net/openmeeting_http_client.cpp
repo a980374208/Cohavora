@@ -80,7 +80,45 @@ livekit::diagnostic::ErrorLayer DiagnosticLayer(HttpFailureLayer layer) noexcept
     }
 }
 
+bool isRetryablePostPath(const QString &path) noexcept {
+    return path == QStringLiteral("/user/login") ||
+           path == QStringLiteral("/user/logout") ||
+           path == QStringLiteral("/meeting/join_meeting") ||
+           path == QStringLiteral("/meeting/get_meeting_token") ||
+           path == QStringLiteral("/meeting/get_meetings") ||
+           path == QStringLiteral("/meeting/get_meeting") ||
+           path == QStringLiteral("/meeting/cancel_meeting") ||
+           path == QStringLiteral("/meeting/end_meeting") ||
+           path == QStringLiteral("/meeting/leave_meeting") ||
+           path == QStringLiteral("/meeting/set_meeting_host");
+}
+
+bool isTransientTransportError(QNetworkReply::NetworkError error) noexcept {
+    switch (error) {
+    case QNetworkReply::TimeoutError:
+    case QNetworkReply::OperationCanceledError:
+    case QNetworkReply::RemoteHostClosedError:
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::NetworkSessionFailedError:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // namespace
+
+struct OpenMeetingHttpClient::PostAttemptContext {
+    QUrl targetUrl;
+    QString opId;
+    QByteArray postData;
+    QByteArray authToken;
+    bool authenticated = true;
+    bool retryable = false;
+    quint64 revision = 0;
+    QString service;
+    std::function<void(bool ok, const QJsonValue &data, HttpError error)> finish;
+};
 
 OpenMeetingHttpClient::OpenMeetingHttpClient(QObject *parent)
     : OpenMeetingHttpClient(std::make_unique<QNetworkAccessManager>(), parent) {
@@ -216,38 +254,74 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
         return;
     }
 
-    QNetworkRequest request{targetUrl};
+    auto attemptContext = std::make_shared<PostAttemptContext>();
+    attemptContext->targetUrl = targetUrl;
+    attemptContext->opId = opId;
+    attemptContext->postData = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    if (authenticated && !_token.isEmpty()) {
+        attemptContext->authToken = _token.toUtf8();
+    }
+    attemptContext->authenticated = authenticated;
+    attemptContext->retryable = isRetryablePostPath(path);
+    attemptContext->revision = _authRevision;
+    attemptContext->service = _baseUrl;
+    attemptContext->finish = std::move(finish);
+    sendPostAttempt(attemptContext, 1);
+}
+
+void OpenMeetingHttpClient::sendPostAttempt(
+    const std::shared_ptr<PostAttemptContext> &attemptContext, int attempt) {
+    const auto now = std::chrono::steady_clock::now();
+    if (_inFlightRequests == 0 && _hasNetworkActivity && _idleConnectionCacheMaxAgeMs >= 0) {
+        const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - _lastNetworkActivityAt).count();
+        if (idleMs >= _idleConnectionCacheMaxAgeMs) {
+            // Avoid reusing half-open TLS keep-alive sockets closed by Nginx/NAT while idle.
+            _nam->clearConnectionCache();
+        }
+    }
+
+    QNetworkRequest request{attemptContext->targetUrl};
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::ManualRedirectPolicy);
-    if (targetUrl.scheme() == QStringLiteral("https")) {
+    if (attemptContext->targetUrl.scheme() == QStringLiteral("https")) {
         auto ssl = request.sslConfiguration();
         ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
         request.setSslConfiguration(ssl);
     }
 
     // 注入全链路追踪 operationID (毫秒时间戳)
-    request.setRawHeader("operationID", opId.toUtf8());
+    request.setRawHeader("operationID", attemptContext->opId.toUtf8());
 
     // 注入身份 Token
-    if (authenticated && !_token.isEmpty()) {
-        request.setRawHeader("token", _token.toUtf8());
+    if (attemptContext->authenticated && !attemptContext->authToken.isEmpty()) {
+        request.setRawHeader("token", attemptContext->authToken);
     }
 
-    QByteArray postData = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    if (_transferTimeoutMs > 0) {
+        request.setTransferTimeout(_transferTimeoutMs);
+    }
 
-    QNetworkReply *reply = _nam->post(request, postData);
-    const auto revision = _authRevision;
-    const auto service = _baseUrl;
+    ++_inFlightRequests;
+    QNetworkReply *reply = _nam->post(request, attemptContext->postData);
     const QPointer<OpenMeetingHttpClient> self(this);
-    auto expireCurrent = [self, authenticated, revision, service]() {
+    auto expireCurrent = [self, authenticated = attemptContext->authenticated,
+                          revision = attemptContext->revision,
+                          service = attemptContext->service]() {
         if (self && authenticated && self->_authRevision == revision &&
             self->_baseUrl == service && !self->_token.isEmpty()) {
             emit self->tokenExpired();
         }
     };
-    connect(reply, &QNetworkReply::finished, this, [reply, finish, expireCurrent]() {
+    connect(reply, &QNetworkReply::finished, this,
+            [this, self, reply, attemptContext, attempt, expireCurrent]() {
         reply->deleteLater();
+        if (_inFlightRequests > 0) {
+            --_inFlightRequests;
+        }
+        _lastNetworkActivityAt = std::chrono::steady_clock::now();
+        _hasNetworkActivity = true;
 
         HttpError err;
         int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -259,7 +333,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
             err.code = static_cast<int>(ErrorCode::RedirectRejected);
             err.failureLayer = HttpFailureLayer::Http;
             err.message = QCoreApplication::translate("MeetingUI", "The server returned a disallowed redirect.");
-            finish(false, QJsonValue(), err);
+            attemptContext->finish(false, QJsonValue(), err);
             return;
         }
 
@@ -275,7 +349,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
 
             if (errCode == 0 && reply->error() == QNetworkReply::NoError) {
                 err.code = 0;
-                finish(true, dataVal, err);
+                attemptContext->finish(true, dataVal, err);
                 return;
             } else if (!errMsg.isEmpty() || errCode != -1) {
                 err.code = (errCode != -1) ? errCode : static_cast<int>(ErrorCode::NetworkError);
@@ -285,7 +359,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
                 if (err.isTokenExpired()) {
                     expireCurrent();
                 }
-                finish(false, dataVal, err);
+                attemptContext->finish(false, dataVal, err);
                 return;
             }
         }
@@ -303,14 +377,40 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
                 err.message = QCoreApplication::translate("MeetingUI", "404 Not Found: Check the server's routing configuration.");
             } else if (reply->error() == QNetworkReply::ConnectionRefusedError) {
                 err.message = QCoreApplication::translate("MeetingUI", "Connection refused. Check the server IP address and port accessibility.");
-            } else if (reply->error() == QNetworkReply::TimeoutError) {
+            } else if (reply->error() == QNetworkReply::TimeoutError ||
+                       reply->error() == QNetworkReply::OperationCanceledError) {
                 err.message = QCoreApplication::translate("MeetingUI", "Connection timed out. Check your network and firewall or security group settings.");
             } else if (reply->error() == QNetworkReply::RemoteHostClosedError || rawErr.contains("Connection closed", Qt::CaseInsensitive)) {
                 err.message = QCoreApplication::translate("MeetingUI", "The server connection was interrupted. Check the HTTPS service.");
             } else {
                 err.message = rawErr;
             }
-            finish(false, QJsonValue(), err);
+
+            constexpr int kMaxAttempts = 2;
+            const bool canRetry = attempt < kMaxAttempts &&
+                                  attemptContext->retryable &&
+                                  httpStatus == 0 &&
+                                  isTransientTransportError(reply->error()) &&
+                                  self &&
+                                  self->_baseUrl == attemptContext->service &&
+                                  self->_authRevision == attemptContext->revision;
+            if (canRetry) {
+                // Purge idle/dead pooled sockets so the retry establishes a clean connection.
+                _nam->clearConnectionCache();
+                const int delayMs = _retryDelayMs > 0 ? _retryDelayMs : 0;
+                QTimer::singleShot(delayMs, this, [self, attemptContext, attempt, err]() {
+                    if (!self ||
+                        self->_baseUrl != attemptContext->service ||
+                        self->_authRevision != attemptContext->revision) {
+                        attemptContext->finish(false, QJsonValue(), err);
+                        return;
+                    }
+                    self->sendPostAttempt(attemptContext, attempt + 1);
+                });
+                return;
+            }
+
+            attemptContext->finish(false, QJsonValue(), err);
             return;
         }
 
@@ -318,7 +418,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
             err.code = static_cast<int>(ErrorCode::ParseError);
             err.failureLayer = HttpFailureLayer::Parse;
             err.message = "Failed to parse response JSON: " + parseErr.errorString();
-            finish(false, QJsonValue(), err);
+            attemptContext->finish(false, QJsonValue(), err);
             return;
         }
 
@@ -330,7 +430,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
 
         if (errCode == 0) {
             err.code = 0;
-            finish(true, dataVal, err);
+            attemptContext->finish(true, dataVal, err);
         } else {
             err.code = errCode;
             err.message = errMsg;
@@ -338,7 +438,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
             if (err.isTokenExpired()) {
                 expireCurrent();
             }
-            finish(false, dataVal, err);
+            attemptContext->finish(false, dataVal, err);
         }
     });
 }

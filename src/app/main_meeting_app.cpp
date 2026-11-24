@@ -34,6 +34,7 @@
 #include "src/rtc/linux/linux_encoder_capability_controller.h"
 #endif
 #include "src/platform/system_hardware_info.h"
+#include "src/platform/openssl_thread_cleanup.h"
 #include "src/app/debug_login_options.h"
 #include "src/app/debug_storage_paths.h"
 #include "src/app/pilot_diagnostics_probe.h"
@@ -120,6 +121,7 @@ bool LoginWithDebugCredentials(
 } // namespace
 
 int main(int argc, char *argv[]) {
+	livekit::platform::EnsureOpenSslThreadCleanupRegistered();
 	const auto debugStorage = MeetingApp::ResolveDebugStoragePaths(
 		MeetingApp::NativeDebugOptionEnabled(argc, argv),
 		qEnvironmentVariable("LIVEKIT_UIA_DATA_ROOT"));

@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "package_id": "cohavora-e2ee-backend-306121acd4-codecs-v1",
-  "sdk_package_id": "webrtc-306121acd4-cohavora-bssl-codecs-v1",
-  "upstream_commit": "306121acd43e176309807d12fc4a4c5396afeae6",
+  "package_id": "cohavora-e2ee-backend-7f7e8b6-v5",
+  "sdk_package_id": "webrtc-7f7e8b6-cohavora-bssl-dual-v5",
+  "upstream_commit": "7f7e8b66d86db9c4cca0f3d2f2709597c2f3e34c",
   "files": {
     "patched/frame_crypto_transformer.cc": "503199170cf8abf85dd1948136d04e9454841bbba938a167f475b6ddd9f5879c",
     "patched/include/api/crypto/frame_crypto_transformer.h": "db59f8699330474d0bdf5cffe9cdb084f31841d374c94a23100bcdddb285aea6",
-    "patched/manifest.json": "a5de16eee7c01782c4acb9f6e51aa2fb9e159405af868d435f801491d9f04212",
-    "media-guard/media-guard-manifest.json": "85cff18723a30b1ee45d4a879f481a7e52ad081ba37a2234bc42660704a8cf93",
+    "patched/manifest.json": "bf1bdd06882f9d34a6b0e09224a21e80f0d27abd54faf45970bdb9bfac9ed204",
+    "media-guard/media-guard-manifest.json": "1db1e02bcea9572d4848012e1f0bdd098047b5143c5fab5464d64d7c59a3514a",
     "licenses/WebRTC-BSD.txt": "5d57f76601b87e2069605ccef52e5caaa5eeb7a2f76e34aa65a0102637d28376",
     "licenses/Apache-2.0.txt": "88046bf22d5b4f4b8cc85079ae6aae5424a3a1999db952ed152828ff325b2c6d",
     "media-guard/channel_receive.cc": "01cd62b7c0fa360490e030d62d9119fb56c56f6c499da83ab8567df31d9c6958",

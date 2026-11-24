@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -15,6 +17,7 @@
 #include <sstream>
 #include <string_view>
 #include <tuple>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -332,23 +335,128 @@ bool ReadBounded(const std::filesystem::path& path, std::size_t maximum,
 #endif
 }
 
+#if defined(_WIN32)
+bool TryPosixRename(const std::filesystem::path& temporary,
+                    const std::filesystem::path& final,
+                    DWORD& failure) {
+    std::error_code error;
+    const auto resolved = std::filesystem::absolute(final, error);
+    const std::wstring target = (error ? final : resolved).wstring();
+    if (target.empty() ||
+        target.size() > (std::numeric_limits<DWORD>::max)() / sizeof(wchar_t)) {
+        failure = ERROR_INVALID_PARAMETER;
+        return false;
+    }
+    const HANDLE source = CreateFileW(
+        temporary.c_str(),
+        DELETE | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (source == INVALID_HANDLE_VALUE) {
+        failure = GetLastError();
+        return false;
+    }
+    struct Close {
+        HANDLE h;
+        ~Close() { CloseHandle(h); }
+    } close{source};
+    const auto name_bytes = static_cast<DWORD>(target.size() * sizeof(wchar_t));
+    std::vector<unsigned char> buffer(
+        offsetof(FILE_RENAME_INFO, FileName) + name_bytes + sizeof(wchar_t), 0);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    info->Flags =
+        FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+    info->RootDirectory = nullptr;
+    info->FileNameLength = name_bytes;
+    std::memcpy(info->FileName, target.data(), name_bytes);
+    if (SetFileInformationByHandle(
+            source, FileRenameInfoEx, info, static_cast<DWORD>(buffer.size()))) {
+        return true;
+    }
+    failure = GetLastError();
+    if (failure == ERROR_INVALID_FUNCTION || failure == ERROR_NOT_SUPPORTED ||
+        failure == ERROR_INVALID_PARAMETER) {
+        if (MoveFileExW(temporary.c_str(), final.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            return true;
+        }
+        failure = GetLastError();
+    }
+    return false;
+}
+
+bool PosixRemoveFile(const std::filesystem::path& path,
+                     std::error_code& error) {
+    error.clear();
+    DWORD failure = 0;
+    bool fallback = false;
+    {
+        const HANDLE handle = CreateFileW(
+            path.c_str(),
+            DELETE | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            failure = GetLastError();
+            if (failure == ERROR_FILE_NOT_FOUND ||
+                failure == ERROR_PATH_NOT_FOUND) {
+                return true;
+            }
+            fallback = true;
+        } else {
+            struct Close {
+                HANDLE h;
+                ~Close() { CloseHandle(h); }
+            } close{handle};
+            FILE_DISPOSITION_INFO_EX disposition{};
+            disposition.Flags = FILE_DISPOSITION_FLAG_DELETE |
+                FILE_DISPOSITION_FLAG_POSIX_SEMANTICS;
+            if (SetFileInformationByHandle(handle, FileDispositionInfoEx,
+                                           &disposition, sizeof(disposition))) {
+                return true;
+            }
+            failure = GetLastError();
+            if (failure == ERROR_INVALID_FUNCTION ||
+                failure == ERROR_NOT_SUPPORTED ||
+                failure == ERROR_INVALID_PARAMETER) {
+                fallback = true;
+            }
+        }
+    }
+    if (fallback) {
+        return std::filesystem::remove(path, error);
+    }
+    error = std::error_code(static_cast<int>(failure), std::system_category());
+    return false;
+}
+#endif
+
 bool CommitManifest(const std::filesystem::path& temporary,
                     const std::filesystem::path& final,
                     const TelemetryCheckpointControl* control = nullptr) {
 #if defined(_WIN32)
-    // A read-only observer can briefly hold a handle that prevents replacement
-    // on Windows. Retry only access/share conflicts on the persistence worker;
-    // keep the old manifest and report failure if the bounded wait expires.
-    for (unsigned attempt = 0; attempt <= 25; ++attempt) {
+    // Readers with FILE_SHARE_DELETE survive POSIX-semantics replacement without
+    // blocking; retry unshared reader/antivirus locks up to a bounded window.
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(1500);
+    for (;;) {
         if (control && control->Stopped()) return false;
-        if (MoveFileExW(temporary.c_str(), final.c_str(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
-        const auto failure = GetLastError();
-        if (attempt == 25 || (failure != ERROR_SHARING_VIOLATION &&
-            failure != ERROR_LOCK_VIOLATION && failure != ERROR_ACCESS_DENIED)) return false;
+        DWORD failure = 0;
+        if (TryPosixRename(temporary, final, failure)) return true;
+        if ((failure != ERROR_SHARING_VIOLATION &&
+             failure != ERROR_LOCK_VIOLATION &&
+             failure != ERROR_ACCESS_DENIED) ||
+            std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
         Sleep(10);
     }
-    return false;
 #else
     std::error_code error;
     std::filesystem::rename(temporary, final, error);
@@ -656,14 +764,164 @@ TelemetryCheckpointStatus InspectTelemetryCheckpoint(
     }
 }
 
-TelemetryCheckpointResult AppendTelemetryCheckpoint(
+namespace {
+
+bool TryVerifyTelemetryCheckpointFromStateImpl(
+    const std::filesystem::path& directory,
+    const TelemetryCheckpointVerifiedState& state,
+    std::string* manifest_out) {
+    if (!state.status.valid || state.manifest_bytes.empty() ||
+        state.status.orphan_files != 0 || state.status.failure.has_value()) {
+        return false;
+    }
+    std::error_code error;
+    if (std::filesystem::is_symlink(directory, error) || error ||
+        !std::filesystem::is_directory(directory, error) || error) {
+        return false;
+    }
+    const auto name = directory.filename().string();
+    if (!name.starts_with(kDirectoryPrefix) ||
+        std::string_view(name).substr(kDirectoryPrefix.size()) !=
+            state.anonymous_session_id) {
+        return false;
+    }
+    const auto manifest_path = directory / "manifest.json";
+    if (std::filesystem::is_symlink(manifest_path, error) || error ||
+        !std::filesystem::is_regular_file(manifest_path, error) || error) {
+        return false;
+    }
+    std::string content;
+    if (!ReadBounded(manifest_path, kMaximumManifestBytes, content) ||
+        content != state.manifest_bytes) {
+        return false;
+    }
+    std::size_t matched_segments = 0;
+    std::uint64_t total_bytes = content.size();
+    bool saw_manifest = false;
+    std::vector<bool> seen(state.segments.size(), false);
+    for (std::filesystem::directory_iterator it(directory, error), end;
+         !error && it != end; it.increment(error)) {
+        const auto file = it->path().filename().string();
+        if (!IsOwnedFile(file)) continue;
+        if (it->is_symlink(error) || error ||
+            !it->is_regular_file(error) || error) {
+            return false;
+        }
+        const auto size = it->file_size(error);
+        if (error) return false;
+        if (file == "manifest.json") {
+            if (size != content.size()) return false;
+            saw_manifest = true;
+            continue;
+        }
+        if (file == "writer.lock") {
+            if (size != 0) return false;
+            continue;
+        }
+        bool matched = false;
+        for (std::size_t i = 0; i < state.segments.size(); ++i) {
+            if (!seen[i] && state.segments[i].file == file) {
+                if (size != state.segments[i].size_bytes) return false;
+                seen[i] = true;
+                ++matched_segments;
+                total_bytes += size;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) return false;
+    }
+    if (error || !saw_manifest || matched_segments != state.segments.size() ||
+        total_bytes != state.status.size_bytes) {
+        return false;
+    }
+    if (manifest_out) *manifest_out = std::move(content);
+    return true;
+}
+
+TelemetryCheckpointStatus BuildStatusFromCommittedManifest(
+    const std::filesystem::path& directory,
+    const Json& manifest,
+    std::size_t manifest_size) {
+    TelemetryCheckpointStatus status;
+    status.valid = true;
+    status.session_complete = manifest.value("session_complete", false);
+    status.reason = status.session_complete ? "complete" : "checkpoint";
+    status.anonymous_session_id =
+        manifest.at("anonymous_session_id").get<std::string>();
+    status.process_run_id =
+        manifest.value("process_run_id", std::string{});
+    status.session_generation =
+        manifest.at("session_generation").get<std::uint64_t>();
+    status.last_committed_revision =
+        manifest.at("last_committed_revision").get<std::uint64_t>();
+    const auto& segments = manifest.at("segments");
+    status.segment_count = segments.size();
+    status.record_count =
+        manifest.value("record_count", std::uint64_t{0});
+    status.created_utc_ms =
+        manifest.at("created_utc_ms").get<std::int64_t>();
+    status.pruned_records =
+        manifest.value("pruned_records", std::uint64_t{0});
+    status.pruned_segments =
+        manifest.value("pruned_segments", std::uint64_t{0});
+    status.pruned_through_utc_ms =
+        manifest.value("pruned_through_utc_ms", std::int64_t{0});
+    status.missing_revisions =
+        manifest.value("missing_revisions", std::uint64_t{0});
+    status.missing_ranges_omitted =
+        manifest.value("missing_ranges_omitted", std::uint64_t{0});
+    status.first_retained_source_utc_ms = segments.empty()
+        ? 0 : segments.front().value("first_source_utc_ms", std::int64_t{0});
+    status.last_retained_source_utc_ms = segments.empty()
+        ? 0 : segments.back().value("last_source_utc_ms", std::int64_t{0});
+    std::uint64_t total_bytes = manifest_size;
+    for (const auto& segment : segments) {
+        total_bytes += segment.at("size_bytes").get<std::uint64_t>();
+    }
+    std::error_code error;
+    const auto lock_path = directory / "writer.lock";
+    if (std::filesystem::is_regular_file(lock_path, error) && !error) {
+        const auto lock_size = std::filesystem::file_size(lock_path, error);
+        if (!error) total_bytes += lock_size;
+    }
+    status.size_bytes = total_bytes;
+    return status;
+}
+
+void PopulateVerifiedStateFromManifest(
+    std::string manifest_bytes,
+    const Json& manifest,
+    const TelemetryCheckpointStatus& status,
+    TelemetryCheckpointVerifiedState* out) {
+    if (!out) return;
+    *out = {};
+    if (!status.valid || status.orphan_files != 0 || status.failure.has_value()) {
+        return;
+    }
+    const auto& segments = manifest.at("segments");
+    out->anonymous_session_id = status.anonymous_session_id;
+    out->process_run_id = status.process_run_id;
+    out->manifest_bytes = std::move(manifest_bytes);
+    out->segments.reserve(segments.size());
+    for (const auto& segment : segments) {
+        out->segments.push_back({
+            segment.at("file").get<std::string>(),
+            segment.at("size_bytes").get<std::uint64_t>(),
+        });
+    }
+    out->status = status;
+}
+
+TelemetryCheckpointResult AppendTelemetryCheckpointCore(
     const std::filesystem::path& root,
     std::string_view anonymous_session_id,
     const std::vector<TelemetryCheckpointRecord>& records,
     std::uint64_t maximum_report_bytes,
     std::string_view process_run_id,
     std::uint64_t maximum_history_bytes,
-    const TelemetryCheckpointControl* control, TelemetryCheckpointWork* work) {
+    const TelemetryCheckpointControl* control, TelemetryCheckpointWork* work,
+    TelemetryCheckpointVerifiedState* verified_state) {
     const CheckpointWorkScope observation{work, true};
     TelemetryCheckpointResult result;
     const auto stopped = [&] {
@@ -734,23 +992,43 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
         }
         if (stopped()) return result;
         const auto manifest_path = directory / "manifest.json";
+        const bool manifest_existed = std::filesystem::exists(manifest_path);
         Json manifest;
-        if (std::filesystem::exists(manifest_path)) {
-            const auto inspected = InspectTelemetryCheckpoint(directory);
-            if (!inspected.valid || inspected.session_generation !=
-                    final.generation) {
-                result.status = inspected;
-                result.reason = inspected.valid ? "session_generation_mismatch" : inspected.reason;
-                return result;
-            }
-            if (!inspected.process_run_id.empty() &&
-                inspected.process_run_id != process_run_id) {
-                result.reason = "process_run_mismatch";
-                return result;
-            }
+        TelemetryCheckpointStatus pre_status;
+        if (manifest_existed) {
             std::string content;
-            if (!ReadBounded(manifest_path, kMaximumManifestBytes, content)) {
-                result.reason = "manifest_unreadable";
+            if (verified_state != nullptr &&
+                TryVerifyTelemetryCheckpointFromStateImpl(
+                    directory, *verified_state, &content)) {
+                pre_status = verified_state->status;
+            } else {
+                const auto inspected = InspectTelemetryCheckpoint(directory);
+                if (!inspected.valid || inspected.session_generation !=
+                        final.generation) {
+                    result.status = inspected;
+                    result.reason = inspected.valid ? "session_generation_mismatch" : inspected.reason;
+                    return result;
+                }
+                if (!inspected.process_run_id.empty() &&
+                    inspected.process_run_id != process_run_id) {
+                    result.reason = "process_run_mismatch";
+                    return result;
+                }
+                if (!ReadBounded(manifest_path, kMaximumManifestBytes, content)) {
+                    result.reason = "manifest_unreadable";
+                    return result;
+                }
+                pre_status = inspected;
+            }
+            if (!pre_status.valid || pre_status.session_generation !=
+                    final.generation) {
+                result.status = pre_status;
+                result.reason = pre_status.valid ? "session_generation_mismatch" : pre_status.reason;
+                return result;
+            }
+            if (!pre_status.process_run_id.empty() &&
+                pre_status.process_run_id != process_run_id) {
+                result.reason = "process_run_mismatch";
                 return result;
             }
             manifest = Json::parse(content);
@@ -936,20 +1214,113 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
         result.manifest_replaced = true;
         if (control) control->AfterManifest();
         if (stopped()) return result;
+        bool obsolete_remove_failed = false;
         for (const auto& name : obsolete_segments) {
             if (stopped()) return result;
             error.clear();
+#if defined(_WIN32)
+            PosixRemoveFile(directory / name, error);
+#else
             std::filesystem::remove(directory / name, error);
+#endif
+            if (error) obsolete_remove_failed = true;
         }
         if (stopped()) return result;
-        result.status = InspectTelemetryCheckpoint(directory);
+        if (!manifest_existed || verified_state == nullptr ||
+            obsolete_remove_failed || pre_status.orphan_files != 0 ||
+            pre_status.failure.has_value()) {
+            result.status = InspectTelemetryCheckpoint(directory);
+        } else {
+            result.status = BuildStatusFromCommittedManifest(
+                directory, manifest, manifest_content.size());
+        }
         result.success = result.status.valid;
         result.reason = result.success ? "checkpoint_committed" : result.status.reason;
+        if (result.success && verified_state != nullptr &&
+            result.status.orphan_files == 0 && !result.status.failure.has_value()) {
+            PopulateVerifiedStateFromManifest(
+                manifest_content, manifest, result.status, verified_state);
+        } else if (verified_state != nullptr) {
+            *verified_state = {};
+        }
         return result;
     } catch (...) {
         result.reason = "checkpoint_exception";
         return result;
     }
+}
+
+} // namespace
+
+bool TryVerifyTelemetryCheckpointFromState(
+    const std::filesystem::path& report_directory,
+    const TelemetryCheckpointVerifiedState& verified_state) {
+    return TryVerifyTelemetryCheckpointFromStateImpl(
+        report_directory, verified_state, nullptr);
+}
+
+bool CaptureVerifiedTelemetryCheckpointState(
+    const std::filesystem::path& report_directory,
+    const TelemetryCheckpointStatus& status,
+    TelemetryCheckpointVerifiedState* verified_state) {
+    if (!verified_state) return false;
+    *verified_state = {};
+    if (!status.valid || status.orphan_files != 0 || status.failure.has_value()) {
+        return false;
+    }
+    try {
+        std::string content;
+        if (!ReadBounded(report_directory / "manifest.json",
+                kMaximumManifestBytes, content)) {
+            return false;
+        }
+        const auto manifest = Json::parse(content);
+        if (!manifest.contains("segments") || !manifest["segments"].is_array()) {
+            return false;
+        }
+        PopulateVerifiedStateFromManifest(
+            std::move(content), manifest, status, verified_state);
+        if (!TryVerifyTelemetryCheckpointFromStateImpl(
+                report_directory, *verified_state, nullptr)) {
+            *verified_state = {};
+            return false;
+        }
+        return true;
+    } catch (...) {
+        *verified_state = {};
+        return false;
+    }
+}
+
+TelemetryCheckpointResult AppendTelemetryCheckpoint(
+    const std::filesystem::path& root,
+    std::string_view anonymous_session_id,
+    const std::vector<TelemetryCheckpointRecord>& records,
+    std::uint64_t maximum_report_bytes,
+    std::string_view process_run_id,
+    std::uint64_t maximum_history_bytes,
+    const TelemetryCheckpointControl* control, TelemetryCheckpointWork* work) {
+    return AppendTelemetryCheckpoint(
+        root, anonymous_session_id, records, maximum_report_bytes,
+        process_run_id, maximum_history_bytes, control, work, nullptr);
+}
+
+TelemetryCheckpointResult AppendTelemetryCheckpoint(
+    const std::filesystem::path& root,
+    std::string_view anonymous_session_id,
+    const std::vector<TelemetryCheckpointRecord>& records,
+    std::uint64_t maximum_report_bytes,
+    std::string_view process_run_id,
+    std::uint64_t maximum_history_bytes,
+    const TelemetryCheckpointControl* control, TelemetryCheckpointWork* work,
+    TelemetryCheckpointVerifiedState* verified_state) {
+    auto result = AppendTelemetryCheckpointCore(
+        root, anonymous_session_id, records, maximum_report_bytes,
+        process_run_id, maximum_history_bytes, control, work, verified_state);
+    if (!result.success && verified_state != nullptr) {
+        *verified_state = {};
+    }
+    return result;
 }
 
 std::optional<std::uint64_t> TelemetryHistoryOwnedBytes(
