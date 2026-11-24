@@ -36,6 +36,28 @@ void addTimeZone(QComboBox *combo, const QString &id) {
 }
 
 QString saveFailureText(const OpenMeeting::HttpError &error) {
+	if (error.failureLayer == OpenMeeting::HttpFailureLayer::Business) {
+		if (error.isTokenExpired()) {
+			return QCoreApplication::translate("MeetingUI",
+				"Unable to save because your sign-in session has expired. Please sign in again.");
+		}
+		if (error.businessCode > 0) {
+			return QCoreApplication::translate("MeetingUI",
+				"Unable to save. The server rejected this request (code %1). Refresh the meeting list and try again.")
+				.arg(error.businessCode);
+		}
+		return QCoreApplication::translate("MeetingUI",
+			"Unable to save. The server rejected this request. Refresh the meeting list and try again.");
+	}
+	if (error.failureLayer == OpenMeeting::HttpFailureLayer::Policy) {
+		return QCoreApplication::translate("MeetingUI",
+			"Unable to save. Please check the server configuration and try again.");
+	}
+	if (error.failureLayer == OpenMeeting::HttpFailureLayer::Http && error.httpStatus >= 400) {
+		return QCoreApplication::translate("MeetingUI",
+			"Unable to save (HTTP %1). Refresh the meeting list and try again.")
+			.arg(error.httpStatus);
+	}
 	if (error.code == 0) return QCoreApplication::translate("MeetingUI", "Unable to save. Please try again later.");
 	return QCoreApplication::translate("MeetingUI", "Unable to save. A network interruption may leave the result unknown. Refresh the meeting list before trying again.");
 }

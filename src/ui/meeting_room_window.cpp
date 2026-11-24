@@ -12,6 +12,7 @@
 #include "src/ui/remote_control_ui.h"
 #include "src/ui/whiteboard/accessible_combo_box.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_icons.h"
 #include "src/ui/whiteboard/annotation_overlay_window.h"
 #include "src/ui/whiteboard/whiteboard_panel.h"
 #include "src/ui/meeting_log_console.h"
@@ -273,6 +274,16 @@ QString TelemetryValue(const QVariantMap &snapshot, const char *key, const char 
 	return result;
 }
 
+QString TelemetryValueWithFallback(const QVariantMap &snapshot, const char *primaryKey, const char *fallbackKey, const char *unit = "") {
+	const auto val = snapshot.value(QString::fromLatin1(primaryKey));
+	if (val.isValid() && !val.isNull()) {
+		if (!((val.type() == QVariant::Int || val.type() == QVariant::LongLong) && val.toLongLong() < 0)) {
+			return TelemetryValue(snapshot, primaryKey, unit);
+		}
+	}
+	return TelemetryValue(snapshot, fallbackKey, unit);
+}
+
 QString TelemetryRatioPercent(const QVariantMap &snapshot, const char *key) {
 	const auto value = snapshot.value(QString::fromLatin1(key), -1.0).toDouble();
 	return value < 0.0
@@ -498,17 +509,17 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 		 LocalizeTelemetryDisplayText(QStringLiteral("VALID")),
 		 LocalizeTelemetryDisplayText(QStringLiteral("local-safe-snapshot"))},
 		{QCoreApplication::translate("MeetingUI", "First decoded video"),
-		 TelemetryValue(snapshot, "lastSubscribeToFirstDecodedMs", "ms"),
+		 TelemetryValueWithFallback(snapshot, "firstSubscribeToFirstDecodedMs", "lastSubscribeToFirstDecodedMs", "ms"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstVideoAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstVideoMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "First visible render"),
 		 QCoreApplication::translate("MeetingUI", "admission %1 / subscription %2")
-			 .arg(TelemetryValue(snapshot, "lastAdmissionToFirstRenderMs", "ms"),
-				  TelemetryValue(snapshot, "lastSubscribeToFirstRenderMs", "ms")),
+			 .arg(TelemetryValueWithFallback(snapshot, "firstAdmissionToFirstRenderMs", "lastAdmissionToFirstRenderMs", "ms"),
+				  TelemetryValueWithFallback(snapshot, "firstSubscribeToFirstRenderMs", "lastSubscribeToFirstRenderMs", "ms")),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderFirstFrameAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "First remote PCM"),
-		 TelemetryValue(snapshot, "lastSubscribeToFirstPcmMs", "ms"),
+		 TelemetryValueWithFallback(snapshot, "firstSubscribeToFirstPcmMs", "lastSubscribeToFirstPcmMs", "ms"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstAudioAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstAudioMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Active operations"),
@@ -1160,15 +1171,18 @@ QString resolveParticipantDisplayName(
 		displayName = senderIdentity;
 	}
 	if (coordinator && (needsParticipantLookup || displayName == senderIdentity)) {
-		for (const auto &participant : coordinator->participants()) {
-			if (participant.identity != senderIdentity && participant.identity != senderName) {
-				continue;
-			}
-			const auto participantName = participant.name.trimmed();
+		if (const auto info = coordinator->participantInfo(senderIdentity)) {
+			const auto participantName = info->name.trimmed();
 			if (!isChatSenderPlaceholderName(participantName)) {
 				displayName = participantName;
 			}
-			break;
+		} else if (!senderName.isEmpty() && senderName != senderIdentity) {
+			if (const auto byName = coordinator->participantInfo(senderName)) {
+				const auto participantName = byName->name.trimmed();
+				if (!isChatSenderPlaceholderName(participantName)) {
+					displayName = participantName;
+				}
+			}
 		}
 	}
 	return displayName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Participants") : displayName;
@@ -1189,22 +1203,35 @@ VideoTileWidget::VideoTileWidget(const QString &displayName, bool isLocal, QWidg
 	setToolTip(QStringLiteral("<qt>%1</qt>").arg(_displayName.toHtmlEscaped()));
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
 
-	_visualizer = new AudioVisualizerWidget(this, 7);
-	_visualizer->setBarColor(themeColor(ColorRole::Success));
-	_visualizer->hide();
-
-	setupVolumeControls();
 	AppTheme::observeChanges(*this, [this] {
-		_visualizer->setBarColor(themeColor(ColorRole::Success));
+		if (_visualizer) _visualizer->setBarColor(themeColor(ColorRole::Success));
 		invalidatePresentation();
 	});
 }
 
+void VideoTileWidget::ensureVisualizer() {
+	if (_visualizer) return;
+	_visualizer = new AudioVisualizerWidget(this, 7);
+	_visualizer->setBarColor(themeColor(ColorRole::Success));
+	_visualizer->hide();
+	const int w = width();
+	const int h = height();
+	const auto tag = bottomNameTag(rect());
+	const int visualizerWidth = tag.compact ? std::min(60, std::max(0, w - 12)) : 90;
+	const int visualizerHeight = tag.compact ? 14 : 24;
+	const int visualizerY = tag.compact && !tag.rect.isEmpty()
+		? std::max(0, tag.rect.y() - visualizerHeight - 3) : h - 36;
+	_visualizer->setGeometry((w - visualizerWidth) / 2, visualizerY, visualizerWidth, visualizerHeight);
+}
+
 void VideoTileWidget::setupVolumeControls() {
+	if (_pinBtn) return;
 	_pinBtn = new QPushButton(QStringLiteral("…"), this);
 	_pinBtn->setFixedSize(28, 28);
 	_pinBtn->setToolTip(tr("More actions"));
-	MeetingUI::AppTheme::setStyleVariant(*_pinBtn, "meeting-room-window-pinbtn");
+	MeetingUI::AppTheme::setStyleVariant(*_pinBtn,
+		_isPinned ? "meeting-room-window-pinbtn-2-active" : "meeting-room-window-pinbtn");
+	_pinBtn->setGeometry(pinButtonRect());
 	_pinBtn->hide();
 
 	connect(_pinBtn, &QPushButton::clicked, [this] {
@@ -1213,50 +1240,61 @@ void VideoTileWidget::setupVolumeControls() {
 
 	if (_isLocal || _isScreenShare) return;
 
-	_volBtn = new QPushButton(QString::fromUtf8("🔊"), this);
+	_volBtn = new QPushButton(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"), this);
 	_volBtn->setFixedSize(28, 28);
 	_volBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Adjust this participant's volume"));
 	MeetingUI::AppTheme::setStyleVariant(*_volBtn, "meeting-room-window-volbtn");
+	_volBtn->move(width() - 70, 10);
 	_volBtn->hide();
 
-	_volPopup = new QWidget(this);
-	auto *volumeLayout = new QHBoxLayout(_volPopup);
- volumeLayout->setContentsMargins(8, 8, 8, 8);
- volumeLayout->setSpacing(6);
-	MeetingUI::AppTheme::setStyleVariant(*_volPopup, "meeting-room-window-volpopup");
-	_volPopup->hide();
-
-	_muteRemoteBtn = new QPushButton(QString::fromUtf8("🔊"), _volPopup);
-	_muteRemoteBtn->setFixedSize(26, 26);
-	volumeLayout->addWidget(_muteRemoteBtn);
-	MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn, "meeting-room-window-muteremotebtn");
-
-	_volSlider = new QSlider(Qt::Horizontal, _volPopup);
-	_volSlider->setRange(0, 200);
-	_volSlider->setValue(100);
-	_volSlider->setMinimumWidth(100);
-	volumeLayout->addWidget(_volSlider, 1);
-	MeetingUI::AppTheme::setStyleVariant(*_volSlider, "meeting-room-window-volslider");
-
-	_volLabel = new QLabel(QString::fromUtf8("100%"), _volPopup);
-	volumeLayout->addWidget(_volLabel);
-	_volPopup->adjustSize();
-	MeetingUI::AppTheme::setStyleVariant(*_volLabel, "meeting-room-window-vollabel");
-
 	connect(_volBtn, &QPushButton::clicked, [this] {
+		ensureVolumePopup();
+		if (!_volPopup) return;
 		if (_volPopup->isVisible()) {
 			_volPopup->hide();
 		} else {
+			_volPopup->move(std::max(0, width() - _volPopup->width() - 10), 42);
 			_volPopup->show();
 			_volPopup->raise();
 		}
 	});
+}
+
+void VideoTileWidget::ensureVolumePopup() {
+	if (_volPopup || _isLocal || _isScreenShare) return;
+
+	_volPopup = new QWidget(this);
+	auto *volumeLayout = new QHBoxLayout(_volPopup);
+	volumeLayout->setContentsMargins(8, 8, 8, 8);
+	volumeLayout->setSpacing(6);
+	MeetingUI::AppTheme::setStyleVariant(*_volPopup, "meeting-room-window-volpopup");
+	_volPopup->hide();
+
+	_muteRemoteBtn = new QPushButton(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"), _volPopup);
+	_muteRemoteBtn->setFixedSize(26, 26);
+	volumeLayout->addWidget(_muteRemoteBtn);
+	MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn,
+		_isLocallyMuted ? "meeting-room-window-muteremotebtn-2-active" : "meeting-room-window-muteremotebtn");
+
+	_volSlider = new QSlider(Qt::Horizontal, _volPopup);
+	_volSlider->setRange(0, 200);
+	const int initialVolume = std::clamp(static_cast<int>(_remoteVolume * 100.0f + 0.5f), 0, 200);
+	_volSlider->setValue(initialVolume);
+	_volSlider->setMinimumWidth(100);
+	volumeLayout->addWidget(_volSlider, 1);
+	MeetingUI::AppTheme::setStyleVariant(*_volSlider, "meeting-room-window-volslider");
+
+	_volLabel = new QLabel(QString("%1%").arg(initialVolume), _volPopup);
+	volumeLayout->addWidget(_volLabel);
+	_volPopup->adjustSize();
+	MeetingUI::AppTheme::setStyleVariant(*_volLabel, "meeting-room-window-vollabel");
+	_volPopup->move(std::max(0, width() - _volPopup->width() - 10), 42);
 
 	connect(_muteRemoteBtn, &QPushButton::clicked, [this] {
 		_isLocallyMuted = !_isLocallyMuted;
 		_muteRemoteBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
 		MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn, _isLocallyMuted ? "meeting-room-window-muteremotebtn-2-active" : "meeting-room-window-muteremotebtn-2-normal");
-		_volBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
+		if (_volBtn) _volBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
 		remoteLocalMuteToggled(_isLocallyMuted);
 	});
 
@@ -1267,7 +1305,7 @@ void VideoTileWidget::setupVolumeControls() {
 			_isLocallyMuted = false;
 			_muteRemoteBtn->setText(QString::fromUtf8("🔊"));
 			MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn, "meeting-room-window-muteremotebtn-3");
-			_volBtn->setText(QString::fromUtf8("🔊"));
+			if (_volBtn) _volBtn->setText(QString::fromUtf8("🔊"));
 			remoteLocalMuteToggled(false);
 		}
 		remoteVolumeChanged(_remoteVolume);
@@ -1275,8 +1313,11 @@ void VideoTileWidget::setupVolumeControls() {
 }
 
 void VideoTileWidget::enterEventHook(QEnterEvent *e) {
-	if (_pinBtn) _pinBtn->show();
-	if (_volBtn) _volBtn->show();
+	if (!_useHardwareCanvas) {
+		setupVolumeControls();
+		if (_pinBtn) _pinBtn->show();
+		if (_volBtn) _volBtn->show();
+	}
 	Ui::RpWidget::enterEventHook(e);
 	invalidatePresentation();
 }
@@ -1327,6 +1368,60 @@ void VideoTileWidget::setNameDisplayMode(OpenMeeting::ParticipantNameDisplayMode
 	if (_nameDisplayMode == mode) return;
 	_nameDisplayMode = mode;
 	invalidatePresentation();
+}
+
+void VideoTileWidget::resetForReuse(const QString &displayName, float remoteVolume, bool locallyMuted) {
+	if (QToolTip::text() == toolTip()) QToolTip::hideText();
+	_displayName = displayName;
+	setToolTip(QStringLiteral("<qt>%1</qt>").arg(_displayName.toHtmlEscaped()));
+	_identity.clear();
+	_renderKey.clear();
+	_layoutClip.reset();
+	clearMask();
+	setFrame({});
+	_isVideoActive = false;
+	_isAudioMuted = false;
+	_isVideoStreamPaused = false;
+	_videoSubscriptionError = livekit::TrackPublication::SubscriptionError::None;
+	_connectionQuality = livekit::ConnectionQuality::Unknown;
+	_isSpeaking = false;
+	_audioLevel = 0.0f;
+	_isPip = false;
+	_remoteInputEnabled = false;
+	_hasLoggedFirstPaint = false;
+	_remoteVolume = remoteVolume;
+	_isLocallyMuted = locallyMuted;
+	if (_isPinned) {
+		_isPinned = false;
+		if (_pinBtn) {
+			MeetingUI::AppTheme::setStyleVariant(*_pinBtn, "meeting-room-window-pinbtn-2-normal");
+		}
+	}
+	if (_pinBtn) _pinBtn->hide();
+	if (_volBtn) {
+		_volBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
+		_volBtn->hide();
+	}
+	if (_volPopup) {
+		_volPopup->hide();
+		if (_muteRemoteBtn) {
+			_muteRemoteBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
+			MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn,
+				_isLocallyMuted ? "meeting-room-window-muteremotebtn-2-active" : "meeting-room-window-muteremotebtn-2-normal");
+		}
+		if (_volSlider) {
+			QSignalBlocker blocker(_volSlider);
+			const int vol = std::clamp(static_cast<int>(_remoteVolume * 100.0f + 0.5f), 0, 200);
+			_volSlider->setValue(vol);
+			if (_volLabel) _volLabel->setText(QString("%1%").arg(vol));
+		}
+	}
+	if (_visualizer) {
+		_visualizer->setActive(false);
+		_visualizer->hide();
+	}
+	_hardwareDecoration = {};
+	updateRenderExpectation();
 }
 
 bool VideoTileWidget::nameVisible(bool hovered) const {
@@ -1412,9 +1507,13 @@ void VideoTileWidget::setSpeaking(bool speaking, float level) {
 	if (_isSpeaking == speaking && _audioLevel == level) return;
 	_isSpeaking = speaking;
 	_audioLevel = level;
+	if (speaking && !_useHardwareCanvas) {
+		ensureVisualizer();
+	}
 	if (_visualizer) {
-		_visualizer->setActive(speaking);
-		if (speaking) {
+		const bool showVisualizer = speaking && !_useHardwareCanvas;
+		_visualizer->setActive(showVisualizer);
+		if (showVisualizer) {
 			_visualizer->setAudioLevel(level);
 			_visualizer->show();
 			_visualizer->raise();
@@ -1427,15 +1526,17 @@ void VideoTileWidget::setSpeaking(bool speaking, float level) {
 
 void VideoTileWidget::invalidatePresentation() {
 	_hardwareDecoration = {};
-	update();
+	if (!_useHardwareCanvas) update();
 	emit presentationChanged();
 }
 
 void VideoTileWidget::setPinned(bool pinned) {
 	if (_isPinned == pinned) return;
 	_isPinned = pinned;
-	MeetingUI::AppTheme::setStyleVariant(*_pinBtn, pinned ? "meeting-room-window-pinbtn-2-active" : "meeting-room-window-pinbtn-2-normal");
-	_pinBtn->setVisible(underMouse());
+	if (_pinBtn) {
+		MeetingUI::AppTheme::setStyleVariant(*_pinBtn, pinned ? "meeting-room-window-pinbtn-2-active" : "meeting-room-window-pinbtn-2-normal");
+		_pinBtn->setVisible(underMouse() && !_useHardwareCanvas);
+	}
 	invalidatePresentation();
 }
 
@@ -1448,7 +1549,7 @@ void VideoTileWidget::setPipMode(bool pip) {
 void VideoTileWidget::setLayoutClip(const QRect &visible) {
 	const auto clipped = visible.intersected(rect());
 	_layoutClip = clipped == rect() ? std::nullopt : std::optional(clipped);
-	if (_layoutClip && !clipped.isEmpty()) setMask(QRegion(clipped));
+	if (!_useHardwareCanvas && _layoutClip && !clipped.isEmpty()) setMask(QRegion(clipped));
 	else clearMask();
 }
 
@@ -1478,8 +1579,20 @@ QImage VideoTileWidget::hardwareDecoration(const QSize &pixels, bool hasFrame, b
 void VideoTileWidget::setHardwareCanvasMode(bool enabled) {
 	if (_useHardwareCanvas == enabled) return;
 	_useHardwareCanvas = enabled;
+	if (enabled) {
+		if (_pinBtn) _pinBtn->hide();
+		if (_volBtn) _volBtn->hide();
+		if (_volPopup) _volPopup->hide();
+		if (_visualizer) {
+			_visualizer->setActive(false);
+			_visualizer->hide();
+		}
+		clearMask();
+	} else if (_layoutClip && !_layoutClip->isEmpty()) {
+		setMask(QRegion(*_layoutClip));
+	}
 	updateRenderExpectation();
-	update();
+	if (!enabled) update();
 }
 
 void VideoTileWidget::setFrame(
@@ -1943,8 +2056,10 @@ void RoomTopBarWidget::updateDuration(int seconds) {
 }
 
 void RoomTopBarWidget::setActiveSpeaker(const QString &speakerName) {
+	if (_speakerName == speakerName) return;
 	_speakerName = speakerName;
-	setToolTip(QCoreApplication::translate("MeetingUI", "Speaking: %1").arg(speakerName));
+	QResizeEvent ev(size(), size());
+	resizeEvent(&ev);
 	update();
 }
 
@@ -1978,6 +2093,103 @@ void RoomTopBarWidget::setLayoutSelection(VideoViewMode mode, livekit::SpeakerLa
 		speakerLayout);
 }
 
+void RoomTopBarWidget::setEncrypted(bool encrypted) {
+	if (_encrypted != encrypted) {
+		_encrypted = encrypted;
+		QResizeEvent ev(size(), size());
+		resizeEvent(&ev);
+		update();
+	}
+}
+
+void RoomTopBarWidget::setAgentStatus(
+		bool online,
+		const QString &state,
+		const QString &agentName,
+		int agentCount,
+		bool localTranslatorActive,
+		bool localAgentRoleActive) {
+	const QString normalizedState = state.trimmed().toLower();
+	const QString normalizedName = agentName.trimmed();
+	const int normalizedCount = online ? std::max(1, agentCount) : 0;
+	if (_agentOnline == online &&
+		_agentState == normalizedState &&
+		_agentName == normalizedName &&
+		_agentCount == normalizedCount &&
+		_localTranslatorActive == localTranslatorActive &&
+		_localAgentRoleActive == localAgentRoleActive) {
+		return;
+	}
+	_agentOnline = online;
+	_agentState = normalizedState;
+	_agentName = normalizedName;
+	_agentCount = normalizedCount;
+	_localTranslatorActive = localTranslatorActive;
+	_localAgentRoleActive = localAgentRoleActive;
+	QResizeEvent ev(size(), size());
+	resizeEvent(&ev);
+	updateGeometry();
+	if (auto *parent = parentWidget()) {
+		QCoreApplication::postEvent(parent, new QResizeEvent(parent->size(), parent->size()));
+	}
+	update();
+}
+
+QString RoomTopBarWidget::agentBadgeText() const {
+	if (!_agentOnline) {
+		if (_localTranslatorActive) {
+			return QCoreApplication::translate("MeetingUI", "Local Translating");
+		}
+		return QCoreApplication::translate("MeetingUI", "Agent Offline");
+	}
+	QString label;
+	if (_agentState == QStringLiteral("listening")) {
+		label = QCoreApplication::translate("MeetingUI", "Agent Listening");
+	} else if (_agentState == QStringLiteral("thinking")) {
+		label = QCoreApplication::translate("MeetingUI", "Agent Thinking");
+	} else if (_agentState == QStringLiteral("speaking")) {
+		label = QCoreApplication::translate("MeetingUI", "Agent Speaking");
+	} else if (_agentState == QStringLiteral("initializing")) {
+		label = QCoreApplication::translate("MeetingUI", "Agent Starting");
+	} else {
+		label = QCoreApplication::translate("MeetingUI", "Agent Online");
+	}
+	if (_localAgentRoleActive) {
+		label = QCoreApplication::translate("MeetingUI", "%1 (You)").arg(label);
+	} else if (_agentCount > 1) {
+		label = QStringLiteral("%1 (%2)").arg(label).arg(_agentCount);
+	}
+	return label;
+}
+
+QString RoomTopBarWidget::agentTooltipText() const {
+	QString summary;
+	if (_localAgentRoleActive) {
+		summary = QCoreApplication::translate(
+			"MeetingUI", "You are currently acting as the room transcription/translation Agent.");
+	} else if (_agentOnline) {
+		const QString base = agentBadgeText();
+		summary = !_agentName.isEmpty()
+			? QCoreApplication::translate("MeetingUI", "%1 - %2").arg(base, _agentName)
+			: base;
+	} else if (_localTranslatorActive) {
+		summary = QCoreApplication::translate(
+			"MeetingUI", "Local meeting translation is active (visible only to you).");
+	} else {
+		summary = QCoreApplication::translate(
+			"MeetingUI", "No LiveKit Agent is currently online in this room.");
+	}
+	return summary + QLatin1Char('\n') + QCoreApplication::translate(
+		"MeetingUI", "Click to manage live translation and room Agent role.");
+}
+
+void RoomTopBarWidget::setMaximized(bool maximized) {
+	if (_maximized != maximized) {
+		_maximized = maximized;
+		update();
+	}
+}
+
 bool RoomTopBarWidget::eventHook(QEvent *event) {
 	const auto handled = Ui::RpWidget::eventHook(event);
 	if (event->type() == QEvent::LayoutRequest && _layoutButton) {
@@ -1992,84 +2204,132 @@ bool RoomTopBarWidget::eventHook(QEvent *event) {
 }
 
 int RoomTopBarWidget::heightForWidth(int width) const {
- const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
- _layoutButton->ensurePolished();
- const int toolsWidth = _layoutButton->sizeHint().width()
+	QFont f(QStringLiteral("Microsoft YaHei"));
+	f.setPixelSize(12);
+	const QFontMetrics metrics(f);
+	_layoutButton->ensurePolished();
+	const int toolsWidth = _layoutButton->sizeHint().width()
 #if COHAVORA_SHOW_CONSOLE_BUTTON
-     + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Console 📋"))
+		+ metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Console")) + 22
 #endif
-     + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🐛 Simulate")) + 80;
- const int idWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId)) + 24;
- const int rowHeight = std::max(44, _layoutButton->sizeHint().height() + 16);
- return rowHeight * (width < toolsWidth + idWidth + 420 ? 2 : 1);
+		+ metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Simulate")) + 22
+		+ 132;
+	const QString idSample = _meetingId.isEmpty() ? QStringLiteral("000-000-000") : _meetingId;
+	const int pillWidth = 32 + metrics.horizontalAdvance(idSample) + 26 + 52 + (_encrypted ? 22 : 0);
+	const int agentWidth = 33 + metrics.horizontalAdvance(agentBadgeText()) + 8;
+	const int rowHeight = std::max(44, _layoutButton->sizeHint().height() + 14);
+	return rowHeight * (width < toolsWidth + pillWidth + agentWidth + 40 ? 2 : 1);
 }
 
 void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
+	Q_UNUSED(e);
 	const int w = width();
 	const int h = height();
-	const int btnW = 38;
+	_layoutButton->ensurePolished();
+	const auto layoutSize = _layoutButton->sizeHint();
+	const int rowHeight = std::max(44, layoutSize.height() + 14);
+	const bool twoRows = heightForWidth(w) > rowHeight;
 
-	_closeRect = QRect(w - btnW, 0, btnW, h);
-	_maxRect = QRect(w - btnW * 2, 0, btnW, h);
-	_minRect = QRect(w - btnW * 3, 0, btnW, h);
+	// 右上角圆角窗口三键
+	const int btnW = 36;
+	const int btnH = 30;
+	const int winY = (rowHeight - btnH) / 2;
+	const int rightPad = 8;
+	_closeRect = QRect(w - rightPad - btnW, winY, btnW, btnH);
+	_maxRect = QRect(_closeRect.left() - btnW, winY, btnW, btnH);
+	_minRect = QRect(_maxRect.left() - btnW, winY, btnW, btnH);
 
-	int rightX = w - btnW * 3 - 6;
+	int rightX = twoRows ? (w - 12) : (_minRect.left() - 14);
+	const int rowY = (twoRows ? rowHeight : 0) + (rowHeight - 28) / 2;
 
- _layoutButton->ensurePolished();
- const auto layoutSize = _layoutButton->sizeHint();
- const int rowHeight = std::max(44, layoutSize.height() + 16);
- const bool twoRows = heightForWidth(w) > rowHeight;
- const int rowY = (twoRows ? rowHeight : 0) + (rowHeight - 28) / 2;
- const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
- const auto buttonWidth = [&](const QString &text) { return metrics.horizontalAdvance(text) + 24; };
- const int simulateW = buttonWidth(QCoreApplication::translate("MeetingUI", "🐛 Simulate"));
- const int layoutW = layoutSize.width();
- _simulateRect = QRect(rightX - simulateW, rowY, simulateW, 28);
- rightX -= simulateW + 4;
+	QFont btnFont(QStringLiteral("Microsoft YaHei"));
+	btnFont.setPixelSize(12);
+	const QFontMetrics metrics(btnFont);
+	const auto buttonWidth = [&](const QString &text) { return metrics.horizontalAdvance(text) + 20; };
+
+	const int simulateW = buttonWidth(QCoreApplication::translate("MeetingUI", "Simulate"));
+	_simulateRect = QRect(rightX - simulateW, rowY, simulateW, 28);
+	rightX -= simulateW + 6;
+
 #if COHAVORA_SHOW_CONSOLE_BUTTON
- const int consoleW = buttonWidth(QCoreApplication::translate("MeetingUI", "Console 📋"));
- _consoleRect = QRect(rightX - consoleW, rowY, consoleW, 28);
+	const int consoleW = buttonWidth(QCoreApplication::translate("MeetingUI", "Console"));
+	_consoleRect = QRect(rightX - consoleW, rowY, consoleW, 28);
 	_uiaConsole->setGeometry(_consoleRect);
- rightX -= consoleW + 4;
+	rightX -= consoleW + 6;
 #else
- _consoleRect = QRect();
+	_consoleRect = QRect();
 #endif
- _layoutRect = QRect(rightX - layoutW, (twoRows ? rowHeight : 0) + (rowHeight - layoutSize.height()) / 2,
-     layoutW, layoutSize.height());
- _layoutButton->setGeometry(_layoutRect);
- rightX -= layoutW + 4;
- const int leftInfoRight = QFontMetrics(QFont("Microsoft YaHei", 10)).horizontalAdvance(
-     QCoreApplication::translate("MeetingUI", "Meetings")) + 116;
- _qualityRect = QRect(leftInfoRight - 22, 8, 20, 28);
-	_uiaTelemetry->setGeometry(_qualityRect);
- if (!_meetingId.isEmpty()) {
-  auto idFont = QFont("Microsoft YaHei", 9); idFont.setBold(true);
-  const int desired = QFontMetrics(idFont).horizontalAdvance(
-      QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId)) + 24;
-  const int available = (twoRows ? w - btnW * 3 - 12 : rightX) - leftInfoRight - 8;
-  _meetingIdRect = QRect(leftInfoRight, 9, std::max(1, std::min(desired, available)), 26);
- } else {
-  _meetingIdRect = QRect();
- }
- const int leftBoundary = twoRows ? 8 : (_meetingId.isEmpty() ? leftInfoRight : _meetingIdRect.right() + 8);
-	const int rightButtonsLeft = rightX;
-	const int availCenterW = rightButtonsLeft - leftBoundary - 16;
 
-	if (availCenterW >= 180) {
-		const int pillW = std::min(availCenterW, 200);
-		int pillX = (w - pillW) / 2;
-		pillX = std::max(leftBoundary + 8, std::min(pillX, rightButtonsLeft - 8 - pillW));
-		_speakerCapsuleRect = QRect(pillX, (twoRows ? rowHeight : 0) + (rowHeight - 26) / 2, pillW, 26);
-	} else if (availCenterW >= 110) {
-		const int pillW = availCenterW;
-		const int pillX = leftBoundary + 8;
-		_speakerCapsuleRect = QRect(pillX, (twoRows ? rowHeight : 0) + (rowHeight - 26) / 2, pillW, 26);
+	const int layoutW = layoutSize.width();
+	_layoutRect = QRect(
+		rightX - layoutW,
+		(twoRows ? rowHeight : 0) + (rowHeight - layoutSize.height()) / 2,
+		layoutW,
+		layoutSize.height());
+	_layoutButton->setGeometry(_layoutRect);
+	rightX -= layoutW + 8;
+
+	// 左侧统一会议信息胶囊：[ 信号质量 | 会议号 + 复制 | 时长 | E2EE 盾牌 ]
+	const int pillY = (rowHeight - 30) / 2;
+	const int pillLeft = 14;
+	const int maxPillW = std::max(110, (twoRows ? (_minRect.left() - 16) : rightX) - pillLeft - 8);
+
+	QFont idFont(QStringLiteral("Microsoft YaHei"));
+	idFont.setPixelSize(12);
+	idFont.setBold(true);
+	const QFontMetrics idFm(idFont);
+
+	const int qualityW = 24;
+	const int timeW = 48;
+	const int shieldW = _encrypted ? 22 : 0;
+	int idBlockW = 0;
+	if (!_meetingId.isEmpty()) {
+		const QString copiedText = QCoreApplication::translate("MeetingUI", "Copied");
+		const int textW = std::max(idFm.horizontalAdvance(_meetingId), idFm.horizontalAdvance(copiedText));
+		idBlockW = std::min(textW + 24, std::max(60, maxPillW - qualityW - timeW - shieldW - 18));
+	}
+	const int pillW = std::min(maxPillW, 10 + qualityW + (idBlockW > 0 ? idBlockW + 4 : 0) + timeW + shieldW + 8);
+	_infoPillRect = QRect(pillLeft, pillY, pillW, 30);
+
+	_qualityRect = QRect(_infoPillRect.left() + 6, _infoPillRect.top() + 3, qualityW, 24);
+	_uiaTelemetry->setGeometry(_qualityRect);
+
+	if (idBlockW > 0) {
+		_meetingIdRect = QRect(_qualityRect.right() + 4, _infoPillRect.top() + 3, idBlockW, 24);
 	} else {
-		_speakerCapsuleRect = QRect(); // 窗口空间不足时自动隐藏，彻底杜绝元素重叠
+		_meetingIdRect = QRect();
+	}
+
+	// 1e. LiveKit Agent 在线状态胶囊（紧跟在会议信息胶囊右侧）
+	const int agentLeft = _infoPillRect.right() + 8;
+	const int agentRightLimit = (twoRows ? (_minRect.left() - 12) : (rightX - 8));
+	const int availForAgent = agentRightLimit - agentLeft;
+	const QString agentText = agentBadgeText();
+	const int idealAgentW = 10 + 7 + 6 + metrics.horizontalAdvance(agentText) + 10;
+	if (availForAgent >= 68) {
+		const int agentW = std::min(availForAgent, idealAgentW);
+		_agentPillRect = QRect(agentLeft, (rowHeight - 26) / 2, agentW, 26);
+	} else {
+		_agentPillRect = QRect();
+	}
+
+	// 中间发言人提示胶囊（仅当有人发言且空间足够时绘制）
+	const int leftContentRight = _agentPillRect.isEmpty() ? _infoPillRect.right() : _agentPillRect.right();
+	const int leftBoundary = twoRows ? 14 : (leftContentRight + 10);
+	const int rightButtonsLeft = rightX;
+	const int availCenterW = rightButtonsLeft - leftBoundary - 12;
+	if (!_speakerName.isEmpty() && availCenterW >= 120) {
+		const int spW = std::min(availCenterW, 210);
+		int spX = (w - spW) / 2;
+		spX = std::max(leftBoundary, std::min(spX, rightButtonsLeft - spW));
+		_speakerCapsuleRect = QRect(spX, (twoRows ? rowHeight : 0) + (rowHeight - 26) / 2, spW, 26);
+	} else {
+		_speakerCapsuleRect = QRect();
 	}
 }
 
 void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
+	Q_UNUSED(e);
 	QPainter p(this);
 	p.setRenderHint(QPainter::Antialiasing);
 	p.setRenderHint(QPainter::TextAntialiasing);
@@ -2081,132 +2341,219 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	p.setPen(themeColor(ColorRole::Border));
 	p.drawLine(0, h - 1, w, h - 1);
 
-	// 1. 左侧：Logo、会议名称与持续时间
-	p.save();
-	const int logoX = 14;
-	const int logoY = 22;
-	windowIcon().paint(&p, QRect(logoX - 8, logoY - 12, 24, 24));
-
-	QFont font("Microsoft YaHei", 10);
-	p.setFont(font);
-	p.setPen(themeColor(ColorRole::TextSecondary));
-	const int nameWidth = QFontMetrics(font).horizontalAdvance(QCoreApplication::translate("MeetingUI", "Meetings"));
-	p.drawText(QRect(logoX + 16, 0, nameWidth, 44), Qt::AlignVCenter | Qt::AlignLeft, QCoreApplication::translate("MeetingUI", "Meetings"));
-
-	const int minutes = _durationSeconds / 60;
-	const int secs = _durationSeconds % 60;
-	const QString timeStr = QString("%1:%2")
-		.arg(minutes, 2, 10, QChar('0'))
-		.arg(secs, 2, 10, QChar('0'));
-	
-	QFont timeFont("Microsoft YaHei", 10, QFont::DemiBold);
-	p.setFont(timeFont);
-	p.setPen(themeColor(ColorRole::Text));
-	p.drawText(QRect(logoX + 24 + nameWidth, 0, 60, 44), Qt::AlignVCenter | Qt::AlignLeft, timeStr);
-
-	const QString availability = _telemetrySnapshot.value(
-		QStringLiteral("availability"), QStringLiteral("UNKNOWN")).toString();
-	QColor qualityColor = themeColor(ColorRole::TextMuted);
-	if (availability == QStringLiteral("VALID")) qualityColor = themeColor(ColorRole::Success);
-	else if (availability == QStringLiteral("WARMING_UP")) qualityColor = themeColor(ColorRole::Accent);
-	else if (availability == QStringLiteral("STALE")) qualityColor = themeColor(ColorRole::Warning);
-	else if (availability == QStringLiteral("TIMEOUT") ||
-		availability == QStringLiteral("INVALID")) qualityColor = themeColor(ColorRole::Danger);
-	else if (availability == QStringLiteral("UNSUPPORTED")) qualityColor = themeColor(ColorRole::Danger);
-	if (_hoverBtn == HoverBtn::Quality) {
-		p.setPen(Qt::NoPen);
-		p.setBrush(themeColor(ColorRole::Hover));
-		p.drawRoundedRect(_qualityRect, 4, 4);
-	}
-	const double coverage = _telemetrySnapshot.value(QStringLiteral("coverage"), 0.0).toDouble();
-	const int activeBars = availability == QStringLiteral("VALID")
-		? (coverage >= 0.66 ? 3 : (coverage >= 0.33 ? 2 : 1))
-		: (availability == QStringLiteral("WARMING_UP") ? 1 : 0);
-	const int sigX = _qualityRect.left() + 4;
-	const int sigY = _qualityRect.center().y() + 5;
-	p.setPen(Qt::NoPen);
-	for (int bar = 0; bar != 3; ++bar) {
-		p.setBrush(bar < activeBars ? qualityColor : themeColor(ColorRole::Border));
-		const int barHeight = 4 + bar * 3;
-		p.drawRect(sigX + bar * 4, sigY - barHeight, 2, barHeight);
-	}
-
-	p.restore();
-
-	// 1.5 会议号胶囊徽标与点击复制
-	if (!_meetingIdRect.isEmpty() && !_meetingId.isEmpty()) {
+	// 1. 左侧统一会议信息胶囊
+	if (!_infoPillRect.isEmpty()) {
 		p.save();
-		bool isHover = _meetingIdRect.contains(mapFromGlobal(QCursor::pos()));
-		p.setPen(QPen(_copiedAnim ? themeColor(ColorRole::Success) : (isHover ? themeColor(ColorRole::Accent) : themeColor(ColorRole::Border)), 1));
-		p.setBrush(_copiedAnim ? themeColor(ColorRole::Success, 22) : (isHover ? themeColor(ColorRole::AccentSoft) : themeColor(ColorRole::SurfaceAlt)));
-		p.drawRoundedRect(_meetingIdRect, 6, 6);
+		const bool idHovered = !_meetingIdRect.isEmpty() && _meetingIdRect.contains(mapFromGlobal(QCursor::pos()));
+		p.setPen(QPen(_copiedAnim ? themeColor(ColorRole::Success) : themeColor(ColorRole::Border), 1.0));
+		p.setBrush(_copiedAnim ? themeColor(ColorRole::Success, 20) : themeColor(ColorRole::SurfaceAlt));
+		p.drawRoundedRect(_infoPillRect, 15, 15);
 
-		QFont mFont("Microsoft YaHei", 9);
-		mFont.setBold(true);
-		p.setFont(mFont);
-		p.setPen(_copiedAnim ? themeColor(ColorRole::Success) : (isHover ? themeColor(ColorRole::Accent) : themeColor(ColorRole::TextSecondary)));
-		QString dispText = _copiedAnim ? QCoreApplication::translate("MeetingUI", "✔ Meeting ID Copied") : QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId);
-		p.drawText(_meetingIdRect, Qt::AlignCenter, dispText);
+		// 1a. 信号质量 3 格指示条
+		const QString availability = _telemetrySnapshot.value(
+			QStringLiteral("availability"), QStringLiteral("UNKNOWN")).toString();
+		QColor qualityColor = themeColor(ColorRole::TextMuted);
+		if (availability == QStringLiteral("VALID")) qualityColor = themeColor(ColorRole::Success);
+		else if (availability == QStringLiteral("WARMING_UP")) qualityColor = themeColor(ColorRole::Accent);
+		else if (availability == QStringLiteral("STALE")) qualityColor = themeColor(ColorRole::Warning);
+		else if (availability == QStringLiteral("TIMEOUT") ||
+			availability == QStringLiteral("INVALID") ||
+			availability == QStringLiteral("UNSUPPORTED")) qualityColor = themeColor(ColorRole::Danger);
+
+		if (_hoverBtn == HoverBtn::Quality) {
+			p.setPen(Qt::NoPen);
+			p.setBrush(themeColor(ColorRole::Hover));
+			p.drawRoundedRect(_qualityRect, 10, 10);
+		}
+		const double coverage = _telemetrySnapshot.value(QStringLiteral("coverage"), 0.0).toDouble();
+		const int activeBars = availability == QStringLiteral("VALID")
+			? (coverage >= 0.66 ? 3 : (coverage >= 0.33 ? 2 : 1))
+			: (availability == QStringLiteral("WARMING_UP") ? 1 : 0);
+		const int sigX = _qualityRect.left() + 6;
+		const int sigY = _qualityRect.center().y() + 5;
+		p.setPen(Qt::NoPen);
+		for (int bar = 0; bar != 3; ++bar) {
+			p.setBrush(bar < activeBars ? qualityColor : themeColor(ColorRole::Border));
+			const int barHeight = 4 + bar * 3;
+			p.drawRoundedRect(QRectF(sigX + bar * 4.5, sigY - barHeight, 2.5, barHeight), 1.0, 1.0);
+		}
+
+		// 1b. 会议号 + 线性复制图标
+		int cursorX = _qualityRect.right() + 4;
+		if (!_meetingIdRect.isEmpty() && !_meetingId.isEmpty()) {
+			if (idHovered && !_copiedAnim) {
+				p.setPen(Qt::NoPen);
+				p.setBrush(themeColor(ColorRole::Hover));
+				p.drawRoundedRect(_meetingIdRect, 10, 10);
+			}
+			QFont idFont(QStringLiteral("Microsoft YaHei"));
+			idFont.setPixelSize(12);
+			idFont.setBold(true);
+			p.setFont(idFont);
+			const QColor idColor = _copiedAnim
+				? themeColor(ColorRole::Success)
+				: (idHovered ? themeColor(ColorRole::Accent) : themeColor(ColorRole::Text));
+			p.setPen(idColor);
+			const QString disp = _copiedAnim
+				? QCoreApplication::translate("MeetingUI", "Copied")
+				: QFontMetrics(idFont).elidedText(_meetingId, Qt::ElideRight, std::max(10, _meetingIdRect.width() - 22));
+			p.drawText(_meetingIdRect.adjusted(6, 0, -18, 0), Qt::AlignVCenter | Qt::AlignLeft, disp);
+
+			const QIcon copyIc = AppTheme::icon(
+				_copiedAnim ? AppTheme::Icon::Check : AppTheme::Icon::Copy,
+				_copiedAnim ? ColorRole::Success : (idHovered ? ColorRole::Accent : ColorRole::TextMuted));
+			copyIc.paint(&p, QRect(_meetingIdRect.right() - 16, _meetingIdRect.center().y() - 6, 12, 12));
+			cursorX = _meetingIdRect.right() + 4;
+		}
+
+		// 1c. 会议计时 MM:SS
+		const int minutes = _durationSeconds / 60;
+		const int secs = _durationSeconds % 60;
+		const QString timeStr = QStringLiteral("%1:%2")
+			.arg(minutes, 2, 10, QChar('0'))
+			.arg(secs, 2, 10, QChar('0'));
+		QFont timeFont(QStringLiteral("Microsoft YaHei"));
+		timeFont.setPixelSize(12);
+		p.setFont(timeFont);
+		p.setPen(themeColor(ColorRole::TextMuted));
+		const int timeRight = _encrypted ? (_infoPillRect.right() - 26) : (_infoPillRect.right() - 8);
+		if (timeRight > cursorX + 20) {
+			p.drawText(QRect(cursorX, _infoPillRect.top(), timeRight - cursorX, _infoPillRect.height()),
+				Qt::AlignCenter, timeStr);
+		}
+
+		// 1d. E2EE 加密盾牌徽标
+		if (_encrypted) {
+			const QIcon shieldIc = AppTheme::icon(AppTheme::Icon::Shield, ColorRole::Accent);
+			shieldIc.paint(&p, QRect(_infoPillRect.right() - 22, _infoPillRect.center().y() - 7, 14, 14));
+		}
 		p.restore();
 	}
 
-	// 2. 中间：正在讲话提示胶囊
-	if (!_speakerCapsuleRect.isEmpty()) {
+	// 1e. LiveKit Agent / 本地转译状态胶囊（可点击打开热切换菜单）
+	if (!_agentPillRect.isEmpty()) {
+		p.save();
+		const bool pillActive = _agentOnline || _localTranslatorActive;
+		const bool activeSpeechState = (_agentOnline &&
+			(_agentState == QStringLiteral("speaking") || _agentState == QStringLiteral("thinking"))) ||
+			(!_agentOnline && _localTranslatorActive);
+		const ColorRole accentRole = !pillActive
+			? ColorRole::TextMuted
+			: (activeSpeechState ? ColorRole::Accent : ColorRole::Success);
+		const bool hovered = (_hoverBtn == HoverBtn::Agent);
+		const QColor pillBg = pillActive
+			? themeColor(accentRole, hovered ? 36 : 22)
+			: (hovered ? themeColor(ColorRole::Hover) : themeColor(ColorRole::SurfaceAlt));
+		const QColor pillBorder = pillActive
+			? themeColor(accentRole, hovered ? 140 : 95)
+			: (hovered ? themeColor(ColorRole::Accent, 110) : themeColor(ColorRole::Border));
+		p.setPen(QPen(pillBorder, 1.0));
+		p.setBrush(pillBg);
+		p.drawRoundedRect(_agentPillRect, 13, 13);
+
+		// 状态指示圆点
+		p.setPen(Qt::NoPen);
+		p.setBrush(themeColor(accentRole));
+		const qreal dotX = _agentPillRect.left() + 10.0;
+		const qreal dotY = _agentPillRect.center().y() - 3.0;
+		p.drawEllipse(QRectF(dotX, dotY, 7.0, 7.0));
+
+		QFont agentFont(QStringLiteral("Microsoft YaHei"));
+		agentFont.setPixelSize(12);
+		agentFont.setBold(pillActive);
+		p.setFont(agentFont);
+		p.setPen(pillActive ? themeColor(accentRole) : themeColor(ColorRole::TextSecondary));
+		const QRect textRect = _agentPillRect.adjusted(23, 0, -9, 0);
+		const QString elided = QFontMetrics(agentFont).elidedText(
+			agentBadgeText(), Qt::ElideRight, std::max(10, textRect.width()));
+		p.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, elided);
+		p.restore();
+	}
+
+	// 2. 中间：仅有人发言时呈现柔和发言人胶囊
+	if (!_speakerCapsuleRect.isEmpty() && !_speakerName.isEmpty()) {
 		p.save();
 		p.setPen(Qt::NoPen);
 		p.setBrush(themeColor(ColorRole::AccentSoft));
-		p.drawRoundedRect(_speakerCapsuleRect, 6, 6);
+		p.drawRoundedRect(_speakerCapsuleRect, 13, 13);
 
-		QFont speakerFont("Microsoft YaHei", 9);
+		const QIcon micIc = AppTheme::icon(AppTheme::Icon::Microphone, ColorRole::Accent);
+		micIc.paint(&p, QRect(_speakerCapsuleRect.left() + 8, _speakerCapsuleRect.center().y() - 6, 12, 12));
+
+		QFont speakerFont(QStringLiteral("Microsoft YaHei"));
+		speakerFont.setPixelSize(12);
 		p.setFont(speakerFont);
 		p.setPen(themeColor(ColorRole::Accent));
-		QString speakerText = _speakerName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Speaking: None") : QCoreApplication::translate("MeetingUI", "Speaking: %1").arg(_speakerName);
-		QFontMetrics fm(speakerFont);
-		QString elided = fm.elidedText(speakerText, Qt::ElideMiddle, _speakerCapsuleRect.width() - 12);
-		p.drawText(_speakerCapsuleRect, Qt::AlignCenter, elided);
+		const QString speakerText = QCoreApplication::translate("MeetingUI", "Speaking: %1").arg(_speakerName);
+		const QString elided = QFontMetrics(speakerFont).elidedText(
+			speakerText, Qt::ElideRight, std::max(10, _speakerCapsuleRect.width() - 32));
+		p.drawText(_speakerCapsuleRect.adjusted(24, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, elided);
 		p.restore();
 	}
 
-	// 3. 右侧工具按钮
-	auto drawTextBtn = [&](const QRect &r, const QString &text, bool hovered, bool hasArrow = false, const QColor &customColor = themeColor(ColorRole::TextSecondary)) {
+	// 3. 右侧紧凑工具按钮（无 emoji）
+	auto drawChipBtn = [&](const QRect &r, const QString &text, bool hovered, ColorRole fgRole) {
+		if (r.isEmpty()) return;
 		p.save();
-		if (hovered) {
-			p.setPen(Qt::NoPen);
-			p.setBrush(themeColor(ColorRole::Hover));
-			p.drawRoundedRect(r, 6, 6);
-		}
-		p.setFont(QFont("Microsoft YaHei", 9));
-		p.setPen(customColor);
-		if (hasArrow) {
-			p.drawText(r.adjusted(4, 0, -12, 0), Qt::AlignCenter, text);
-			p.setPen(QPen(themeColor(ColorRole::TextMuted), 1.3));
-			const int ax = r.right() - 10;
-			const int ay = r.center().y();
-			p.drawLine(ax - 3, ay - 1, ax, ay + 2);
-			p.drawLine(ax, ay + 2, ax + 3, ay - 1);
-		} else {
-			p.drawText(r, Qt::AlignCenter, text);
-		}
+		p.setPen(QPen(hovered ? themeColor(ColorRole::Border) : Qt::transparent, 1.0));
+		p.setBrush(hovered ? themeColor(ColorRole::Hover) : themeColor(ColorRole::SurfaceAlt));
+		p.drawRoundedRect(r, 7, 7);
+		QFont f(QStringLiteral("Microsoft YaHei"));
+		f.setPixelSize(12);
+		p.setFont(f);
+		p.setPen(themeColor(fgRole));
+		p.drawText(r, Qt::AlignCenter, text);
 		p.restore();
 	};
 
-
 #if COHAVORA_SHOW_CONSOLE_BUTTON
-	drawTextBtn(_consoleRect, QCoreApplication::translate("MeetingUI", "Console 📋"), _hoverBtn == HoverBtn::Console, false, themeColor(ColorRole::Accent));
+	drawChipBtn(_consoleRect, QCoreApplication::translate("MeetingUI", "Console"),
+		_hoverBtn == HoverBtn::Console, ColorRole::TextSecondary);
 #endif
-	drawTextBtn(_simulateRect, QCoreApplication::translate("MeetingUI", "🐛 Simulate"), _hoverBtn == HoverBtn::Simulate, false, themeColor(ColorRole::Warning));
+	drawChipBtn(_simulateRect, QCoreApplication::translate("MeetingUI", "Simulate"),
+		_hoverBtn == HoverBtn::Simulate, ColorRole::TextSecondary);
 
-	// 4. 窗口控制按钮
+	// 分割线
+	if (_minRect.left() > _simulateRect.right() + 6) {
+		const int divX = _minRect.left() - 7;
+		p.setPen(themeColor(ColorRole::Border));
+		p.drawLine(divX, _minRect.center().y() - 8, divX, _minRect.center().y() + 8);
+	}
+
+	// 4. 圆角窗口控制三键（与新主界面保持统一）
 	p.save();
-	if (_hoverBtn == HoverBtn::Min) p.fillRect(_minRect, themeColor(ColorRole::Hover));
-	if (_hoverBtn == HoverBtn::Max) p.fillRect(_maxRect, themeColor(ColorRole::Hover));
-	if (_hoverBtn == HoverBtn::Close) p.fillRect(_closeRect, themeColor(ColorRole::Danger));
+	const auto paintWinHover = [&p](const QRect &r, const QColor &fill) {
+		QPainterPath path;
+		path.addRoundedRect(r.adjusted(2, 2, -2, -2), 6, 6);
+		p.fillPath(path, fill);
+	};
+	if (_hoverBtn == HoverBtn::Min) paintWinHover(_minRect, themeColor(ColorRole::Hover));
+	if (_hoverBtn == HoverBtn::Max) paintWinHover(_maxRect, themeColor(ColorRole::Hover));
+	if (_hoverBtn == HoverBtn::Close) paintWinHover(_closeRect, themeColor(ColorRole::Danger));
 
-	p.setPen(QPen((_hoverBtn == HoverBtn::Close) ? themeColor(ColorRole::OnAccent) : themeColor(ColorRole::TextSecondary), 1.2));
+	p.setPen(QPen(themeColor(ColorRole::TextSecondary), 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.drawLine(_minRect.center().x() - 5, _minRect.center().y(), _minRect.center().x() + 5, _minRect.center().y());
-	p.drawRect(_maxRect.center().x() - 5, _maxRect.center().y() - 5, 10, 10);
-	p.drawLine(_closeRect.center().x() - 5, _closeRect.center().y() - 5, _closeRect.center().x() + 5, _closeRect.center().y() + 5);
-	p.drawLine(_closeRect.center().x() + 5, _closeRect.center().y() - 5, _closeRect.center().x() - 5, _closeRect.center().y() + 5);
+
+	const QPoint mc = _maxRect.center();
+	p.setBrush(Qt::NoBrush);
+	if (_maximized) {
+		p.drawRoundedRect(QRectF(mc.x() - 5.0, mc.y() - 3.0, 8.0, 8.0), 1.2, 1.2);
+		QPainterPath back;
+		back.moveTo(mc.x() - 3.0, mc.y() - 3.0);
+		back.lineTo(mc.x() - 3.0, mc.y() - 5.0);
+		back.lineTo(mc.x() + 5.0, mc.y() - 5.0);
+		back.lineTo(mc.x() + 5.0, mc.y() + 3.0);
+		back.lineTo(mc.x() + 3.0, mc.y() + 3.0);
+		p.drawPath(back);
+	} else {
+		p.drawRoundedRect(QRectF(mc.x() - 5.0, mc.y() - 5.0, 10.0, 10.0), 1.5, 1.5);
+	}
+
+	p.setPen(QPen((_hoverBtn == HoverBtn::Close) ? themeColor(ColorRole::OnAccent) : themeColor(ColorRole::TextSecondary),
+		1.35, Qt::SolidLine, Qt::RoundCap));
+	const QPoint cc = _closeRect.center();
+	p.drawLine(cc.x() - 4, cc.y() - 4, cc.x() + 4, cc.y() + 4);
+	p.drawLine(cc.x() + 4, cc.y() - 4, cc.x() - 4, cc.y() + 4);
 	p.restore();
 }
 
@@ -2218,6 +2565,7 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	else if (_maxRect.contains(pos)) next = HoverBtn::Max;
 	else if (_minRect.contains(pos)) next = HoverBtn::Min;
 	else if (_qualityRect.contains(pos)) next = HoverBtn::Quality;
+	else if (!_agentPillRect.isEmpty() && _agentPillRect.contains(pos)) next = HoverBtn::Agent;
 	else if (_simulateRect.contains(pos)) next = HoverBtn::Simulate;
 	else if (_consoleRect.contains(pos)) next = HoverBtn::Console;
 	else if (_layoutRect.contains(pos)) next = HoverBtn::Layout;
@@ -2231,11 +2579,25 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 			QStringLiteral("availability"), QStringLiteral("UNKNOWN")).toString();
 		const auto age = _telemetrySnapshot.value(
 			QStringLiteral("sampleAgeMs"), -1).toLongLong();
-		QString tooltip = age >= 0
-			? QCoreApplication::translate("MeetingUI", "Telemetry: %1, age %2 ms")
-				.arg(LocalizeTelemetryDisplayText(availability)).arg(age)
-			: QCoreApplication::translate("MeetingUI", "Telemetry: %1")
-				.arg(LocalizeTelemetryDisplayText(availability));
+		const bool statsSamplingEnabled = _telemetrySnapshot.value(
+			QStringLiteral("statsSamplingEnabled"), false).toBool();
+		QString tooltip;
+		if (!statsSamplingEnabled && age < 0) {
+			tooltip = QCoreApplication::translate(
+				"MeetingUI",
+				"Telemetry: Continuous stats sampling is off (enable in Settings)");
+		} else {
+			tooltip = age >= 0
+				? QCoreApplication::translate("MeetingUI", "Telemetry: %1, age %2 ms")
+					.arg(LocalizeTelemetryDisplayText(availability)).arg(age)
+				: QCoreApplication::translate("MeetingUI", "Telemetry: %1")
+					.arg(LocalizeTelemetryDisplayText(availability));
+			if (!statsSamplingEnabled) {
+				tooltip += QStringLiteral("\n") + QCoreApplication::translate(
+					"MeetingUI",
+					"Continuous stats sampling is off (enable in Settings)");
+			}
+		}
 		const auto reconnectVideo = _telemetrySnapshot.value(
 			QStringLiteral("reconnectVideoAvailability"), QStringLiteral("UNKNOWN")).toString();
 		if (reconnectVideo == QStringLiteral("WARMING_UP") ||
@@ -2247,6 +2609,9 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 						 _telemetrySnapshot.value(QStringLiteral("reconnectVideoExpected")).toString());
 		}
 		setToolTip(tooltip);
+	} else if (next == HoverBtn::Agent) {
+		setCursor(Qt::PointingHandCursor);
+		setToolTip(agentTooltipText());
 	} else if (next != HoverBtn::None) {
 		setCursor(Qt::PointingHandCursor);
 		setToolTip(QString());
@@ -2264,6 +2629,7 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 bool RoomTopBarWidget::isWindowDragArea(const QPoint &position) const {
 	return rect().contains(position) &&
 		!_qualityRect.contains(position) && !_meetingIdRect.contains(position) &&
+		!_agentPillRect.contains(position) &&
 		!_minRect.contains(position) && !_maxRect.contains(position) &&
 		!_closeRect.contains(position) && !_consoleRect.contains(position) &&
 		!_simulateRect.contains(position) && !_layoutRect.contains(position);
@@ -2285,6 +2651,8 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 		}
 		if (_qualityRect.contains(e->pos())) {
 			emit telemetryDetailsRequested();
+		} else if (!_agentPillRect.isEmpty() && _agentPillRect.contains(e->pos())) {
+			emit agentMenuRequested(mapToGlobal(QPoint(_agentPillRect.left(), _agentPillRect.bottom() + 4)));
 		} else if (_minRect.contains(e->pos())) {
 			_minStream.fire({});
 		} else if (_maxRect.contains(e->pos())) {
@@ -2308,7 +2676,11 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 
 void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	QMenu menu(this);
-	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
+	AppTheme::styleMenu(
+		menu,
+		AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+			? AppTheme::Tone::Dark
+			: AppTheme::Tone::Light);
 
 	QAction *header = menu.addAction(QCoreApplication::translate("MeetingUI", "Simulate Scenario"));
 	header->setEnabled(false);
@@ -2394,6 +2766,7 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	_uiaParticipants = accessibleTool("meetingParticipants", QCoreApplication::translate("MeetingUI", "Participants"));
 	_uiaChat = accessibleTool("meetingChat", QCoreApplication::translate("MeetingUI", "Chat"));
 	_uiaWhiteboard = accessibleTool("meetingWhiteboard", QCoreApplication::translate("MeetingUI", "Whiteboard"));
+	_uiaCopilot = accessibleTool("meetingCopilot", QCoreApplication::translate("MeetingUI", "Copilot"));
 	_uiaAudio = accessibleTool("meetingMicrophone", QCoreApplication::translate("MeetingUI", "Microphone"));
 	_uiaVideo = accessibleTool("meetingCamera", QCoreApplication::translate("MeetingUI", "Camera"));
 	_uiaShare = accessibleTool("meetingShareScreen", QCoreApplication::translate("MeetingUI", "Share Screen"));
@@ -2404,6 +2777,7 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	connect(_uiaParticipants, &QPushButton::clicked, this, [this] { _participantsStream.fire({}); });
 	connect(_uiaChat, &QPushButton::clicked, this, [this] { _chatStream.fire({}); });
 	connect(_uiaWhiteboard, &QPushButton::clicked, this, [this] { _whiteboardStream.fire({}); });
+	connect(_uiaCopilot, &QPushButton::clicked, this, [this] { _copilotStream.fire({}); });
 	// Qt 5's accessibility Toggle action calls QAbstractButton::toggle(),
 	// which emits toggled but not clicked. Commit the same business action for
 	// UIA and ordinary activation. State projection updates the model first,
@@ -2590,6 +2964,13 @@ void RoomBottomBarWidget::setChatUnreadCount(int count) {
 	update();
 }
 
+void RoomBottomBarWidget::setActiveSidebar(int sidebarId) {
+	if (_activeSidebarId != sidebarId) {
+		_activeSidebarId = sidebarId;
+		update();
+	}
+}
+
 void RoomBottomBarWidget::setInRecovery(bool inRecovery) {
 	if (_inRecovery == inRecovery) return;
 	_inRecovery = inRecovery;
@@ -2597,7 +2978,7 @@ void RoomBottomBarWidget::setInRecovery(bool inRecovery) {
         for (auto kind : {DeviceKind::Microphone, DeviceKind::Speaker, DeviceKind::Camera}) cancelDeviceAction(kind);
         if (_deviceMenu) _deviceMenu->close();
     }
-	for (auto *button : {_uiaParticipants, _uiaChat, _uiaWhiteboard, _uiaAudio, _uiaVideo})
+	for (auto *button : {_uiaParticipants, _uiaChat, _uiaWhiteboard, _uiaCopilot, _uiaAudio, _uiaVideo})
 		button->setEnabled(!inRecovery);
 	_uiaShare->setEnabled(screenShareControlEnabled());
 	update();
@@ -2611,261 +2992,429 @@ int RoomBottomBarWidget::heightForWidth(int width) const {
 void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 	Q_UNUSED(e);
 	const int w = width();
+	const int h = height();
 
+	// 方案 1：4 组悬浮胶囊岛 Dock（媒体 / 协作 / 侧栏 / 离开），与 Stage 同色融合底槽
 	_toolItems = {
+		// Group 0: Media
 		{ 1, QCoreApplication::translate("MeetingUI", "Unmute"), QCoreApplication::translate("MeetingUI", "Mute"), QRect(), true },
 		{ 11, QCoreApplication::translate("MeetingUI", "Enable Speaker"), QCoreApplication::translate("MeetingUI", "Speaker"), QRect(), true },
 		{ 2, QCoreApplication::translate("MeetingUI", "Start Video"), QCoreApplication::translate("MeetingUI", "Stop Video"), QRect(), true },
-		{ 3, QCoreApplication::translate("MeetingUI", "Share Screen"), QCoreApplication::translate("MeetingUI", "Share Screen"), QRect(), true },
-		{ 4, QCoreApplication::translate("MeetingUI", "Invite"), QCoreApplication::translate("MeetingUI", "Invite"), QRect(), true },
+		// Group 1: Collaboration
+		{ 3, QCoreApplication::translate("MeetingUI", "Share Screen"), QCoreApplication::translate("MeetingUI", "Share Screen"), QRect(), false },
+		{ 7, QCoreApplication::translate("MeetingUI", "Whiteboard"), QCoreApplication::translate("MeetingUI", "Whiteboard"), QRect(), false },
+		{ 4, QCoreApplication::translate("MeetingUI", "Invite"), QCoreApplication::translate("MeetingUI", "Invite"), QRect(), false },
+		{ 10, QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QRect(), false },
+		// Group 2: Sidebars
 		{ 5, QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount), QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount), QRect(), false },
 		{ 6, QCoreApplication::translate("MeetingUI", "Chat"), QCoreApplication::translate("MeetingUI", "Chat"), QRect(), false },
-		{ 7, QCoreApplication::translate("MeetingUI", "Whiteboard"), QCoreApplication::translate("MeetingUI", "Whiteboard"), QRect(), false },
-		{ 10, QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QRect(), true },
+		{ 8, QCoreApplication::translate("MeetingUI", "Copilot"), QCoreApplication::translate("MeetingUI", "Copilot"), QRect(), false },
 	};
 
-	const int endWidth = std::min(kBottomBarEndWidth, std::max(64, w / 5));
-	_endMeetingRect = QRect(w - kBottomBarPadding - endWidth, 5, endWidth,
-		kBottomBarHeight - 10);
-	_uiaEnd->setGeometry(_endMeetingRect);
-	const int controlsLeft = kBottomBarPadding;
-	const int controlsRight = _endMeetingRect.left() - kBottomBarGap;
-	const int controlsWidth = std::max(0, controlsRight - controlsLeft);
-	const int itemCount = static_cast<int>(_toolItems.size());
-	const int toolWidth = std::max(1, std::min(kBottomBarPreferredToolWidth,
-		(controlsWidth - (itemCount - 1) * kBottomBarGap) / itemCount));
-	const int toolsWidth = itemCount * toolWidth + (itemCount - 1) * kBottomBarGap;
-	const int toolsLeft = controlsLeft + std::max(0, (controlsWidth - toolsWidth) / 2);
 	_chatInput->hide();
 	_handBtn->hide();
-	for (size_t i = 0; i < _toolItems.size(); ++i) {
-		_toolItems[i].rect = QRect(toolsLeft + static_cast<int>(i) * (toolWidth + kBottomBarGap),
-			5, toolWidth, kBottomBarHeight - 10);
-		switch (_toolItems[i].id) {
-		case 1: _uiaAudio->setGeometry(_toolItems[i].rect); break;
-		case 2: _uiaVideo->setGeometry(_toolItems[i].rect); break;
-		case 3: _uiaShare->setGeometry(_toolItems[i].rect); break;
-		case 5: _uiaParticipants->setGeometry(_toolItems[i].rect); break;
-		case 6: _uiaChat->setGeometry(_toolItems[i].rect); break;
-		case 7: _uiaWhiteboard->setGeometry(_toolItems[i].rect); break;
-		default: break;
+
+	constexpr int dockH = 46;
+	constexpr int btnH = 34;
+	constexpr int groupPad = 6;
+	constexpr int itemGap = 4;
+	constexpr int groupGap = 10;
+	const int dockY = (h - dockH) / 2;
+	const int btnY = dockY + (dockH - btnH) / 2;
+
+	const auto widthForItem = [](int id, bool compact) -> int {
+		switch (id) {
+		case 1: return compact ? 52 : 88;
+		case 11: return compact ? 42 : 48;
+		case 2: return compact ? 52 : 88;
+		case 3: return compact ? 44 : 84;
+		case 7: return compact ? 38 : 68;
+		case 4: return compact ? 38 : 64;
+		case 10: return 32;
+		case 5: return compact ? 50 : 60;
+		case 6: return 38;
+		case 8: return compact ? 46 : 62;
+		default: return 40;
 		}
+	};
+
+	const auto computeTotal = [&](bool compact) -> int {
+		int sum = 0;
+		for (const auto &it : _toolItems) sum += widthForItem(it.id, compact);
+		sum += 7 * itemGap + 3 * (groupPad * 2);
+		sum += (compact ? 56 : 86);
+		sum += 3 * groupGap;
+		return sum;
+	};
+
+	_compactDockLabels = (w - 24) < computeTotal(false);
+	const int desiredTotal = computeTotal(_compactDockLabels);
+	const int availW = std::max(240, w - 24);
+	const qreal scale = desiredTotal > availW ? (static_cast<qreal>(availW) / desiredTotal) : 1.0;
+
+	const auto scaledW = [scale](int v) { return std::max(26, static_cast<int>(std::round(v * scale))); };
+	const int scaledGap = std::max(2, static_cast<int>(std::round(itemGap * scale)));
+	const int scaledGroupGap = std::max(4, static_cast<int>(std::round(groupGap * scale)));
+	const int scaledPad = std::max(4, static_cast<int>(std::round(groupPad * scale)));
+
+	constexpr std::array<std::pair<size_t, size_t>, 3> groupRanges = {{
+		{ 0, 3 }, { 3, 7 }, { 7, 10 }
+	}};
+	std::array<int, 3> groupWidths{};
+	int totalW = 0;
+	for (size_t g = 0; g < 3; ++g) {
+		int gw = scaledPad * 2;
+		for (size_t i = groupRanges[g].first; i < groupRanges[g].second; ++i) {
+			gw += scaledW(widthForItem(_toolItems[i].id, _compactDockLabels));
+			if (i + 1 < groupRanges[g].second) gw += scaledGap;
+		}
+		groupWidths[g] = gw;
+		totalW += gw;
 	}
+	const int endW = scaledW(_compactDockLabels ? 56 : 86);
+	totalW += endW + 3 * scaledGroupGap;
+
+	int cursorX = std::max(12, (w - totalW) / 2);
+	for (size_t g = 0; g < 3; ++g) {
+		_dockGroupRects[g] = QRect(cursorX, dockY, groupWidths[g], dockH);
+		int ix = cursorX + scaledPad;
+		for (size_t i = groupRanges[g].first; i < groupRanges[g].second; ++i) {
+			const int iw = scaledW(widthForItem(_toolItems[i].id, _compactDockLabels));
+			_toolItems[i].rect = QRect(ix, btnY, iw, btnH);
+			switch (_toolItems[i].id) {
+			case 1: _uiaAudio->setGeometry(_toolItems[i].rect); break;
+			case 2: _uiaVideo->setGeometry(_toolItems[i].rect); break;
+			case 3: _uiaShare->setGeometry(_toolItems[i].rect); break;
+			case 5: _uiaParticipants->setGeometry(_toolItems[i].rect); break;
+			case 6: _uiaChat->setGeometry(_toolItems[i].rect); break;
+			case 7: _uiaWhiteboard->setGeometry(_toolItems[i].rect); break;
+			case 8: _uiaCopilot->setGeometry(_toolItems[i].rect); break;
+			default: break;
+			}
+			ix += iw + scaledGap;
+		}
+		cursorX += groupWidths[g] + scaledGroupGap;
+	}
+
+	_endMeetingRect = QRect(cursorX, dockY, endW, dockH);
+	_uiaEnd->setGeometry(_endMeetingRect);
 }
 
 void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
+	Q_UNUSED(e);
 	QPainter p(this);
 	p.setRenderHint(QPainter::Antialiasing);
 	p.setRenderHint(QPainter::TextAntialiasing);
 
-	const int w = width();
-	const int h = height();
+	// 1. 与视频舞台无缝同色，呈现悬浮岛视觉且零覆盖 DX11 画布
+	p.fillRect(rect(), themeColor(ColorRole::Stage));
 
-	p.fillRect(rect(), themeColor(ColorRole::Surface));
-	p.setPen(themeColor(ColorRole::Border));
-	p.drawLine(0, 0, w, 0);
+	// 2. 绘制 3 个悬浮胶囊岛容器
+	const QColor islandShadow(0, 0, 0, AppTheme::effectiveTheme() == AppTheme::Theme::Dark ? 45 : 18);
+	for (const auto &gr : _dockGroupRects) {
+		if (gr.isEmpty()) continue;
+		p.save();
+		p.setPen(Qt::NoPen);
+		p.setBrush(islandShadow);
+		p.drawRoundedRect(gr.translated(0, 2), 15, 15);
+		p.setPen(QPen(themeColor(ColorRole::Border), 1.0));
+		p.setBrush(themeColor(ColorRole::Surface));
+		p.drawRoundedRect(gr, 15, 15);
+		p.restore();
+	}
 
+	QFont labelFont(QStringLiteral("Microsoft YaHei"));
+	labelFont.setPixelSize(12);
+	labelFont.setBold(false);
+
+	// 3. 绘制每个胶囊内工具项
 	for (const auto &item : _toolItems) {
 		const QRect r = item.rect;
+		if (r.isEmpty()) continue;
 		const bool available = item.id == 3 ? screenShareControlEnabled() : !_inRecovery;
 		const bool hovered = available && (_hoveredId == item.id);
 
 		p.save();
 		if (!available) {
-			p.setOpacity(0.45);
-		}
-		if (hovered) {
-			p.setPen(Qt::NoPen);
-			p.setBrush(themeColor(ColorRole::Hover));
-			p.drawRoundedRect(r, 8, 8);
+			p.setOpacity(0.42);
 		}
 
-		const int cx = r.center().x();
-		const int cy = r.y() + 18;
+		QColor fill = Qt::transparent;
+		QColor border = Qt::transparent;
+		QColor fg = themeColor(ColorRole::TextSecondary);
+		ColorRole iconRole = ColorRole::TextSecondary;
+		QString shortLabel;
+		bool boldLabel = false;
 
 		if (item.id == 1) {
-			const bool muted = _audioMuted;
-			p.setPen(QPen(muted ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Text), 1.8, Qt::SolidLine, Qt::RoundCap));
-			p.setBrush(Qt::NoBrush);
-			p.drawRoundedRect(QRect(cx - 4, cy - 7, 8, 11), 3, 3);
-			p.drawLine(cx, cy + 4, cx, cy + 8);
-			p.drawLine(cx - 4, cy + 8, cx + 4, cy + 8);
-			if (muted) {
-				p.drawLine(cx - 7, cy - 8, cx + 7, cy + 9);
+			if (_audioMuted) {
+				fill = themeColor(ColorRole::Danger, hovered ? 52 : 34);
+				border = themeColor(ColorRole::Danger, 95);
+				fg = themeColor(ColorRole::Danger);
+				iconRole = ColorRole::Danger;
+			} else {
+				fill = themeColor(hovered ? ColorRole::Hover : ColorRole::SurfaceAlt);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
+			}
+			if (!_compactDockLabels) {
+				shortLabel = _audioMuted
+					? QCoreApplication::translate("MeetingUI", "Muted")
+					: QCoreApplication::translate("MeetingUI", "Mute");
+				boldLabel = true;
 			}
 		} else if (item.id == 11) {
-			const bool muted = _speakerMuted;
-			p.setPen(QPen(muted ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Text), 1.8, Qt::SolidLine, Qt::RoundCap));
-			p.setBrush(Qt::NoBrush);
-
-			// 喇叭后腔方块
-			p.drawRoundedRect(QRect(cx - 7, cy - 3, 4, 7), 1, 1);
-			// 喇叭扩音锥形
-			QPainterPath hornPath;
-			hornPath.moveTo(cx - 3, cy - 3);
-			hornPath.lineTo(cx + 1, cy - 7);
-			hornPath.lineTo(cx + 1, cy + 7);
-			hornPath.lineTo(cx - 3, cy + 3);
-			hornPath.closeSubpath();
-			p.drawPath(hornPath);
-
-			if (muted) {
-				// 静音状态绘制红色斜线
-				p.drawLine(cx - 8, cy - 8, cx + 8, cy + 9);
-			} else {
-				// 开启状态绘制两道流畅声波弧线
-				p.drawArc(QRect(cx - 2, cy - 5, 8, 11), -55 * 16, 110 * 16);
-				p.drawArc(QRect(cx - 3, cy - 8, 13, 17), -55 * 16, 110 * 16);
+			if (_speakerMuted) {
+				fill = themeColor(ColorRole::Danger, hovered ? 52 : 34);
+				fg = themeColor(ColorRole::Danger);
+				iconRole = ColorRole::Danger;
+			} else if (hovered) {
+				fill = themeColor(ColorRole::Hover);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
 			}
 		} else if (item.id == 2) {
-			const bool closed = !_videoEnabled;
-			p.setPen(QPen(closed ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Text), 1.8, Qt::SolidLine, Qt::RoundCap));
-			p.setBrush(Qt::NoBrush);
-			p.drawRoundedRect(QRect(cx - 8, cy - 6, 11, 12), 2, 2);
-			QPainterPath camPath;
-			camPath.moveTo(cx + 3, cy - 2);
-			camPath.lineTo(cx + 8, cy - 6);
-			camPath.lineTo(cx + 8, cy + 6);
-			camPath.lineTo(cx + 3, cy + 2);
-			camPath.closeSubpath();
-			p.drawPath(camPath);
-			if (closed) {
-				p.drawLine(cx - 9, cy - 8, cx + 9, cy + 9);
+			if (!_videoEnabled) {
+				fill = themeColor(ColorRole::Danger, hovered ? 52 : 34);
+				border = themeColor(ColorRole::Danger, 95);
+				fg = themeColor(ColorRole::Danger);
+				iconRole = ColorRole::Danger;
+			} else {
+				fill = themeColor(hovered ? ColorRole::Hover : ColorRole::SurfaceAlt);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
+			}
+			if (!_compactDockLabels) {
+				shortLabel = _videoEnabled
+					? QCoreApplication::translate("MeetingUI", "Video")
+					: QCoreApplication::translate("MeetingUI", "Off");
+				boldLabel = true;
 			}
 		} else if (item.id == 3) {
-			const auto role = _screenShareState == livekit::ScreenShareState::Active
-				? ColorRole::Success : ColorRole::Text;
-			p.setPen(QPen(themeColor(role), 1.8, Qt::SolidLine, Qt::RoundCap));
-			p.setBrush(Qt::NoBrush);
-			p.drawRoundedRect(QRect(cx - 8, cy - 7, 16, 12), 2, 2);
-			p.drawLine(cx, cy + 2, cx, cy - 3);
-			p.drawLine(cx - 3, cy - 1, cx, cy - 4);
-			p.drawLine(cx + 3, cy - 1, cx, cy - 4);
+			using State = livekit::ScreenShareState;
+			const bool active = _screenShareState == State::Active ||
+				_screenShareState == State::Starting ||
+				_screenShareState == State::AwaitingPermission;
+			if (active) {
+				fill = themeColor(hovered ? ColorRole::AccentHover : ColorRole::Accent);
+				fg = themeColor(ColorRole::OnAccent);
+				iconRole = ColorRole::OnAccent;
+			} else {
+				fill = themeColor(hovered ? ColorRole::Accent : ColorRole::AccentSoft);
+				fg = themeColor(hovered ? ColorRole::OnAccent : ColorRole::Accent);
+				iconRole = hovered ? ColorRole::OnAccent : ColorRole::Accent;
+			}
+			if (!_compactDockLabels) {
+				if (_screenShareState == State::Active) shortLabel = QCoreApplication::translate("MeetingUI", "Stop");
+				else if (_screenShareState == State::Starting || _screenShareState == State::AwaitingPermission)
+					shortLabel = QCoreApplication::translate("MeetingUI", "Cancel");
+				else if (_screenShareState == State::Stopping) shortLabel = QCoreApplication::translate("MeetingUI", "Stopping");
+				else if (_screenShareState == State::StopFailed) shortLabel = QCoreApplication::translate("MeetingUI", "Retry");
+				else shortLabel = QCoreApplication::translate("MeetingUI", "Share");
+				boldLabel = true;
+			}
+		} else if (item.id == 7) {
+			if (_whiteboardHasContent) {
+				fill = themeColor(ColorRole::AccentSoft);
+				fg = themeColor(ColorRole::Accent);
+				iconRole = ColorRole::Accent;
+			} else if (hovered) {
+				fill = themeColor(ColorRole::Hover);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
+			}
+			if (!_compactDockLabels) shortLabel = QCoreApplication::translate("MeetingUI", "Board");
 		} else if (item.id == 4) {
-			p.setPen(QPen(themeColor(ColorRole::Text), 1.6));
-			p.drawEllipse(QPoint(cx - 3, cy - 4), 3, 3);
-			p.drawArc(cx - 7, cy, 8, 8, 0, 180 * 16);
-			p.setPen(QPen(themeColor(ColorRole::Accent), 1.8));
-			p.drawLine(cx + 4, cy - 2, cx + 8, cy - 2);
-			p.drawLine(cx + 6, cy - 4, cx + 6, cy);
+			if (hovered) {
+				fill = themeColor(ColorRole::Hover);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
+			}
+			if (!_compactDockLabels) shortLabel = QCoreApplication::translate("MeetingUI", "Invite");
+		} else if (item.id == 10) {
+			if (hovered) {
+				fill = themeColor(ColorRole::Hover);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
+			}
 		} else if (item.id == 5) {
-			p.setPen(QPen(themeColor(ColorRole::Text), 1.6));
-			p.drawEllipse(QPoint(cx - 3, cy - 4), 3, 3);
-			p.drawArc(cx - 5, cy, 10, 8, 0, 180 * 16);
+			const bool active = (_activeSidebarId == 5);
+			if (active) {
+				fill = themeColor(ColorRole::AccentSoft);
+				fg = themeColor(ColorRole::Accent);
+				iconRole = ColorRole::Accent;
+			} else if (hovered) {
+				fill = themeColor(ColorRole::Hover);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
+			}
+			shortLabel = QString::number(_participantCount);
+			boldLabel = active;
 		} else if (item.id == 6) {
-			p.setPen(QPen(themeColor(ColorRole::Text), 1.6));
-			p.drawRoundedRect(QRect(cx - 7, cy - 6, 14, 11), 3, 3);
-			p.drawLine(cx - 3, cy - 2, cx + 3, cy - 2);
-			p.drawLine(cx - 3, cy + 1, cx + 1, cy + 1);
+			const bool active = (_activeSidebarId == 6);
+			if (active) {
+				fill = themeColor(ColorRole::AccentSoft);
+				fg = themeColor(ColorRole::Accent);
+				iconRole = ColorRole::Accent;
+			} else if (hovered) {
+				fill = themeColor(ColorRole::Hover);
+				fg = themeColor(ColorRole::Text);
+				iconRole = ColorRole::Text;
+			}
+		} else if (item.id == 8) {
+			const bool active = (_activeSidebarId == 8);
+			if (active) {
+				fill = themeColor(hovered ? ColorRole::AccentHover : ColorRole::Accent);
+				fg = themeColor(ColorRole::OnAccent);
+				iconRole = ColorRole::OnAccent;
+			} else {
+				fill = themeColor(ColorRole::AccentSoft);
+				border = hovered ? themeColor(ColorRole::Accent) : Qt::transparent;
+				fg = themeColor(ColorRole::Accent);
+				iconRole = ColorRole::Accent;
+			}
+			shortLabel = QStringLiteral("AI");
+			boldLabel = true;
+		}
 
+		if (fill.alpha() > 0 || border.alpha() > 0) {
+			p.setPen(border.alpha() > 0 ? QPen(border, 1.0) : Qt::NoPen);
+			p.setBrush(fill);
+			p.drawRoundedRect(r, 10, 10);
+		}
+
+		const int arrowW = item.hasDropdown ? 14 : 0;
+		const QRect contentRect = r.adjusted(4, 0, -(4 + arrowW), 0);
+		constexpr int iconSize = 15;
+		QFont f = labelFont;
+		f.setBold(boldLabel);
+		p.setFont(f);
+		const int textW = shortLabel.isEmpty() ? 0 : QFontMetrics(f).horizontalAdvance(shortLabel);
+		const int gap = shortLabel.isEmpty() ? 0 : 5;
+		const int totalContentW = iconSize + gap + textW;
+		const int startX = contentRect.left() + std::max(0, (contentRect.width() - totalContentW) / 2);
+		const QRect iconRect(startX, contentRect.center().y() - iconSize / 2, iconSize, iconSize);
+
+		if (item.id == 1) {
+			AppTheme::icon(_audioMuted ? AppTheme::Icon::MicrophoneOff : AppTheme::Icon::Microphone, iconRole)
+				.paint(&p, iconRect);
+		} else if (item.id == 11) {
+			AppTheme::icon(AppTheme::Icon::Audio, iconRole).paint(&p, iconRect);
+			if (_speakerMuted) {
+				p.setPen(QPen(fg, 1.7, Qt::SolidLine, Qt::RoundCap));
+				p.drawLine(iconRect.topLeft() + QPoint(1, 1), iconRect.bottomRight() - QPoint(1, 1));
+			}
+		} else if (item.id == 2) {
+			AppTheme::icon(_videoEnabled ? AppTheme::Icon::Video : AppTheme::Icon::VideoOff, iconRole)
+				.paint(&p, iconRect);
+		} else if (item.id == 3) {
+			AppTheme::icon(AppTheme::Icon::ScreenShare, iconRole).paint(&p, iconRect);
+		} else if (item.id == 7) {
+			p.setPen(QPen(fg, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+			p.setBrush(Qt::NoBrush);
+			p.drawRoundedRect(iconRect.adjusted(1, 2, -1, -3), 2, 2);
+			p.drawLine(iconRect.left() + 4, iconRect.center().y() + 1, iconRect.center().x(), iconRect.center().y() - 2);
+			p.drawLine(iconRect.center().x(), iconRect.center().y() - 2, iconRect.right() - 4, iconRect.center().y() + 1);
+		} else if (item.id == 4) {
+			p.setPen(QPen(fg, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+			p.setBrush(Qt::NoBrush);
+			p.drawEllipse(QPointF(iconRect.left() + 5.5, iconRect.top() + 4.5), 2.5, 2.5);
+			p.drawArc(QRectF(iconRect.left() + 1.5, iconRect.top() + 8.5, 8.0, 6.0), 0, 180 * 16);
+			p.drawLine(QPointF(iconRect.right() - 3.0, iconRect.top() + 4.5), QPointF(iconRect.right() - 3.0, iconRect.top() + 9.5));
+			p.drawLine(QPointF(iconRect.right() - 5.5, iconRect.top() + 7.0), QPointF(iconRect.right() - 0.5, iconRect.top() + 7.0));
+		} else if (item.id == 5) {
+			p.setPen(QPen(fg, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+			p.setBrush(Qt::NoBrush);
+			p.drawEllipse(QPointF(iconRect.left() + 5.5, iconRect.top() + 4.5), 2.5, 2.5);
+			p.drawArc(QRectF(iconRect.left() + 1.0, iconRect.top() + 8.5, 9.0, 6.5), 0, 180 * 16);
+			p.drawEllipse(QPointF(iconRect.right() - 4.0, iconRect.top() + 5.0), 2.0, 2.0);
+			p.drawArc(QRectF(iconRect.right() - 7.5, iconRect.top() + 9.0, 6.5, 5.5), 0, 140 * 16);
+		} else if (item.id == 6) {
+			AppTheme::icon(AppTheme::Icon::ChatMode, iconRole).paint(&p, iconRect);
 			if (_chatUnreadCount > 0) {
 				p.save();
 				p.setPen(Qt::NoPen);
 				p.setBrush(themeColor(ColorRole::Danger));
-				if (_chatUnreadCount > 99) {
-					p.drawRoundedRect(QRect(cx + 4, cy - 10, 16, 10), 5, 5);
-					p.setFont(QFont("Microsoft YaHei", 6, QFont::Bold));
-					p.setPen(themeColor(ColorRole::OnAccent));
-					p.drawText(QRect(cx + 4, cy - 10, 16, 10), Qt::AlignCenter, "99+");
-				} else if (_chatUnreadCount > 9) {
-					p.drawRoundedRect(QRect(cx + 4, cy - 10, 14, 10), 5, 5);
-					p.setFont(QFont("Microsoft YaHei", 6, QFont::Bold));
-					p.setPen(themeColor(ColorRole::OnAccent));
-					p.drawText(QRect(cx + 4, cy - 10, 14, 10), Qt::AlignCenter, QString::number(_chatUnreadCount));
-				} else {
-					p.drawEllipse(QPoint(cx + 8, cy - 6), 4, 4);
-				}
+				const QRect badge(r.right() - 14, r.top() + 3, 12, 12);
+				p.drawEllipse(badge);
+				QFont bf(QStringLiteral("Microsoft YaHei"));
+				bf.setPixelSize(9);
+				bf.setBold(true);
+				p.setFont(bf);
+				p.setPen(themeColor(ColorRole::OnAccent));
+				p.drawText(badge, Qt::AlignCenter, _chatUnreadCount > 9 ? QStringLiteral("9+") : QString::number(_chatUnreadCount));
 				p.restore();
 			}
-		} else if (item.id == 7) {
-			p.setPen(QPen(themeColor(_whiteboardHasContent ? ColorRole::Accent : ColorRole::Text),
-				1.6, Qt::SolidLine, Qt::RoundCap));
-			p.setBrush(Qt::NoBrush);
-			p.drawRoundedRect(QRect(cx - 9, cy - 7, 18, 13), 2, 2);
-			p.drawLine(cx - 5, cy + 2, cx + 4, cy - 3);
-			p.drawLine(cx, cy + 6, cx, cy + 10);
+		} else if (item.id == 8) {
+			AppTheme::icon(AppTheme::Icon::Sparkle, iconRole).paint(&p, iconRect);
 		} else if (item.id == 10) {
-			const QColor bugCol = hovered ? themeColor(ColorRole::Accent) : themeColor(ColorRole::Text);
-			p.setPen(QPen(bugCol, 1.6, Qt::SolidLine, Qt::RoundCap));
-			p.setBrush(Qt::NoBrush);
-			p.drawRoundedRect(QRect(cx - 5, cy - 4, 10, 11), 4, 4);
-			p.drawArc(QRect(cx - 3, cy - 8, 6, 6), 0, 180 * 16);
-			p.drawLine(cx - 2, cy - 7, cx - 5, cy - 10);
-			p.drawLine(cx + 2, cy - 7, cx + 5, cy - 10);
-			p.drawLine(cx - 5, cy - 2, cx - 9, cy - 4);
-			p.drawLine(cx + 5, cy - 2, cx + 9, cy - 4);
-			p.drawLine(cx - 5, cy + 2, cx - 10, cy + 2);
-			p.drawLine(cx + 5, cy + 2, cx + 10, cy + 2);
-			p.drawLine(cx - 5, cy + 6, cx - 9, cy + 8);
-			p.drawLine(cx + 5, cy + 6, cx + 9, cy + 8);
-			p.drawLine(cx, cy - 4, cx, cy + 7);
+			AppTheme::icon(AppTheme::Icon::MoreHorizontal, iconRole).paint(&p, iconRect);
 		}
 
-		QString title = item.title;
-		if (item.id == 1) title = _audioMuted ? QCoreApplication::translate("MeetingUI", "Unmute") : QCoreApplication::translate("MeetingUI", "Mute");
-		else if (item.id == 11) title = _speakerMuted ? QCoreApplication::translate("MeetingUI", "Enable Speaker") : QCoreApplication::translate("MeetingUI", "Speaker");
-		else if (item.id == 2) title = _videoEnabled ? QCoreApplication::translate("MeetingUI", "Stop Video") : QCoreApplication::translate("MeetingUI", "Start Video");
-		else if (item.id == 3) {
-			using State = livekit::ScreenShareState;
-			if (_screenShareState == State::Starting || _screenShareState == State::AwaitingPermission)
-				title = QCoreApplication::translate("MeetingUI", "Cancel Sharing");
-			else if (_screenShareState == State::Active) title = QCoreApplication::translate("MeetingUI", "Stop Sharing");
-			else if (_screenShareState == State::Stopping) title = QCoreApplication::translate("MeetingUI", "Stopping");
-			else if (_screenShareState == State::StopFailed) title = QCoreApplication::translate("MeetingUI", "Retry Stop");
+		if (!shortLabel.isEmpty()) {
+			p.setPen(fg);
+			const QRect textRect(iconRect.right() + gap, contentRect.top(),
+				std::max(0, contentRect.right() - iconRect.right() - gap + 1), contentRect.height());
+			const QString visible = QFontMetrics(f).elidedText(shortLabel, Qt::ElideRight, textRect.width());
+			p.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, visible);
 		}
-		else if (item.id == 5) title = QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount);
-
-		QFont font("Microsoft YaHei");
-		font.setPixelSize(11);
-		p.setFont(font);
-		p.setPen(themeColor(ColorRole::TextSecondary));
-		const int textWidth = std::max(0, r.width() - (item.hasDropdown ? 18 : 8));
-		const auto visibleTitle = QFontMetrics(font).elidedText(title, Qt::ElideRight, textWidth);
-		p.drawText(QRect(r.x() + 4, r.y() + 32, r.width() - 8, r.height() - 32),
-			Qt::AlignCenter | Qt::TextSingleLine, visibleTitle);
 
 		if (item.hasDropdown) {
-			p.setPen(QPen(themeColor(ColorRole::TextMuted), 1.4));
-			const int ax = r.right() - 7;
-			const int ay = r.y() + 10;
-			p.drawLine(ax - 3, ay, ax, ay + 3);
-			p.drawLine(ax, ay + 3, ax + 3, ay);
+			p.setPen(QPen(fg, 1.35, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+			const int ax = r.right() - 9;
+			const int ay = r.center().y();
+			p.drawLine(ax - 3, ay - 1, ax, ay + 2);
+			p.drawLine(ax, ay + 2, ax + 3, ay - 1);
 		}
 
 		p.restore();
 	}
 
-	p.save();
-	if (_endHovered) {
+	// 4. 岛 4：独立实心红离开胶囊按钮
+	if (!_endMeetingRect.isEmpty()) {
+		p.save();
 		p.setPen(Qt::NoPen);
-		p.setBrush(themeColor(ColorRole::Danger, 22));
-		p.drawRoundedRect(_endMeetingRect, 8, 8);
+		p.setBrush(islandShadow);
+		p.drawRoundedRect(_endMeetingRect.translated(0, 2), 15, 15);
+
+		QColor dangerBg = themeColor(ColorRole::Danger);
+		if (_endHovered) {
+			dangerBg = AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+				? dangerBg.lighter(112)
+				: dangerBg.darker(110);
+		}
+		p.setBrush(dangerBg);
+		p.drawRoundedRect(_endMeetingRect, 15, 15);
+
+		const QColor onDanger(255, 255, 255);
+		const QString leaveLabel = _compactDockLabels ? QString() : QCoreApplication::translate("MeetingUI", "Leave");
+		QFont endFont(QStringLiteral("Microsoft YaHei"));
+		endFont.setPixelSize(12);
+		endFont.setBold(true);
+		p.setFont(endFont);
+		const int iconW = 14;
+		const int textW = leaveLabel.isEmpty() ? 0 : QFontMetrics(endFont).horizontalAdvance(leaveLabel);
+		const int gap = leaveLabel.isEmpty() ? 0 : 6;
+		const int startX = _endMeetingRect.left() + std::max(6, (_endMeetingRect.width() - (iconW + gap + textW)) / 2);
+		const int cy = _endMeetingRect.center().y();
+
+		p.setPen(QPen(onDanger, 1.7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+		p.setBrush(Qt::NoBrush);
+		p.drawLine(startX + 4, cy - 6, startX + 10, cy - 6);
+		p.drawLine(startX + 10, cy - 6, startX + 10, cy + 6);
+		p.drawLine(startX + 10, cy + 6, startX + 4, cy + 6);
+		p.drawLine(startX, cy, startX + 7, cy);
+		p.drawLine(startX + 4, cy - 3, startX + 7, cy);
+		p.drawLine(startX + 4, cy + 3, startX + 7, cy);
+
+		if (!leaveLabel.isEmpty()) {
+			p.setPen(onDanger);
+			p.drawText(QRect(startX + iconW + gap, _endMeetingRect.top(),
+				std::max(0, _endMeetingRect.right() - (startX + iconW + gap) - 4), _endMeetingRect.height()),
+				Qt::AlignVCenter | Qt::AlignLeft, leaveLabel);
+		}
+		p.restore();
 	}
-
-	const int ecx = _endMeetingRect.center().x();
-	const int ecy = _endMeetingRect.y() + 16;
-
-	p.setPen(QPen(themeColor(ColorRole::Danger), 1.8, Qt::SolidLine, Qt::RoundCap));
-	p.drawLine(ecx - 6, ecy - 7, ecx + 2, ecy - 7);
-	p.drawLine(ecx + 2, ecy - 7, ecx + 2, ecy + 7);
-	p.drawLine(ecx + 2, ecy + 7, ecx - 6, ecy + 7);
-
-	p.drawLine(ecx - 8, ecy, ecx - 1, ecy);
-	p.drawLine(ecx - 4, ecy - 3, ecx - 1, ecy);
-	p.drawLine(ecx - 4, ecy + 3, ecx - 1, ecy);
-
-	QFont endFont("Microsoft YaHei");
-	endFont.setPixelSize(11);
-	endFont.setBold(true);
-	p.setFont(endFont);
-	p.setPen(themeColor(ColorRole::Danger));
-	const auto endMeetingTitle = QFontMetrics(endFont).elidedText(
-		QCoreApplication::translate("MeetingUI", "End Meeting"), Qt::ElideRight,
-		std::max(0, _endMeetingRect.width() - 8));
-	p.drawText(QRect(_endMeetingRect.x() + 4, _endMeetingRect.y() + 32,
-		_endMeetingRect.width() - 8, _endMeetingRect.height() - 32),
-		Qt::AlignCenter | Qt::TextSingleLine, endMeetingTitle);
-	p.restore();
 }
 
 QMenu *RoomBottomBarWidget::createDeviceMenu(const char *name) {
@@ -2873,7 +3422,11 @@ QMenu *RoomBottomBarWidget::createDeviceMenu(const char *name) {
     auto *menu = new QMenu(this);
     menu->setObjectName(QString::fromLatin1(name));
     _deviceMenu = menu;
-    AppTheme::styleMenu(*menu, AppTheme::Tone::Dark);
+    AppTheme::styleMenu(
+        *menu,
+        AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+            ? AppTheme::Tone::Dark
+            : AppTheme::Tone::Light);
     connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
     return menu;
 }
@@ -2979,17 +3532,38 @@ void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
 void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	const QPoint pos = e->pos();
 	int nextId = -1;
+	QString tip;
 
 	if (!_inRecovery || canStopScreenShare()) {
 		for (const auto &item : _toolItems) {
 			if ((item.id == 3 ? screenShareControlEnabled() : !_inRecovery) && item.rect.contains(pos)) {
 				nextId = item.id;
+				switch (item.id) {
+				case 1: tip = _audioMuted ? QCoreApplication::translate("MeetingUI", "Unmute") : QCoreApplication::translate("MeetingUI", "Mute"); break;
+				case 11: tip = _speakerMuted ? QCoreApplication::translate("MeetingUI", "Enable Speaker") : QCoreApplication::translate("MeetingUI", "Speaker"); break;
+				case 2: tip = _videoEnabled ? QCoreApplication::translate("MeetingUI", "Stop Video") : QCoreApplication::translate("MeetingUI", "Start Video"); break;
+				case 3: tip = canStopScreenShare() ? QCoreApplication::translate("MeetingUI", "Stop Sharing") : QCoreApplication::translate("MeetingUI", "Share Screen"); break;
+				case 4: tip = QCoreApplication::translate("MeetingUI", "Invite"); break;
+				case 5: tip = QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount); break;
+				case 6: tip = QCoreApplication::translate("MeetingUI", "Chat"); break;
+				case 7: tip = QCoreApplication::translate("MeetingUI", "Whiteboard"); break;
+				case 8: tip = QCoreApplication::translate("MeetingUI", "AI Copilot"); break;
+				case 10: tip = QCoreApplication::translate("MeetingUI", "Simulate Scenario"); break;
+				default: break;
+				}
 				break;
 			}
 		}
 	}
 
 	const bool nextEnd = _endMeetingRect.contains(pos);
+	if (nextEnd) {
+		tip = QCoreApplication::translate("MeetingUI", "Leave Meeting");
+	}
+	setCursor((nextId >= 0 || nextEnd) ? Qt::PointingHandCursor : Qt::ArrowCursor);
+	if (toolTip() != tip) {
+		setToolTip(tip);
+	}
 
 	if (nextId != _hoveredId || nextEnd != _endHovered) {
 		_hoveredId = nextId;
@@ -3084,6 +3658,9 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 				case 7:
 					_whiteboardStream.fire({});
 					break;
+				case 8:
+					_copilotStream.fire({});
+					break;
 				case 10:
 					showSimulateScenarioMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
 					break;
@@ -3096,7 +3673,11 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 
 void RoomBottomBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	QMenu menu(this);
-	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
+	AppTheme::styleMenu(
+		menu,
+		AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+			? AppTheme::Tone::Dark
+			: AppTheme::Tone::Light);
 
 	QAction *header = menu.addAction(QCoreApplication::translate("MeetingUI", "Simulate Scenario"));
 	header->setEnabled(false);
@@ -3173,6 +3754,13 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	if (!_coordinator) {
 		_coordinator = OpenMeeting::MeetingCoordinator::create(this);
 	}
+	_agentCoordinator = _config.agentCoordinator;
+	if (!_agentCoordinator) {
+		_agentCoordinator = std::make_shared<OpenMeeting::AgentCoordinator>(
+			OpenMeeting::SessionManager::instance());
+	}
+	_agentCoordinator->attachMeeting(_coordinator.get());
+	setupMeetingTranslationServices();
 	setupCameraCompletionOwner(OpenMeeting::SessionManager::instance());
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora Meeting Room - %1").arg(config.displayName));
 	resize(1120, 720);
@@ -3629,6 +4217,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 		setupInvitationBinding();
 		setupWhiteboardBinding();
 		setupVideoPagingControls();
+		setupLiveCaptionBanner();
 	}
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
 		[this](const std::string &identity, const QImage &image,
@@ -3674,15 +4263,13 @@ MeetingRoomWindow::MeetingRoomWindow(
 }
 
 MeetingRoomWindow::~MeetingRoomWindow() {
+	if (_agentCoordinator && _coordinator &&
+		_agentCoordinator->attachedMeeting() == _coordinator.get()) {
+		_agentCoordinator->attachMeeting(nullptr);
+	}
     _remoteControlUi.reset();
 	if (_nativeResizeFilterInstalled && qApp) qApp->removeNativeEventFilter(this);
-	if (_departureNotice) {
-		// The notice is intentionally not parented to the meeting window.  Close
-		// it explicitly when another teardown path destroys the window first.
-		QObject::disconnect(_departureNotice, nullptr, this, nullptr);
-		_departureNotice->close();
-		_departureNotice.clear();
-	}
+	dismissDepartureNotice();
 	invalidateCameraCompletion();
 	stopLiveKitSession();
 }
@@ -3708,13 +4295,21 @@ void MeetingRoomWindow::hideEvent(QHideEvent *e) {
 void MeetingRoomWindow::changeEvent(QEvent *e) {
 	Ui::RpWidget::changeEvent(e);
 	if (e && e->type() == QEvent::WindowStateChange) {
+		if (_topBar) {
+			_topBar->setMaximized(isMaximized() || isFullScreen());
+		}
 		updateStageGeometry();
 		scheduleViewportIntent(true);
 		updateVideoLayout();
+	} else if (e && e->type() == QEvent::LanguageChange) {
+		if (_topBar) _topBar->update();
+		if (_bottomBar) _bottomBar->update();
+		update();
 	}
 }
 
 void MeetingRoomWindow::closeEvent(QCloseEvent *e) {
+	dismissDepartureNotice();
 	if (!_closeRequested) {
 		_closeRequested = true;
 		const bool requestLeave = !_closingForSessionInvalidation &&
@@ -3803,6 +4398,33 @@ void MeetingRoomWindow::initLayout() {
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::closeRequested, this, [this]() {
 		switchSidebar(ActiveSidebar::None);
 	});
+	_copilotSidebar = new OpenMeeting::CopilotSidebarWidget(_agentCoordinator.get(), this);
+	_copilotSidebar->hide();
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::closeRequested, this, [this]() {
+		if (_activeSidebar == ActiveSidebar::Copilot) {
+			switchSidebar(ActiveSidebar::None);
+		}
+	});
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::expandToggleRequested, this, [this]() {
+		_copilotExpanded = !_copilotExpanded;
+		if (_copilotSidebar) {
+			_copilotSidebar->setExpanded(_copilotExpanded);
+		}
+		if (_activeSidebar == ActiveSidebar::Copilot) {
+			QResizeEvent ev(size(), size());
+			resizeEvent(&ev);
+		}
+	});
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::openSettingsRequested, this, [this]() {
+		openCopilotSettingsDialog();
+	});
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::openSettingsPageRequested, this, [this](int pageIndex, int subTabIndex) {
+		if (_config.openSettingsPage) {
+			_config.openSettingsPage(pageIndex, subTabIndex, this);
+		} else {
+			openCopilotSettingsDialog();
+		}
+	});
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::messageSent, this, [this](const QString &text) {
 		QString msgId = QString("msg_%1_%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(qrand() % 1000);
 		int64_t seq = _coordinator ? _coordinator->nextSequenceNumber() : (QDateTime::currentMSecsSinceEpoch() * 1000);
@@ -3819,6 +4441,9 @@ void MeetingRoomWindow::initLayout() {
 
 		if (_coordinator) {
 			_coordinator->sendChatMessage(text, msgId, seq);
+		}
+		if (_agentCoordinator) {
+			_agentCoordinator->recordMeetingChatMessage(item.senderName, text, true);
 		}
 		LogToConsole(LogCategory::Participant, "CHAT_TEXT_SENT",
 			QStringLiteral("bytes=%1").arg(text.toUtf8().size()));
@@ -3911,6 +4536,7 @@ void MeetingRoomWindow::initLayout() {
 	_recoveryBanner->setAlignment(Qt::AlignCenter);
 	_recoveryBanner->hide();
 	setupVideoPagingControls();
+	setupLiveCaptionBanner();
 
 	_recoveryBannerFadeTimer = new QTimer(this);
 	_recoveryBannerFadeTimer->setSingleShot(true);
@@ -3998,6 +4624,9 @@ void MeetingRoomWindow::initLayout() {
 
 	_bottomBar->chatClicked() | rpl::on_next([this] {
 		switchSidebar(ActiveSidebar::Chat);
+	}, lifetime());
+	_bottomBar->copilotClicked() | rpl::on_next([this] {
+		switchSidebar(ActiveSidebar::Copilot);
 	}, lifetime());
 
 	if (_coordinator) {
@@ -4229,9 +4858,7 @@ void MeetingRoomWindow::requestSpeakerDevice(const QString &deviceId,
 		window->_speakerDevicePending = false;
 		window->_speakerAvailable = available;
 		if (selected && window->_bottomBar) window->_bottomBar->setSpeakerDeviceId(selectedId);
-		const bool muted = window->_speakerRequestedMuted || !available;
-		if (window->_bottomBar) window->_bottomBar->setSpeakerMuted(muted);
-		window->_room->SetAudioOutputMuted(muted);
+		window->applyEffectiveSpeakerMute();
 		window->finishDeviceSwitchTelemetry(window->_speakerSwitchTelemetry, operation,
 			selected && available ? livekit::telemetry::OperationOutcome::Success
 				: livekit::telemetry::OperationOutcome::Failure);
@@ -4277,7 +4904,7 @@ bool MeetingRoomWindow::selectSpeakerDevice(const QString &deviceId) {
 	auto &manager = livekit::WebRTCManager::Instance();
 	const bool selected = manager.SetPlayoutDeviceById(deviceId.toStdString());
 	_speakerAvailable = manager.EnsurePlayout();
-	if (!_speakerAvailable) setSpeakerOutputMuted(true);
+	applyEffectiveSpeakerMute();
 	if (!selected || !_speakerAvailable) {
 		finishDeviceSwitchTelemetry(
 			_speakerSwitchTelemetry, operation,
@@ -4416,9 +5043,16 @@ void MeetingRoomWindow::requestMicrophoneSwitch(const QString &deviceId) {
 #endif
 }
 
+void MeetingRoomWindow::applyEffectiveSpeakerMute() {
+	const bool effectiveMuted = _speakerRequestedMuted || !_speakerAvailable;
+	if (_bottomBar) _bottomBar->setSpeakerMuted(effectiveMuted);
+	if (_room) _room->SetAudioOutputMuted(effectiveMuted);
+}
+
 void MeetingRoomWindow::setSpeakerOutputMuted(bool muted) {
-#ifdef Q_OS_LINUX
 	_speakerRequestedMuted = muted;
+	_speakerStateInitialized = true;
+#ifdef Q_OS_LINUX
 	const auto intent = _speakerMuteIntent;
 	const auto serial = ++*intent;
 	// Muting is immediate; an older native readiness completion cannot unmute.
@@ -4440,19 +5074,15 @@ void MeetingRoomWindow::setSpeakerOutputMuted(bool muted) {
 				if (intent->load() != serial || !window->_room || window->_room != weakRoom.lock() || !window->_sessionRunning ||
 					window->_closeRequested || window->_closingForSessionInvalidation) return;
 				window->_speakerAvailable = available;
-				const bool muted = window->_speakerRequestedMuted || !available;
-				if (window->_bottomBar) window->_bottomBar->setSpeakerMuted(muted);
-				window->_room->SetAudioOutputMuted(muted);
+				window->applyEffectiveSpeakerMute();
 			});
 		});
 	if (!accepted) _speakerAvailable = false;
 #else
 	if (!muted) {
 		_speakerAvailable = livekit::WebRTCManager::Instance().EnsurePlayout();
-		muted = !_speakerAvailable;
 	}
-	if (_bottomBar) _bottomBar->setSpeakerMuted(muted);
-	if (_room) _room->SetAudioOutputMuted(muted);
+	applyEffectiveSpeakerMute();
 #endif
 }
 
@@ -4568,7 +5198,23 @@ void MeetingRoomWindow::applyParticipantNameDisplayPreferences(
 	apply(_localTile);
 	apply(_localScreenTile.get());
 	for (const auto &[identity, tile] : _remoteTiles) apply(tile.get());
+	for (const auto &tile : _remoteTilePool) apply(tile.get());
 	for (const auto &[sid, tile] : _remoteScreenTiles) apply(tile.get());
+	if (!preferences.showLiveCaptions) {
+		clearLiveCaption();
+	}
+	if (_meetingTranslator) {
+		OpenMeeting::MeetingTranslatorConfig cfg;
+		cfg.translateEnabled = preferences.enableTranslationOutput;
+		cfg.targetLanguage = preferences.translationTargetLanguage;
+		cfg.translationProfileId = preferences.translationProfileId;
+		cfg.translationModelOverride = preferences.translationModelOverride;
+		cfg.translationSystemPrompt = preferences.translationSystemPrompt;
+		cfg.includeLocalMic = preferences.translateLocalMicrophone;
+		cfg.maxConcurrentStreamingAsr = preferences.maxConcurrentStreamingAsr;
+		cfg.streamingIdleReleaseMs = preferences.streamingIdleReleaseMs;
+		_meetingTranslator->updateConfig(cfg);
+	}
 }
 
 void MeetingRoomWindow::setupCameraCompletionOwner(
@@ -4752,13 +5398,15 @@ void MeetingRoomWindow::invalidateCameraCompletion() {
 
 void MeetingRoomWindow::retireLocalCapture() {
 	Q_ASSERT(thread() == QThread::currentThread());
+	_speakerConfiguredRoom.reset();
+	_speakerStateInitialized = false;
+	_speakerRequestedMuted = true;
 #ifdef Q_OS_LINUX
     ++*_microphoneMuteIntent;
     ++*_microphoneSwitchIntent;
     ++*_speakerDeviceIntent;
     ++*_speakerMuteIntent;
     _speakerDevicePending = false;
-    _speakerConfiguredRoom.reset();
     _microphoneMutePending = false;
     _microphoneSwitchPending = false;
 #endif
@@ -4789,6 +5437,10 @@ void MeetingRoomWindow::retireLocalCapture() {
 void MeetingRoomWindow::onTimerTick() {
 	_elapsedSeconds++;
 	_topBar->updateDuration(_elapsedSeconds);
+	const bool encrypted = _room && _room->e2ee_manager() &&
+		_room->e2ee_manager()->enabled() &&
+		_room->e2ee_manager()->encryption_type() != livekit::EncryptionType::NONE;
+	_topBar->setEncrypted(encrypted);
 }
 
 void MeetingRoomWindow::onRemoteRenderTick() {
@@ -4849,12 +5501,28 @@ void MeetingRoomWindow::switchSidebar(ActiveSidebar target) {
 		_activeSidebar = target;
 	}
 
-	if (_activeSidebar == ActiveSidebar::Chat && _bottomBar) {
-		_bottomBar->setChatUnreadCount(0);
+	if (_bottomBar) {
+		int sidebarId = 0;
+		if (_activeSidebar == ActiveSidebar::Participants) sidebarId = 5;
+		else if (_activeSidebar == ActiveSidebar::Chat) sidebarId = 6;
+		else if (_activeSidebar == ActiveSidebar::Copilot) sidebarId = 8;
+		_bottomBar->setActiveSidebar(sidebarId);
+		if (_activeSidebar == ActiveSidebar::Chat) {
+			_bottomBar->setChatUnreadCount(0);
+		}
 	}
 
 	QResizeEvent ev(size(), size());
 	resizeEvent(&ev);
+	if (_activeSidebar == ActiveSidebar::Copilot && _copilotSidebar) {
+		_copilotSidebar->focusInput();
+	}
+}
+
+void MeetingRoomWindow::openCopilotSettingsDialog() {
+	if (_config.openCopilotSettings) {
+		_config.openCopilotSettings(this);
+	}
 }
 
 void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, const QString &detail) {
@@ -4963,10 +5631,19 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
  const int bottomBarH = _bottomBar->heightForWidth(w);
  _topBar->setGeometry(0, 0, w, topBarH);
 
- QWidget *sidebar = _activeSidebar == ActiveSidebar::Participants
-     ? static_cast<QWidget *>(_participantsSidebar) : static_cast<QWidget *>(_chatSidebar);
+ QWidget *sidebar = nullptr;
+ if (_activeSidebar == ActiveSidebar::Participants) {
+     sidebar = _participantsSidebar;
+ } else if (_activeSidebar == ActiveSidebar::Chat) {
+     sidebar = _chatSidebar;
+ } else if (_activeSidebar == ActiveSidebar::Copilot) {
+     sidebar = _copilotSidebar;
+ }
  const int sidebarW = _activeSidebar != ActiveSidebar::None && sidebar
-     ? std::min(w / 2, std::max(340, sidebar->minimumSizeHint().width())) : 0;
+     ? ((_activeSidebar == ActiveSidebar::Copilot && _copilotExpanded)
+         ? std::min(w * 2 / 3, std::max(440, sidebar->minimumSizeHint().width()))
+         : std::min(w / 2, std::max(340, sidebar->minimumSizeHint().width())))
+     : 0;
 	const int stageW = w - sidebarW;
     const int annotationW = _annotationButton && !_annotationButton->isHidden()
         ? std::max(80, _annotationButton->sizeHint().width()) : 0;
@@ -5026,6 +5703,9 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 		if (_chatSidebar) {
 			_chatSidebar->hide();
 		}
+		if (_copilotSidebar) {
+			_copilotSidebar->hide();
+		}
 	} else if (_activeSidebar == ActiveSidebar::Chat) {
 		if (_chatSidebar) {
 			_chatSidebar->setGeometry(stageW, stageTop, sidebarW, stageH);
@@ -5035,9 +5715,25 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 		if (_participantsSidebar) {
 			_participantsSidebar->hide();
 		}
+		if (_copilotSidebar) {
+			_copilotSidebar->hide();
+		}
+	} else if (_activeSidebar == ActiveSidebar::Copilot) {
+		if (_copilotSidebar) {
+			_copilotSidebar->setGeometry(stageW, stageTop, sidebarW, stageH);
+			_copilotSidebar->show();
+			_copilotSidebar->raise();
+		}
+		if (_participantsSidebar) {
+			_participantsSidebar->hide();
+		}
+		if (_chatSidebar) {
+			_chatSidebar->hide();
+		}
 	} else {
 		if (_participantsSidebar) _participantsSidebar->hide();
 		if (_chatSidebar) _chatSidebar->hide();
+		if (_copilotSidebar) _copilotSidebar->hide();
 	}
 
 	updateVideoLayout();
@@ -5049,7 +5745,7 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const
 }
 
 void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, const QString &name,
-		const OpenMeeting::ParticipantPresentation *presentation) {
+		const OpenMeeting::ParticipantPresentation *presentation, bool relayout) {
 	if (identity.isEmpty()) return;
 	QPointer<MeetingRoomWindow> owner(this);
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
@@ -5059,14 +5755,20 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 	};
 	if (!current()) return;
 
+	const std::optional<OpenMeeting::ParticipantInfo> participantInfo = presentation
+		? std::optional<OpenMeeting::ParticipantInfo>(presentation->participant)
+		: (_coordinator ? _coordinator->participantInfo(identity) : std::nullopt);
+	const QString ownAgentId = _roomAgentPublisher
+		? _roomAgentPublisher->activeAgentIdentity()
+		: QString();
+	if ((participantInfo && participantInfo->isAgent) ||
+		(!ownAgentId.isEmpty() && identity == ownAgentId)) {
+		return;
+	}
+
 	QString dispName = name.isEmpty() ? identity : name;
-	if (!presentation && dispName == identity && _coordinator) {
-		for (const auto &p : _coordinator->participants()) {
-			if (p.identity == identity && !p.name.isEmpty()) {
-				dispName = p.name;
-				break;
-			}
-		}
+	if (!presentation && dispName == identity && participantInfo && !participantInfo->name.isEmpty()) {
+		dispName = participantInfo->name;
 	}
 	_remoteParticipantNames[identity] = dispName;
 
@@ -5082,32 +5784,61 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 						: seat.key.participant.identity) == identity;
 			});
 		if (!hasVisibleCamera) {
+			if (_room) {
+				auto itVol = _remoteVolumes.find(identity);
+				if (itVol != _remoteVolumes.end()) {
+					_room->SetParticipantVolume(identity.toStdString(), itVol->second);
+					if (!current()) return;
+				}
+				if (_locallyMutedUsers.count(identity)) {
+					_room->SetParticipantMuted(identity.toStdString(), true);
+					if (!current()) return;
+				}
+			}
 			_participantCount = 1 + static_cast<int>(_remoteParticipantNames.size());
 			if (_bottomBar) _bottomBar->setParticipantCount(_participantCount);
 			return;
 		}
-		QPointer<VideoTileWidget> tile(new VideoTileWidget(dispName, false, _stageContainer));
-		if (!current()) {
-			if (tile) delete tile.data();
-			return;
+		const bool usingGpuCanvas = !_whiteboardVisible &&
+			_usingGpuBackend.load(std::memory_order_acquire) && _videoCanvas != nullptr;
+		const auto itVol = _remoteVolumes.find(identity);
+		const float savedVolume = itVol != _remoteVolumes.end() ? itVol->second : 1.0f;
+		const bool savedMuted = _locallyMutedUsers.count(identity) > 0;
+		QPointer<VideoTileWidget> tile;
+		if (!_remoteTilePool.empty()) {
+			auto recycled = std::move(_remoteTilePool.back());
+			_remoteTilePool.pop_back();
+			recycled->resetForReuse(dispName, savedVolume, savedMuted);
+			if (_cameraSessionManager) {
+				recycled->setNameDisplayMode(_cameraSessionManager->mediaPreferences().participantNameDisplay);
+			}
+			tile = recycled.get();
+			_remoteTiles[identity] = std::move(recycled);
+		} else {
+			tile = new VideoTileWidget(dispName, false, _stageContainer);
+			if (!current()) {
+				if (tile) delete tile.data();
+				return;
+			}
+			_remoteTiles[identity].reset(tile.data());
+			tile->resetForReuse(dispName, savedVolume, savedMuted);
+			bindTileInteractions(tile.data());
 		}
-		_remoteTiles[identity].reset(tile.data());
+		tile->setHardwareCanvasMode(usingGpuCanvas);
 		tile->setIdentity(identity);
 		tile->setRenderKey(QStringLiteral("remote-camera/") + identity);
 		if (!current() || !tile) return;
 		tile->setVideoActive(false);
 		if (!current() || !tile) return;
 
-		bindTileInteractions(tile.data());
-
-		connect(tile.data(), &VideoTileWidget::remoteVolumeChanged, [this, identity](float volume) {
+		connect(tile.data(), &VideoTileWidget::remoteVolumeChanged, this, [this, identity](float volume) {
 			_remoteVolumes[identity] = volume;
 			if (_room) {
 				_room->SetParticipantVolume(identity.toStdString(), volume);
 			}
 		});
 
-		connect(tile.data(), &VideoTileWidget::remoteLocalMuteToggled, [this, identity](bool muted) {
+		connect(tile.data(), &VideoTileWidget::remoteLocalMuteToggled, this, [this, identity](bool muted) {
 			if (muted) _locallyMutedUsers.insert(identity);
 			else _locallyMutedUsers.erase(identity);
 			if (_room) {
@@ -5115,7 +5846,9 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 			}
 		});
 
-		tile->show();
+		if (!usingGpuCanvas) {
+			tile->show();
+		}
 		if (!current() || !tile) return;
 	} else {
 		if (!dispName.isEmpty() && it->second && it->second->displayName() != dispName) {
@@ -5138,20 +5871,13 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 	}
 
 	if (auto tileIt = _remoteTiles.find(identity);
-		tileIt != _remoteTiles.end() && tileIt->second && _coordinator) {
-		const auto participants = presentation
-			? std::vector<OpenMeeting::ParticipantInfo>{presentation->participant}
-			: _coordinator->participants();
+		tileIt != _remoteTiles.end() && tileIt->second && participantInfo) {
 		QPointer<VideoTileWidget> tile(tileIt->second.get());
-		for (const auto &participant : participants) {
-			if (participant.identity != identity) continue;
-			if (!current() || !tile) return;
-			tile->setAudioMuted(participant.isAudioMuted);
-			if (!current() || !tile) return;
-			tile->setConnectionQuality(participant.connectionQuality);
-			if (!current() || !tile) return;
-			break;
-		}
+		if (!current() || !tile) return;
+		tile->setAudioMuted(participantInfo->isAudioMuted);
+		if (!current() || !tile) return;
+		tile->setConnectionQuality(participantInfo->connectionQuality);
+		if (!current() || !tile) return;
 	}
 
 	_participantCount = 1 + static_cast<int>(_remoteParticipantNames.size());
@@ -5162,7 +5888,7 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 
 	LogToConsole(LogCategory::Participant, "USER_JOIN", QCoreApplication::translate("MeetingUI", "Remote participant joined: %1 (name: %2, participants: %3)").arg(identity).arg(dispName).arg(_participantCount));
 	if (!current()) return;
-	updateVideoLayout();
+	if (relayout) updateVideoLayout();
 }
 
 void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
@@ -5183,8 +5909,12 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 	}
 	auto it = _remoteTiles.find(identity);
 	if (it != _remoteTiles.end()) {
-		it->second->hide();
+		auto retired = std::move(it->second);
 		_remoteTiles.erase(it);
+		if (retired) {
+			retired->setFrame({});
+			recycleRemoteCameraTile(std::move(retired));
+		}
 	}
 
 	if (_pinnedRenderKey == QStringLiteral("remote-camera/") + identity) {
@@ -5549,6 +6279,7 @@ void MeetingRoomWindow::setupVideoPagingControls() {
 			: livekit::VideoLayoutMode::Speaker, _speakerLayout, _videoPageSize, _speakingOnly);
 		_layoutPopup->showAnchored(_topBar->layoutButton());
 	});
+	connect(_topBar, &RoomTopBarWidget::agentMenuRequested, this, &MeetingRoomWindow::showAgentControlMenu);
 	_viewportIntentTimer = new QTimer(this);
 	_viewportIntentTimer->setSingleShot(true);
 	connect(_viewportIntentTimer, &QTimer::timeout,
@@ -5566,6 +6297,115 @@ void MeetingRoomWindow::saveVideoLayoutPreferences() {
 	preferences.setValue(QStringLiteral("meeting/speakingOnly"), _speakingOnly);
 }
 
+void MeetingRoomWindow::setupLiveCaptionBanner() {
+	if (_liveCaptionBanner) {
+		return;
+	}
+	_liveCaptionBanner = new QLabel(this);
+	_liveCaptionBanner->setObjectName(QStringLiteral("MeetingLiveCaptionBanner"));
+	_liveCaptionBanner->setTextFormat(Qt::PlainText);
+	_liveCaptionBanner->setWordWrap(false);
+	_liveCaptionBanner->setAlignment(Qt::AlignCenter);
+	MeetingUI::AppTheme::setStyleVariant(*_liveCaptionBanner, "meeting-room-window-captionbanner");
+	_liveCaptionBanner->hide();
+
+	_liveCaptionFadeTimer = new QTimer(this);
+	_liveCaptionFadeTimer->setSingleShot(true);
+	connect(_liveCaptionFadeTimer, &QTimer::timeout, this, [this] {
+		clearLiveCaption();
+	});
+}
+
+void MeetingRoomWindow::onMeetingTranscriptionReceived(const OpenMeeting::MeetingTranscriptItem &item) {
+	if (!_liveCaptionBanner || _closeRequested) {
+		return;
+	}
+	const auto &preferences = _cameraSessionManager
+		? _cameraSessionManager->mediaPreferences()
+		: OpenMeeting::SessionManager::instance().mediaPreferences();
+	if (!preferences.showLiveCaptions) {
+		clearLiveCaption();
+		return;
+	}
+	const QString trimmedText = item.text.trimmed();
+	const QString trimmedSource = item.sourceText.trimmed();
+	if (trimmedText.isEmpty() && trimmedSource.isEmpty()) {
+		return;
+	}
+	QString speaker = item.speakerName.trimmed();
+	if (speaker.isEmpty()) {
+		speaker = item.speakerIdentity.trimmed();
+	}
+	QString prefix;
+	if (item.isAgentGenerated) {
+		prefix = speaker.isEmpty()
+			? QCoreApplication::translate("MeetingUI", "[AI]")
+			: QCoreApplication::translate("MeetingUI", "[AI] %1").arg(speaker);
+	} else {
+		prefix = speaker;
+	}
+	const bool hasDistinctTranslation = item.isTranslated &&
+		!trimmedSource.isEmpty() &&
+		!trimmedText.isEmpty() &&
+		trimmedSource != trimmedText;
+	_liveCaptionSecondaryText.clear();
+	if (hasDistinctTranslation) {
+		switch (preferences.liveCaptionDisplayMode) {
+		case OpenMeeting::LiveCaptionDisplayMode::Bilingual:
+			_liveCaptionFullText = prefix.isEmpty()
+				? trimmedSource
+				: QStringLiteral("%1: %2").arg(prefix, trimmedSource);
+			_liveCaptionSecondaryText = trimmedText;
+			break;
+		case OpenMeeting::LiveCaptionDisplayMode::OriginalOnly:
+			_liveCaptionFullText = prefix.isEmpty()
+				? trimmedSource
+				: QStringLiteral("%1: %2").arg(prefix, trimmedSource);
+			break;
+		case OpenMeeting::LiveCaptionDisplayMode::TranslatedOnly:
+		default:
+			_liveCaptionFullText = prefix.isEmpty()
+				? trimmedText
+				: QStringLiteral("%1: %2").arg(prefix, trimmedText);
+			break;
+		}
+	} else {
+		const QString display = trimmedText.isEmpty() ? trimmedSource : trimmedText;
+		_liveCaptionFullText = prefix.isEmpty()
+			? display
+			: QStringLiteral("%1: %2").arg(prefix, display);
+	}
+
+	if (_liveCaptionFadeTimer) {
+		_liveCaptionFadeTimer->start(6000);
+	}
+	const QSize previousStageSize = _stageContainer ? _stageContainer->size() : QSize();
+	updateStageGeometry();
+	if (_stageContainer && _stageContainer->size() != previousStageSize) {
+		updateVideoLayout();
+	}
+}
+
+void MeetingRoomWindow::clearLiveCaption() {
+	if (_liveCaptionFadeTimer) {
+		_liveCaptionFadeTimer->stop();
+	}
+	const bool hadCaption = !_liveCaptionFullText.isEmpty() || !_liveCaptionSecondaryText.isEmpty();
+	_liveCaptionFullText.clear();
+	_liveCaptionSecondaryText.clear();
+	if (_liveCaptionBanner) {
+		_liveCaptionBanner->clear();
+		_liveCaptionBanner->hide();
+	}
+	if (hadCaption && !_closeRequested && _stageContainer) {
+		const QSize previousStageSize = _stageContainer->size();
+		updateStageGeometry();
+		if (_stageContainer->size() != previousStageSize && _sessionRunning.load()) {
+			updateVideoLayout();
+		}
+	}
+}
+
 void MeetingRoomWindow::updateStageGeometry() {
 	if (!_stageContainer || !_topBar || !_bottomBar) return;
 	const int stageTop = _topBar->geometry().bottom() + 1
@@ -5575,7 +6415,34 @@ void MeetingRoomWindow::updateStageGeometry() {
 	const bool paging = _videoPagingControls && _logicalWindowVisible && !isMinimized()
 		&& !_whiteboardVisible && _acceptedVideoPlan.page_count > 1;
 	const int pagerHeight = paging ? std::min(kVideoPagerHeight, contentHeight) : 0;
-	_stageContainer->setGeometry(0, stageTop, _stageContainer->width(), contentHeight - pagerHeight);
+	const bool captions = _liveCaptionBanner && !_liveCaptionFullText.isEmpty()
+		&& _logicalWindowVisible && !isMinimized() && !_whiteboardVisible;
+	const bool twoLines = captions && !_liveCaptionSecondaryText.isEmpty();
+	const int captionHeight = captions ? std::min(twoLines ? 54 : 36, std::max(0, contentHeight - pagerHeight)) : 0;
+	_stageContainer->setGeometry(0, stageTop, _stageContainer->width(),
+		std::max(0, contentHeight - pagerHeight - captionHeight));
+	if (_liveCaptionBanner) {
+		const int bannerW = _stageContainer->width();
+		_liveCaptionBanner->setGeometry(0, stageTop + contentHeight - pagerHeight - captionHeight,
+			bannerW, captionHeight);
+		if (captions && captionHeight > 0) {
+			const int maxTextW = std::max(80, bannerW - 32);
+			const auto fm = _liveCaptionBanner->fontMetrics();
+			if (twoLines) {
+				const QString line1 = fm.elidedText(_liveCaptionFullText, Qt::ElideLeft, maxTextW);
+				const QString line2 = fm.elidedText(_liveCaptionSecondaryText, Qt::ElideLeft, maxTextW);
+				_liveCaptionBanner->setText(line1 + QLatin1Char('\n') + line2);
+				_liveCaptionBanner->setAccessibleName(_liveCaptionFullText + QLatin1Char(' ') + _liveCaptionSecondaryText);
+			} else {
+				_liveCaptionBanner->setText(fm.elidedText(_liveCaptionFullText, Qt::ElideLeft, maxTextW));
+				_liveCaptionBanner->setAccessibleName(_liveCaptionFullText);
+			}
+			_liveCaptionBanner->show();
+			_liveCaptionBanner->raise();
+		} else {
+			_liveCaptionBanner->hide();
+		}
+	}
 	if (_videoPagingControls) {
 		_videoPagingControls->setGeometry(0, stageTop + contentHeight - pagerHeight,
 			_stageContainer->width(), pagerHeight);
@@ -6029,9 +6896,11 @@ void MeetingRoomWindow::updateVideoLayout() {
 	} else if (_acceptedVideoPlan.pinned) {
 		pinnedTile = remoteVideoTile(*_acceptedVideoPlan.pinned);
 	}
-	for (auto *tile : allTiles) tile->setPinned(tile == pinnedTile);
-	if (!_usingGpuBackend.load(std::memory_order_acquire)) {
-		for (auto *tile : allTiles) tile->setHardwareCanvasMode(false);
+	const bool usingGpuCanvas = !_whiteboardVisible &&
+		_usingGpuBackend.load(std::memory_order_acquire) && _videoCanvas != nullptr;
+	for (auto *tile : allTiles) {
+		tile->setPinned(tile == pinnedTile);
+		tile->setHardwareCanvasMode(usingGpuCanvas);
 	}
 
 	const int N = static_cast<int>(allTiles.size());
@@ -6047,7 +6916,7 @@ void MeetingRoomWindow::updateVideoLayout() {
  const int bannerW = inviteSize.width();
  const int bannerH = inviteSize.height();
 	_inviteHintBanner->setGeometry((stageW - bannerW) / 2, stageH - bannerH - 12, bannerW, bannerH);
-	_inviteHintBanner->setVisible(!_usingGpuBackend.load(std::memory_order_acquire) && !hasRemote && !localActive);
+	_inviteHintBanner->setVisible(!usingGpuCanvas && !hasRemote && !localActive);
 
 	if (_recoveryBanner && _recoveryBanner->isVisible()) {
   const auto recoverySize = bannerSize(*_recoveryBanner, stageW, 420);
@@ -6082,8 +6951,12 @@ void MeetingRoomWindow::updateVideoLayout() {
 		tile->setGeometry(rect.x, rect.y, rect.width, rect.height);
 		const auto &clip = clips[i];
 		tile->setLayoutClip(QRect(clip.x, clip.y, clip.width, clip.height).translated(-tile->pos()));
-		tile->setVisible(rect.width > 0 && rect.height > 0 && !tile->layoutClipRect().isEmpty());
-		if (!gallery) tile->raise();
+		if (usingGpuCanvas) {
+			if (tile->isVisible()) tile->hide();
+		} else {
+			tile->setVisible(rect.width > 0 && rect.height > 0 && !tile->layoutClipRect().isEmpty());
+			if (!gallery) tile->raise();
+		}
 	}
 	syncVideoCanvasLayout(allTiles);
 }
@@ -6131,7 +7004,7 @@ void MeetingRoomWindow::receiveGpuVideoFrame(const std::string& key, livekit::re
     } else {
         if (!canRenderRemoteVideo(qkey)) return;
         tile = remoteVideoTile(qkey);
-        if (tile && !tile->isVideoActive()) { tile->setVideoActive(true); updateVideoLayout(); }
+        if (tile && !tile->isVideoActive()) { tile->setVideoActive(true); }
     }
     if (tile) _videoCanvas->updateFrame(tile->renderKey().toStdString(), std::move(frame));
 }
@@ -6219,14 +7092,29 @@ void MeetingRoomWindow::applyParticipantPresentation(
 		return owner && coordinator && owner->_coordinator.get() == coordinator &&
 			coordinator->isParticipantPresentationCurrent(presentation, track);
 	};
-	if (presentation.participant.isLocal || !current()) return;
+	const QString ownAgentId = _roomAgentPublisher
+		? _roomAgentPublisher->activeAgentIdentity()
+		: QString();
+	if (presentation.participant.isLocal ||
+		presentation.participant.isAgent ||
+		(!ownAgentId.isEmpty() && presentation.participant.identity == ownAgentId) ||
+		!current()) return;
 	applyRemoteParticipantJoined(presentation.participant.identity,
-		presentation.participant.name, &presentation);
+		presentation.participant.name, &presentation, presentation.videoTracks.empty());
 	if (!current()) return;
+	bool attachedAny = false;
 	for (const auto &track : presentation.videoTracks) {
 		if (!current()) return;
 		if (!current(&track)) continue;
-		owner->attachRemoteVideo(presentation, track);
+		owner->attachRemoteVideo(presentation, track, false, false);
+		attachedAny = true;
+	}
+	if (!current()) return;
+	if (attachedAny) {
+		owner->reconcileRemoteRenderSelection();
+	}
+	if (owner && !presentation.videoTracks.empty()) {
+		owner->updateVideoLayout();
 	}
 }
 
@@ -6234,11 +7122,38 @@ void MeetingRoomWindow::restoreParticipantPresentations() {
 	QPointer<MeetingRoomWindow> owner(this);
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
 	if (!coordinator) return;
+	_lastSyncedVideoTracksRevision = coordinator->remoteVideoTracksRevision();
 	const auto presentations = coordinator->participantPresentations();
+	const QString ownAgentId = owner->_roomAgentPublisher
+		? owner->_roomAgentPublisher->activeAgentIdentity()
+		: QString();
+	bool attachedAny = false;
+	bool joinedAny = false;
 	for (const auto &presentation : presentations) {
 		if (!owner || !coordinator || owner->_coordinator.get() != coordinator ||
 			coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
-		owner->applyParticipantPresentation(presentation);
+		if (presentation.participant.isLocal ||
+			presentation.participant.isAgent ||
+			(!ownAgentId.isEmpty() && presentation.participant.identity == ownAgentId) ||
+			!coordinator->isParticipantPresentationCurrent(presentation)) continue;
+		owner->applyRemoteParticipantJoined(presentation.participant.identity,
+			presentation.participant.name, &presentation, false);
+		joinedAny = true;
+		for (const auto &track : presentation.videoTracks) {
+			if (!owner || !coordinator || owner->_coordinator.get() != coordinator ||
+				coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
+			if (!coordinator->isParticipantPresentationCurrent(presentation, &track)) continue;
+			owner->attachRemoteVideo(presentation, track, false, false);
+			attachedAny = true;
+		}
+	}
+	if (!owner || !coordinator || owner->_coordinator.get() != coordinator ||
+		coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
+	if (attachedAny) {
+		owner->reconcileRemoteRenderSelection();
+	}
+	if (owner && (joinedAny || attachedAny)) {
+		owner->updateVideoLayout();
 	}
 }
 
@@ -6557,9 +7472,21 @@ VideoTileWidget *MeetingRoomWindow::focusedVideoTile() const {
 VideoTileWidget *MeetingRoomWindow::ensureRemoteCameraTile(
 		const QString &identity,
 		const QString &name) {
-	applyRemoteParticipantJoined(identity, name, nullptr);
+	applyRemoteParticipantJoined(identity, name, nullptr, false);
 	const auto found = _remoteTiles.find(identity);
 	return found == _remoteTiles.end() ? nullptr : found->second.get();
+}
+
+void MeetingRoomWindow::recycleRemoteCameraTile(std::unique_ptr<VideoTileWidget> tile) {
+	if (!tile || _closeRequested ||
+		_remoteTilePool.size() >= livekit::kMaximumRemoteVideoTracks) {
+		return;
+	}
+	disconnect(tile.get(), &VideoTileWidget::remoteVolumeChanged, this, nullptr);
+	disconnect(tile.get(), &VideoTileWidget::remoteLocalMuteToggled, this, nullptr);
+	tile->hide();
+	tile->resetForReuse(QString());
+	_remoteTilePool.push_back(std::move(tile));
 }
 
 VideoTileWidget *MeetingRoomWindow::ensureRemoteScreenTile(
@@ -6684,12 +7611,14 @@ void MeetingRoomWindow::syncVisibleRemoteTiles() {
 			++it;
 			continue;
 		}
-		if (it->second) {
-			if (_videoCanvas) _videoCanvas->removeUser(
-				it->second->renderKey().toStdString());
-			it->second->setFrame({});
-		}
+		auto retired = std::move(it->second);
 		it = _remoteTiles.erase(it);
+		if (retired) {
+			if (_videoCanvas) _videoCanvas->removeUser(
+				retired->renderKey().toStdString());
+			retired->setFrame({});
+			recycleRemoteCameraTile(std::move(retired));
+		}
 	}
 	for (auto it = _remoteScreenTiles.begin(); it != _remoteScreenTiles.end();) {
 		if (screenSids.count(it->first)) {
@@ -6816,24 +7745,29 @@ void MeetingRoomWindow::refreshRemoteVideoPresentations() {
 	QPointer<MeetingRoomWindow> owner(this);
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
 	if (!coordinator) return;
+	_lastSyncedVideoTracksRevision = coordinator->remoteVideoTracksRevision();
 	const auto presentations = coordinator->participantPresentations();
+	bool needsRelayout = false;
 	for (const auto &presentation : presentations) {
 		for (const auto &video : presentation.videoTracks) {
 			if (!owner || !coordinator || owner->_coordinator.get() != coordinator) return;
-			owner->attachRemoteVideo(presentation, video, false);
+			needsRelayout = owner->attachRemoteVideo(presentation, video, false, false) || needsRelayout;
 		}
 	}
 	// All presentations share one accepted plan. Publish its final selection
 	// once, rather than a telemetry snapshot for every replayed track.
 	if (owner && coordinator && owner->_coordinator.get() == coordinator) {
 		owner->reconcileRemoteRenderSelection();
+		if (owner && needsRelayout) {
+			owner->updateVideoLayout();
+		}
 	}
 }
 
-void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
-		const OpenMeeting::RemoteVideoTrackPresentation &value, bool reconcile) {
+bool MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
+		const OpenMeeting::RemoteVideoTrackPresentation &value, bool reconcile, bool relayout) {
 	if (!_remoteRenderSession || !_coordinator ||
-		!_coordinator->isParticipantPresentationCurrent(presentation, &value)) return;
+		!_coordinator->isParticipantPresentationCurrent(presentation, &value)) return false;
 	const auto &identity = presentation.participant.identity;
 	const auto sid = QString::fromStdString(value.key.publication_sid);
 	const bool screen = value.track->source() == livekit::TrackSource::ScreenShareVideo;
@@ -6845,7 +7779,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 	};
 	if (const auto old = _remoteVideoBindings.find(sid);
 		old != _remoteVideoBindings.end() && old->second.screen != screen) removeRemoteVideo(sid, reconcile);
-	if (!current()) return;
+	if (!current()) return false;
 	const auto old = _remoteVideoBindings.find(sid);
 	const bool resetFrame = old == _remoteVideoBindings.end() ||
 		old->second.identity != identity || old->second.track.lock() != value.track ||
@@ -6854,6 +7788,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 	_remoteVideoBindings[sid] = {identity, screen, value.track,
 		value.key, value.ticket, value.mediaBindingKey, value.mediaBindingTicket,
 		value.muted, value.paused};
+	bool screenTileCreated = false;
 	if (screen && isTrackVisible(value.key) && !_remoteScreenTiles.count(sid)) {
 		const auto seat = std::find_if(
 			_acceptedVideoPlan.visible_seats.begin(),
@@ -6861,9 +7796,10 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 			[&](const auto &candidate) { return candidate.key == value.key; });
 		if (seat != _acceptedVideoPlan.visible_seats.end()) {
 			ensureRemoteScreenTile(*seat, presentation.participant.name);
+			screenTileCreated = true;
 		}
 	}
-	if (!current()) return;
+	if (!current()) return false;
 	QPointer<VideoTileWidget> tile(remoteVideoTile(sid));
 	if (resetFrame) {
 		// Revoke the render subscription before clearing either backend. This also
@@ -6883,10 +7819,12 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 		tile->setConnectionQuality(presentation.participant.connectionQuality);
 		if (screen) tile->setDisplayName(QCoreApplication::translate("MeetingUI", "%1 · Screen Share").arg(presentation.participant.name));
 	}
-	if (!current()) return;
+	if (!current()) return false;
+	const bool needsRelayout = resetFrame || screenTileCreated;
 	if (reconcile) reconcileRemoteRenderSelection();
-	if (resetFrame) updateVideoLayout();
+	if (relayout && needsRelayout) updateVideoLayout();
 	if (_remoteControlUi) _remoteControlUi->refreshTargets();
+	return needsRelayout;
 }
 
 void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid, bool reconcile) {
@@ -7322,14 +8260,17 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackAvailable,
 	        this, [this](const QString &id, std::shared_ptr<livekit::Track> track) {
 			if (!_coordinator) return;
-			for (const auto &presentation : _coordinator->participantPresentations()) {
-				if (presentation.participant.identity != id) continue;
-				for (const auto &value : presentation.videoTracks) {
-					if (value.track != track ||
-						!_coordinator->isParticipantPresentationCurrent(presentation, &value)) continue;
-					attachRemoteVideo(presentation, value);
-					return;
-				}
+			const auto presentation = _coordinator->participantPresentation(id);
+			if (!presentation) return;
+			for (const auto &value : presentation->videoTracks) {
+				if (value.track != track ||
+					!_coordinator->isParticipantPresentationCurrent(*presentation, &value)) continue;
+				const bool isScreen = track && track->source() == livekit::TrackSource::ScreenShareVideo;
+				const bool cameraTileAlreadyPlaced = !isScreen &&
+					_usingGpuBackend.load(std::memory_order_acquire) &&
+					_remoteTiles.find(id) != _remoteTiles.end();
+				attachRemoteVideo(*presentation, value, true, !cameraTileAlreadyPlaced);
+				return;
 			}
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::videoDemandPlanAccepted,
@@ -7339,10 +8280,8 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantJoined,
 	        this, [this](const QString &id, const QString &) {
 		if (!_coordinator) return;
-		for (const auto &presentation : _coordinator->participantPresentations()) {
-			if (presentation.participant.identity != id) continue;
-			applyParticipantPresentation(presentation);
-			return;
+		if (const auto presentation = _coordinator->participantPresentation(id)) {
+			applyParticipantPresentation(*presentation);
 		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantLeft,
@@ -7353,6 +8292,8 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::activeSpeakersChanged,
 	        this, &MeetingRoomWindow::updateActiveSpeakers);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::transcriptionReceived,
+	        this, &MeetingRoomWindow::onMeetingTranscriptionReceived);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingDetailUpdated,
 	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::roomInfoUpdated,
@@ -7368,9 +8309,49 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantsUpdated,
 	        this, [this](const std::vector<OpenMeeting::ParticipantInfo> &list) {
-		_participantCount = static_cast<int>(list.size());
-		_bottomBar->setParticipantCount(_participantCount);
+		const QString ownAgentId = _roomAgentPublisher
+			? _roomAgentPublisher->activeAgentIdentity()
+			: QString();
+		int agentCount = 0;
+		int visibleParticipantCount = 0;
+		std::vector<QString> staleAgentIdentities;
+		QString primaryAgentName;
+		QString bestAgentState;
+		int bestAgentPriority = -1;
+		const auto agentStatePriority = [](const QString &state) -> int {
+			const QString lower = state.trimmed().toLower();
+			if (lower == QStringLiteral("speaking")) return 4;
+			if (lower == QStringLiteral("thinking")) return 3;
+			if (lower == QStringLiteral("listening")) return 2;
+			if (lower == QStringLiteral("initializing")) return 1;
+			return 0;
+		};
 		for (const auto &p : list) {
+			const bool hiddenAgent = p.isAgent ||
+				(!ownAgentId.isEmpty() && p.identity == ownAgentId);
+			if (hiddenAgent) {
+				if (ownAgentId.isEmpty() || p.identity != ownAgentId) {
+					++agentCount;
+					const QString display = p.name.trimmed().isEmpty() ? p.identity : p.name.trimmed();
+					if (primaryAgentName.isEmpty()) {
+						primaryAgentName = display;
+					}
+					const int prio = agentStatePriority(p.agentState);
+					if (prio > bestAgentPriority) {
+						bestAgentPriority = prio;
+						bestAgentState = p.agentState;
+						if (!display.isEmpty()) {
+							primaryAgentName = display;
+						}
+					}
+				}
+				_remoteParticipantNames.erase(p.identity);
+				if (_remoteTiles.count(p.identity) > 0) {
+					staleAgentIdentities.push_back(p.identity);
+				}
+				continue;
+			}
+			++visibleParticipantCount;
 			if (p.isLocal) {
 				if (_localTile) {
 					_localTile->setConnectionQuality(p.connectionQuality);
@@ -7388,7 +8369,19 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 				it->second->setConnectionQuality(p.connectionQuality);
 			}
 		}
-		refreshRemoteVideoPresentations();
+		for (const auto &agentId : staleAgentIdentities) {
+			onRemoteParticipantLeft(agentId);
+		}
+		_participantCount = visibleParticipantCount;
+		_bottomBar->setParticipantCount(_participantCount);
+		_hasRemoteRoomAgent = (agentCount > 0);
+		_remoteRoomAgentName = primaryAgentName;
+		_remoteRoomAgentState = bestAgentState;
+		_remoteRoomAgentCount = agentCount;
+		refreshTopBarAgentStatus();
+		if (_coordinator && _coordinator->remoteVideoTracksRevision() != _lastSyncedVideoTracksRevision) {
+			refreshRemoteVideoPresentations();
+		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::trackSubscriptionPermissionChanged,
 	        this, [this](const QString &identity, const QString &participantSid,
@@ -7443,20 +8436,34 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		if (state == OpenMeeting::MeetingState::InMeeting) {
 			_room = _coordinator->room();
 			const auto preferences = OpenMeeting::SessionManager::instance().mediaPreferences();
-#ifdef Q_OS_LINUX
+			// Apply stored join preferences only once; subsequent Reconnecting -> InMeeting
+			// transitions (both SignalReconnect and FullReconnect) must preserve the user's
+			// in-meeting speaker mute state.
+			if (!_speakerStateInitialized) {
+				_speakerRequestedMuted = !preferences.enableSpeaker;
+				_speakerStateInitialized = true;
+			}
+			const bool muted = _speakerRequestedMuted;
 			if (_speakerConfiguredRoom.lock() != _room) {
 				_speakerConfiguredRoom = _room;
+#ifdef Q_OS_LINUX
 				requestSpeakerDevice(preferences.speakerDeviceId, true);
-				setSpeakerOutputMuted(!preferences.enableSpeaker);
-			}
 #else
-			if (!selectSpeakerDevice(preferences.speakerDeviceId)
-				&& !preferences.speakerDeviceId.isEmpty()) {
-				selectSpeakerDevice(QString());
-			}
-			setSpeakerOutputMuted(!preferences.enableSpeaker);
+				if (!selectSpeakerDevice(preferences.speakerDeviceId)
+					&& !preferences.speakerDeviceId.isEmpty()) {
+					selectSpeakerDevice(QString());
+				}
 #endif
+				setSpeakerOutputMuted(muted);
+			} else {
+#ifdef Q_OS_LINUX
+				if (!_speakerDevicePending) applyEffectiveSpeakerMute();
+#else
+				applyEffectiveSpeakerMute();
+#endif
+			}
 			restoreParticipantPresentations();
+			maybeAutoStartMeetingTranslation();
 		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::errorOccurred,
@@ -7521,7 +8528,10 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 
 void MeetingRoomWindow::showDepartureNotice(const QString &title, const QString &message,
 		QMessageBox::Icon icon) {
-	if (_departureNotice) return;
+	if (_departureNotice || _closeRequested || _closingForSessionInvalidation ||
+		OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+		return;
+	}
 	// A screen-sized TOPMOST annotation surface can otherwise remain above the
 	// meeting-owned dialog during the short kick/leave transition.
 	closeAnnotationOverlay();
@@ -7548,6 +8558,16 @@ void MeetingRoomWindow::showDepartureNotice(const QString &title, const QString 
 	notice->show();
 	notice->raise();
 	notice->activateWindow();
+}
+
+void MeetingRoomWindow::dismissDepartureNotice() {
+	_pendingDepartureTitle.clear();
+	_pendingDepartureMessage.clear();
+	if (!_departureNotice) return;
+	auto *notice = _departureNotice.data();
+	_departureNotice.clear();
+	QObject::disconnect(notice, nullptr, this, nullptr);
+	notice->close();
 }
 
 void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
@@ -7588,6 +8608,7 @@ void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
 
 void MeetingRoomWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {
 	invalidateCameraCompletion();
+	dismissDepartureNotice();
 	if (_closingForSessionInvalidation) {
 		return;
 	}
@@ -7814,6 +8835,9 @@ void MeetingRoomWindow::bindLocalMediaSources() {
 	if (!_localAudioSource) {
 		_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
 	}
+	if (_meetingTranslator) {
+		_meetingTranslator->setLocalAudioSource(_localAudioSource);
+	}
 	if (!_localVideoSource) {
 		_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 	}
@@ -7903,12 +8927,23 @@ void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	if (_remoteRenderTimer) _remoteRenderTimer->stop();
 	if (_localGenTimer) _localGenTimer->stop();
 	if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+	if (_roomAgentPublisher) _roomAgentPublisher->disableAgentRole();
+	if (_meetingTranslator) _meetingTranslator->stop();
+	_hasRemoteRoomAgent = false;
+	_remoteRoomAgentName.clear();
+	_remoteRoomAgentState.clear();
+	_remoteRoomAgentCount = 0;
+	_autoTranslationEvaluated = false;
+	_e2eeAgentBroadcastAuthorized = false;
+	refreshTopBarAgentStatus();
+	clearLiveCaption();
 	_usingGpuBackend.store(false, std::memory_order_release);
 	if (_mediaPreparationErrorTimer) _mediaPreparationErrorTimer->stop();
 	if (_videoCanvas) {
 		_videoCanvas->shutdownRenderer();
 		_videoCanvas->hide();
 	}
+	_remoteTilePool.clear();
 
 	if (_wasapiCap) {
 #ifdef Q_OS_WIN
@@ -8077,6 +9112,454 @@ bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, 
 	}
 #endif
 	return Ui::RpWidget::nativeEvent(eventType, message, result);
+}
+
+void MeetingRoomWindow::setupMeetingTranslationServices() {
+	if (!_meetingTranslator) {
+		_meetingTranslator = new OpenMeeting::MeetingTranslatorService(
+			_agentCoordinator.get(), _coordinator.get(), nullptr, nullptr, this);
+	}
+	if (!_roomAgentPublisher) {
+		_roomAgentPublisher = new OpenMeeting::RoomAgentPublisher(
+			_coordinator.get(), &OpenMeeting::OpenMeetingHttpClient::instance(), {}, this);
+	}
+	connect(_meetingTranslator, &OpenMeeting::MeetingTranslatorService::stateChanged,
+		this, [this](OpenMeeting::MeetingTranslatorState) {
+			refreshTopBarAgentStatus();
+		});
+	connect(_meetingTranslator, &OpenMeeting::MeetingTranslatorService::activityChanged,
+		this, [this](bool busy) {
+			if (_roomAgentPublisher && _roomAgentPublisher->isActive()) {
+				_roomAgentPublisher->setAgentActivityState(
+					busy ? QStringLiteral("thinking") : QStringLiteral("listening"));
+			}
+			refreshTopBarAgentStatus();
+		});
+	connect(_meetingTranslator, &OpenMeeting::MeetingTranslatorService::transcriptProduced,
+		this, [this](const OpenMeeting::MeetingTranscriptItem &item) {
+			if (_roomAgentPublisher && _roomAgentPublisher->isActive()) {
+				_roomAgentPublisher->publishTranscript(item);
+			}
+		});
+	connect(_meetingTranslator, &OpenMeeting::MeetingTranslatorService::errorOccurred,
+		this, [this](const QString &safeError) {
+			LogToConsole(LogCategory::Error, "TRANSLATOR", safeError);
+			if (_meetingTranslator && _meetingTranslator->state() == OpenMeeting::MeetingTranslatorState::Error) {
+				if (_roomAgentPublisher) {
+					_roomAgentPublisher->disableAgentRole();
+				}
+				ShowMeetingWarning(this, "meetingTranslatorError", "meetingTranslatorErrorDismiss",
+					QCoreApplication::translate("MeetingUI", "Live Translation"), safeError);
+			}
+		});
+
+	connect(_roomAgentPublisher, &OpenMeeting::RoomAgentPublisher::stateChanged,
+		this, [this](OpenMeeting::RoomAgentRoleState) {
+			refreshTopBarAgentStatus();
+		});
+	connect(_roomAgentPublisher, &OpenMeeting::RoomAgentPublisher::conflictDetected,
+		this, [this](const OpenMeeting::ExistingRoomAgentInfo &existing) {
+			const QString holder = !existing.name.trimmed().isEmpty()
+				? existing.name.trimmed()
+				: existing.identity;
+			if (isCurrentUserMeetingHost()) {
+				auto *box = new QMessageBox(
+					QMessageBox::Question,
+					QCoreApplication::translate("MeetingUI", "Room Agent Already Online"),
+					QCoreApplication::translate(
+						"MeetingUI",
+						"This meeting room already has an active Agent (%1).\n\n"
+						"As the host, would you like to take over and replace it with your client?")
+						.arg(holder.isEmpty() ? QCoreApplication::translate("MeetingUI", "Unknown") : holder),
+					QMessageBox::Yes | QMessageBox::No,
+					this);
+				box->setAttribute(Qt::WA_DeleteOnClose);
+				AppTheme::setTone(*box, AppTheme::Tone::Dark);
+				connect(box, &QMessageBox::finished, this, [this](int result) {
+					if (result == QMessageBox::Yes) {
+						enableRoomAgentRoleInteractive(true);
+					} else if (_roomAgentPublisher) {
+						_roomAgentPublisher->disableAgentRole();
+					}
+				});
+				box->open();
+			} else {
+				ShowMeetingWarning(this, "meetingAgentConflict", "meetingAgentConflictDismiss",
+					QCoreApplication::translate("MeetingUI", "Room Agent Already Online"),
+					QCoreApplication::translate(
+						"MeetingUI",
+						"This meeting room already has an active Agent (%1). "
+						"Your client will stay in local-only translation mode.")
+						.arg(holder.isEmpty() ? QCoreApplication::translate("MeetingUI", "Unknown") : holder));
+			}
+		});
+	connect(_roomAgentPublisher, &OpenMeeting::RoomAgentPublisher::takeoverRemoved,
+		this, [this](const QString &reason) {
+			LogToConsole(LogCategory::Connection, "AGENT_ROLE", reason);
+			ShowMeetingWarning(this, "meetingAgentTakeover", "meetingAgentTakeoverDismiss",
+				QCoreApplication::translate("MeetingUI", "Room Agent Role Released"), reason);
+		});
+	connect(_roomAgentPublisher, &OpenMeeting::RoomAgentPublisher::errorOccurred,
+		this, [this](const QString &safeError) {
+			LogToConsole(LogCategory::Error, "AGENT_ROLE", safeError);
+			ShowMeetingWarning(this, "meetingAgentError", "meetingAgentErrorDismiss",
+				QCoreApplication::translate("MeetingUI", "Room Agent"), safeError);
+		});
+}
+
+bool MeetingRoomWindow::isCurrentUserMeetingHost() const {
+	if (!_coordinator) return false;
+	const QString myId = OpenMeeting::SessionManager::instance().userId();
+	if (myId.isEmpty()) return false;
+	const auto &detail = _coordinator->meetingDetail();
+	return detail.effectiveHostUserId() == myId || detail.creatorUserId == myId;
+}
+
+void MeetingRoomWindow::refreshTopBarAgentStatus() {
+	if (!_topBar) return;
+	const bool localTranslatorActive = _meetingTranslator && _meetingTranslator->isRunning();
+	const bool localAgentActive = _roomAgentPublisher && _roomAgentPublisher->isActive();
+	const bool localAgentStarting = _roomAgentPublisher &&
+		(_roomAgentPublisher->state() == OpenMeeting::RoomAgentRoleState::RequestingToken ||
+		 _roomAgentPublisher->state() == OpenMeeting::RoomAgentRoleState::Connecting ||
+		 _roomAgentPublisher->state() == OpenMeeting::RoomAgentRoleState::Reconnecting);
+
+	if (localAgentActive || localAgentStarting) {
+		const QString stateStr = localAgentStarting
+			? QStringLiteral("initializing")
+			: ((_meetingTranslator && _meetingTranslator->isBusy())
+				? QStringLiteral("thinking")
+				: QStringLiteral("listening"));
+		_topBar->setAgentStatus(
+			true,
+			stateStr,
+			_config.displayName,
+			1 + _remoteRoomAgentCount,
+			localTranslatorActive,
+			true);
+		return;
+	}
+	_topBar->setAgentStatus(
+		_hasRemoteRoomAgent,
+		_remoteRoomAgentState,
+		_remoteRoomAgentName,
+		_remoteRoomAgentCount,
+		localTranslatorActive,
+		false);
+}
+
+void MeetingRoomWindow::maybeAutoStartMeetingTranslation() {
+	if (_autoTranslationEvaluated || !_coordinator ||
+		_coordinator->state() != OpenMeeting::MeetingState::InMeeting) {
+		return;
+	}
+	_autoTranslationEvaluated = true;
+	const auto &prefs = _cameraSessionManager
+		? _cameraSessionManager->mediaPreferences()
+		: OpenMeeting::SessionManager::instance().mediaPreferences();
+	if (!prefs.enableLocalMeetingTranslation) {
+		return;
+	}
+	if (prefs.preferRoomAgentTranscript && _hasRemoteRoomAgent) {
+		return;
+	}
+	// Never silently exfiltrate decrypted audio in an E2EE meeting without explicit user action.
+	if (_coordinator->requiresEncryption() &&
+		(!_agentCoordinator || !_agentCoordinator->isE2eeContextAuthorized())) {
+		return;
+	}
+	if (!startLocalMeetingTranslation(false)) {
+		return;
+	}
+	// E2EE rooms always require explicit interactive confirmation before broadcasting plaintext captions.
+	if (prefs.meetingTranslationRoleMode == OpenMeeting::MeetingTranslationRoleMode::RoomAgentIfAvailable &&
+		!_hasRemoteRoomAgent &&
+		!_coordinator->requiresEncryption()) {
+		enableRoomAgentRoleInteractive(false);
+	}
+}
+
+bool MeetingRoomWindow::startLocalMeetingTranslation(bool interactive) {
+	if (!_meetingTranslator || !_coordinator ||
+		_coordinator->state() != OpenMeeting::MeetingState::InMeeting) {
+		return false;
+	}
+	if (_coordinator->requiresEncryption() && _agentCoordinator &&
+		!_agentCoordinator->isE2eeContextAuthorized()) {
+		if (!interactive) {
+			return false;
+		}
+		auto *box = new QMessageBox(
+			QMessageBox::Warning,
+			QCoreApplication::translate("MeetingUI", "Encrypted Meeting Audio Notice"),
+			QCoreApplication::translate(
+				"MeetingUI",
+				"This meeting uses end-to-end encryption (E2EE). Starting local translation will send "
+				"decrypted speech segments to your configured Speech-to-Text / Copilot API endpoint.\n\n"
+				"Continue enabling local translation for this meeting?"),
+			QMessageBox::Yes | QMessageBox::No,
+			this);
+		box->setAttribute(Qt::WA_DeleteOnClose);
+		AppTheme::setTone(*box, AppTheme::Tone::Dark);
+		if (box->exec() != QMessageBox::Yes) {
+			return false;
+		}
+		_agentCoordinator->authorizeE2eeContextForCurrentMeeting(true);
+	}
+
+	if (_localAudioSource) {
+		_meetingTranslator->setLocalAudioSource(_localAudioSource);
+	}
+	const auto &prefs = _cameraSessionManager
+		? _cameraSessionManager->mediaPreferences()
+		: OpenMeeting::SessionManager::instance().mediaPreferences();
+	OpenMeeting::MeetingTranslatorConfig cfg;
+	cfg.translateEnabled = prefs.enableTranslationOutput;
+	cfg.targetLanguage = prefs.translationTargetLanguage;
+	cfg.translationProfileId = prefs.translationProfileId;
+	cfg.translationModelOverride = prefs.translationModelOverride;
+	cfg.translationSystemPrompt = prefs.translationSystemPrompt;
+	cfg.includeLocalMic = prefs.translateLocalMicrophone;
+	cfg.maxConcurrentStreamingAsr = prefs.maxConcurrentStreamingAsr;
+	cfg.streamingIdleReleaseMs = prefs.streamingIdleReleaseMs;
+	const bool ok = _meetingTranslator->start(cfg);
+	if (!ok && interactive) {
+		ShowMeetingWarning(this, "meetingTranslatorStartFail", "meetingTranslatorStartFailDismiss",
+			QCoreApplication::translate("MeetingUI", "Live Translation"),
+			_meetingTranslator->lastError());
+	}
+	refreshTopBarAgentStatus();
+	return ok;
+}
+
+void MeetingRoomWindow::stopLocalMeetingTranslation() {
+	if (_roomAgentPublisher && _roomAgentPublisher->isBusyOrActive()) {
+		_roomAgentPublisher->disableAgentRole();
+	}
+	if (_meetingTranslator) {
+		_meetingTranslator->stop();
+	}
+	refreshTopBarAgentStatus();
+}
+
+void MeetingRoomWindow::enableRoomAgentRoleInteractive(bool forceTakeover) {
+	if (!_roomAgentPublisher || !_coordinator ||
+		_coordinator->state() != OpenMeeting::MeetingState::InMeeting) {
+		return;
+	}
+	if (_coordinator->requiresEncryption() && !_e2eeAgentBroadcastAuthorized) {
+		QMessageBox box(
+			QMessageBox::Warning,
+			QCoreApplication::translate("MeetingUI", "Confirm Plaintext Caption Broadcast (E2EE)"),
+			QCoreApplication::translate(
+				"MeetingUI",
+				"This meeting is end-to-end encrypted (E2EE). Acting as the room Agent will broadcast "
+				"recognized and translated captions in plaintext via LiveKit lk.transcription to all "
+				"participants in this room.\n\n"
+				"Do you confirm broadcasting captions to the room?"),
+			QMessageBox::Yes | QMessageBox::No,
+			this);
+		AppTheme::setTone(box, AppTheme::Tone::Dark);
+		if (box.exec() != QMessageBox::Yes) {
+			return;
+		}
+		_e2eeAgentBroadcastAuthorized = true;
+	}
+
+	if (!_meetingTranslator || !_meetingTranslator->isRunning()) {
+		if (!startLocalMeetingTranslation(true)) {
+			return;
+		}
+	}
+
+	const auto &prefs = _cameraSessionManager
+		? _cameraSessionManager->mediaPreferences()
+		: OpenMeeting::SessionManager::instance().mediaPreferences();
+	OpenMeeting::RoomAgentRoleConfig roleCfg;
+	roleCfg.meetingId = _coordinator->currentMeetingId();
+	roleCfg.role = prefs.enableTranslationOutput
+		? QStringLiteral("translator")
+		: QStringLiteral("transcriber");
+	roleCfg.displayName = QCoreApplication::translate("MeetingUI", "AI Agent (%1)")
+		.arg(_config.displayName.trimmed().isEmpty()
+			? OpenMeeting::SessionManager::instance().userId()
+			: _config.displayName.trimmed());
+	roleCfg.sourceLanguage = (_agentCoordinator && !_agentCoordinator->dictationLanguage().trimmed().isEmpty())
+		? _agentCoordinator->dictationLanguage().trimmed()
+		: QStringLiteral("auto");
+	roleCfg.targetLanguage = prefs.enableTranslationOutput
+		? prefs.translationTargetLanguage
+		: QString();
+	roleCfg.allowInsecureTransport = OpenMeeting::isDebugHttpTransportEnabled();
+
+	_roomAgentPublisher->enableAgentRole(roleCfg, forceTakeover);
+	refreshTopBarAgentStatus();
+}
+
+void MeetingRoomWindow::disableRoomAgentRole() {
+	if (_roomAgentPublisher) {
+		_roomAgentPublisher->disableAgentRole();
+	}
+	refreshTopBarAgentStatus();
+}
+
+void MeetingRoomWindow::showAgentControlMenu(const QPoint &globalPos) {
+	QMenu menu(this);
+	AppTheme::styleMenu(
+		menu,
+		AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+			? AppTheme::Tone::Dark
+			: AppTheme::Tone::Light);
+
+	const bool inMeeting = _coordinator &&
+		_coordinator->state() == OpenMeeting::MeetingState::InMeeting;
+	const bool localRunning = _meetingTranslator && _meetingTranslator->isRunning();
+	const bool localAgentActive = _roomAgentPublisher && _roomAgentPublisher->isBusyOrActive();
+
+	QString statusLine;
+	if (localAgentActive) {
+		statusLine = QCoreApplication::translate("MeetingUI", "Room Agent: Active (This Device)");
+	} else if (_hasRemoteRoomAgent) {
+		statusLine = QCoreApplication::translate("MeetingUI", "Room Agent: Online (%1)")
+			.arg(_remoteRoomAgentName.isEmpty()
+				? QCoreApplication::translate("MeetingUI", "Remote")
+				: _remoteRoomAgentName);
+	} else {
+		statusLine = QCoreApplication::translate("MeetingUI", "Room Agent: Offline");
+	}
+	QAction *header = menu.addAction(statusLine);
+	header->setEnabled(false);
+	menu.addSeparator();
+
+	// 1. Toggle local meeting translation on/off anytime
+	QAction *toggleTranslatorAct = menu.addAction(
+		localRunning
+			? QCoreApplication::translate("MeetingUI", "Stop Live Translation")
+			: QCoreApplication::translate("MeetingUI", "Start Live Translation (Local)"));
+	toggleTranslatorAct->setEnabled(inMeeting);
+	connect(toggleTranslatorAct, &QAction::triggered, this, [this, localRunning] {
+		if (localRunning) {
+			stopLocalMeetingTranslation();
+		} else {
+			startLocalMeetingTranslation(true);
+		}
+	});
+
+	// 2. Claim / release room Agent role anytime
+	if (localAgentActive) {
+		QAction *releaseAgentAct = menu.addAction(
+			QCoreApplication::translate("MeetingUI", "Release Room Agent Role (Keep Local Only)"));
+		connect(releaseAgentAct, &QAction::triggered, this, [this] {
+			disableRoomAgentRole();
+		});
+	} else if (_hasRemoteRoomAgent) {
+		if (isCurrentUserMeetingHost()) {
+			QAction *takeoverAct = menu.addAction(
+				QCoreApplication::translate("MeetingUI", "Take Over as Room Agent (Host)"));
+			takeoverAct->setEnabled(inMeeting);
+			connect(takeoverAct, &QAction::triggered, this, [this] {
+				QMessageBox box(
+					QMessageBox::Question,
+					QCoreApplication::translate("MeetingUI", "Take Over Room Agent"),
+					QCoreApplication::translate(
+						"MeetingUI",
+						"Disconnect the current room Agent (%1) and broadcast captions from this device instead?")
+						.arg(_remoteRoomAgentName.isEmpty()
+							? QCoreApplication::translate("MeetingUI", "Remote")
+							: _remoteRoomAgentName),
+					QMessageBox::Yes | QMessageBox::No,
+					this);
+				AppTheme::setTone(box, AppTheme::Tone::Dark);
+				if (box.exec() == QMessageBox::Yes) {
+					enableRoomAgentRoleInteractive(true);
+				}
+			});
+		} else {
+			QAction *occupiedAct = menu.addAction(
+				QCoreApplication::translate("MeetingUI", "Room Agent Occupied (Host Can Take Over)"));
+			occupiedAct->setEnabled(false);
+		}
+	} else {
+		QAction *claimAgentAct = menu.addAction(
+			QCoreApplication::translate("MeetingUI", "Act as Room Agent (Broadcast Captions)"));
+		claimAgentAct->setEnabled(inMeeting);
+		connect(claimAgentAct, &QAction::triggered, this, [this] {
+			enableRoomAgentRoleInteractive(false);
+		});
+	}
+
+	menu.addSeparator();
+
+	// 3. Target language quick submenu
+	auto &session = _cameraSessionManager ? *_cameraSessionManager : OpenMeeting::SessionManager::instance();
+	const auto prefs = session.mediaPreferences();
+
+	QMenu *langMenu = menu.addMenu(QCoreApplication::translate("MeetingUI", "Translation Target"));
+	AppTheme::styleMenu(
+		*langMenu,
+		AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+			? AppTheme::Tone::Dark
+			: AppTheme::Tone::Light);
+	struct LangChoice {
+		QString label;
+		QString code;
+		bool enableTranslate;
+	};
+	const std::vector<LangChoice> choices = {
+		{ QCoreApplication::translate("MeetingUI", "Original Only (No Translation)"), QString(), false },
+		{ QCoreApplication::translate("MeetingUI", "Chinese (zh)"), QStringLiteral("zh"), true },
+		{ QCoreApplication::translate("MeetingUI", "English (en)"), QStringLiteral("en"), true },
+		{ QCoreApplication::translate("MeetingUI", "Japanese (ja)"), QStringLiteral("ja"), true },
+		{ QCoreApplication::translate("MeetingUI", "Korean (ko)"), QStringLiteral("ko"), true },
+		{ QCoreApplication::translate("MeetingUI", "French (fr)"), QStringLiteral("fr"), true },
+		{ QCoreApplication::translate("MeetingUI", "German (de)"), QStringLiteral("de"), true },
+		{ QCoreApplication::translate("MeetingUI", "Spanish (es)"), QStringLiteral("es"), true },
+	};
+	bool matchedPreset = false;
+	for (const auto &choice : choices) {
+		QAction *a = langMenu->addAction(choice.label);
+		a->setCheckable(true);
+		const bool checked = (!choice.enableTranslate && !prefs.enableTranslationOutput) ||
+			(choice.enableTranslate && prefs.enableTranslationOutput &&
+			 prefs.translationTargetLanguage.compare(choice.code, Qt::CaseInsensitive) == 0);
+		if (choice.enableTranslate && checked) {
+			matchedPreset = true;
+		}
+		a->setChecked(checked);
+		connect(a, &QAction::triggered, this, [this, &session, choice] {
+			auto updated = session.mediaPreferences();
+			updated.enableTranslationOutput = choice.enableTranslate;
+			if (choice.enableTranslate && !choice.code.isEmpty()) {
+				updated.translationTargetLanguage = choice.code;
+			}
+			session.setMediaPreferences(updated);
+		});
+	}
+	if (prefs.enableTranslationOutput && !prefs.translationTargetLanguage.trimmed().isEmpty() && !matchedPreset) {
+		const QString customLang = prefs.translationTargetLanguage.trimmed();
+		QAction *customAct = langMenu->addAction(
+			QCoreApplication::translate("MeetingUI", "Custom (%1)").arg(customLang));
+		customAct->setCheckable(true);
+		customAct->setChecked(true);
+	}
+
+	// 4. Quick toggle for showing live captions
+	QAction *captionToggleAct = menu.addAction(QCoreApplication::translate("MeetingUI", "Show live captions"));
+	captionToggleAct->setCheckable(true);
+	captionToggleAct->setChecked(prefs.showLiveCaptions);
+	connect(captionToggleAct, &QAction::toggled, this, [&session](bool checked) {
+		auto updated = session.mediaPreferences();
+		updated.showLiveCaptions = checked;
+		session.setMediaPreferences(updated);
+	});
+
+	menu.addSeparator();
+	QAction *settingsAct = menu.addAction(QCoreApplication::translate("MeetingUI", "Translation & Copilot Settings..."));
+	connect(settingsAct, &QAction::triggered, this, [this] {
+		openCopilotSettingsDialog();
+	});
+
+	menu.exec(globalPos);
 }
 
 } // namespace MeetingUI

@@ -1,11 +1,15 @@
 #pragma once
 
 #include <QtWidgets/QDialog>
+#include <QtWidgets/QFrame>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QTabWidget>
+#include <array>
+
+class QVBoxLayout;
 
 namespace OpenMeeting { class SessionManager; }
 
@@ -23,6 +27,7 @@ protected:
     void showEvent(QShowEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onLoginClicked();
@@ -38,6 +43,9 @@ private:
     void updateSavedSessionAction();
     void refreshPersistenceState();
     void updateEndpointOptions();
+    void refreshThemeVisuals();
+    void syncSegmentButtons(int index);
+    void syncServerSummary();
     void scheduleFormFit();
     void fitFormToScreen();
     void cancelLogin();
@@ -46,15 +54,28 @@ private:
     void showError(const QString &msg, QLineEdit *endpointInput = nullptr);
     void showSuccess(const QString &msg);
 
+    QWidget *_brandBadge = nullptr;
+    QPushButton *_closeBtn = nullptr;
+    QVBoxLayout *_bodyLayout = nullptr;
+    QVBoxLayout *_footerLayout = nullptr;
+    QFrame *_footerBar = nullptr;
+    QFrame *_transportBadge = nullptr;
+    QWidget *_transportGlyph = nullptr;
+    QLabel *_transportBadgeLabel = nullptr;
+    QFrame *_segmentBar = nullptr;
+    std::array<QPushButton *, 3> _segmentButtons{};
     QTabWidget *_tabWidget = nullptr;
 
     // 账号密码登录
+    QFrame *_savedSessionCard = nullptr;
+    QLabel *_savedAvatarLabel = nullptr;
+    QLabel *_savedAccountLabel = nullptr;
     QLineEdit *_accountInput = nullptr;
+    QFrame *_pwdBox = nullptr;
     QLineEdit *_passwordInput = nullptr;
     QPushButton *_togglePwdBtn = nullptr;
     QCheckBox *_rememberBox = nullptr;
     QCheckBox *_autoLoginBox = nullptr;
-    QPushButton *_toRegisterLinkBtn = nullptr;
     QPushButton *_loginBtn = nullptr;
     QPushButton *_resumeBtn = nullptr;
     OpenMeeting::SessionManager &_session;
@@ -65,11 +86,11 @@ private:
     // 用户注册
     QLineEdit *_regAccountInput = nullptr;
     QLineEdit *_regNicknameInput = nullptr;
+    QFrame *_regPwdBox = nullptr;
     QLineEdit *_regPasswordInput = nullptr;
     QLineEdit *_regConfirmPwdInput = nullptr;
     QPushButton *_toggleRegPwdBtn = nullptr;
     QPushButton *_registerBtn = nullptr;
-    QPushButton *_toLoginLinkBtn = nullptr;
 
     // 高级设置
     QWidget *_advancedWidget = nullptr;

@@ -3,14 +3,17 @@
 
 #include "base/basic_types.h"
 #include "ui/widgets/rp_window.h"
-#include "src/ui/sidebar_widget.h"
 #include "src/ui/action_card_widget.h"
 #include "src/ui/schedule_widget.h"
 #include "src/ui/meeting_entry_guard.h"
+#include "src/agent/agent_coordinator.h"
+#include "src/ui/copilot_sidebar_widget.h"
 #include "src/net/meeting_types.h"
 #include "src/e2ee/meeting_encryption.h"
 #include <QtCore/QPointer>
+#include <QtWidgets/QBoxLayout>
 #include <QtWidgets/QDialog>
+#include <QtWidgets/QFrame>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QCheckBox>
@@ -27,12 +30,18 @@ class MeetingCoordinator;
 class SessionManager;
 }
 
+namespace Cohavora::Update {
+class UpdateService;
+}
+
 namespace MeetingUI {
 
 class WindowControlsWidget : public Ui::RpWidget {
 public:
 	explicit WindowControlsWidget(QWidget *parent = nullptr);
 	~WindowControlsWidget() override = default;
+
+	void setMaximized(bool maximized);
 
 	rpl::producer<> minimizeClicked() const { return _minClicks.events(); }
 	rpl::producer<> maximizeClicked() const { return _maxClicks.events(); }
@@ -47,6 +56,7 @@ protected:
 private:
 	enum class HoverBtn { None, Min, Max, Close };
 	HoverBtn _hoverBtn = HoverBtn::None;
+	bool _maximized = false;
 	QRect _minRect;
 	QRect _maxRect;
 	QRect _closeRect;
@@ -150,6 +160,8 @@ class MeetingMainWindow : public Ui::RpWidget {
 public:
 	explicit MeetingMainWindow(QWidget *parent = nullptr);
 	~MeetingMainWindow() override = default;
+	void openCopilotSettings(QWidget *dialogParent = nullptr);
+	void openSettingsAtPage(int pageIndex, QWidget *dialogParent = nullptr, int copilotSubTab = -1);
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
@@ -157,6 +169,7 @@ protected:
 	void showEvent(QShowEvent *e) override;
 	void closeEvent(QCloseEvent *e) override;
 	void changeEvent(QEvent *e) override;
+	bool eventFilter(QObject *watched, QEvent *event) override;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 #else
@@ -166,6 +179,13 @@ protected:
 private:
 	void setupNativeWindow();
 	void initLayout();
+	void refreshThemeVisuals();
+	void syncHeaderDate();
+	void syncAccountBadge();
+	void syncJoinPresets();
+	void showAccountMenu();
+	void triggerInlineJoin();
+	bool isTitleBarDragPosition(const QPoint &pos) const;
 	void onCardClicked(ActionCardType type);
 	void openQuickMeeting(std::unique_ptr<QObject> reservation, bool startScreenShare);
 	void onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason);
@@ -191,14 +211,47 @@ private:
 	void clearPendingMeetingEntry();
 	void syncSchedule();
 	void bindMeetingCatalog(OpenMeeting::MeetingCoordinator *coordinator);
+	void toggleCopilotDrawer(std::optional<bool> visible = std::nullopt);
+	int copilotDrawerWidth(int totalWidth) const;
+	void updatePresetStripLayout(int availableWidth);
+	void retranslateUi();
 
 	static constexpr int kWindowCornerRadius = 12;
+	static constexpr int kHeaderHeight = 48;
+	static constexpr int kMaxColumnWidth = 700;
 
-	SidebarWidget *_sidebar = nullptr;
-	ActionGridContainer *_actionGrid = nullptr;
+	QWidget *_headerBar = nullptr;
+	QWidget *_brandBadge = nullptr;
+	QLabel *_dateBadge = nullptr;
+	QPushButton *_copilotButton = nullptr;
+	QPushButton *_settingsButton = nullptr;
+	QPushButton *_accountButton = nullptr;
+	QWidget *_centerColumn = nullptr;
+	QPushButton *_quickMeetingButton = nullptr;
+	QFrame *_joinInputBox = nullptr;
+	QLineEdit *_meetingIdInput = nullptr;
+	QPushButton *_joinMeetingButton = nullptr;
+	QPushButton *_scheduleMeetingButton = nullptr;
+	QPushButton *_shareScreenButton = nullptr;
+	QPushButton *_allMeetingsButton = nullptr;
 	ScheduleWidget *_scheduleWidget = nullptr;
+	QFrame *_presetStrip = nullptr;
+	QVBoxLayout *_presetOuterLayout = nullptr;
+	QHBoxLayout *_presetTopRow = nullptr;
+	QHBoxLayout *_presetBottomRow = nullptr;
+	QLabel *_presetLabel = nullptr;
+	QPushButton *_presetMicButton = nullptr;
+	QPushButton *_presetCameraButton = nullptr;
+	QPushButton *_presetE2eeButton = nullptr;
+	QPushButton *_moreSettingsButton = nullptr;
+	bool _presetCompactTwoRow = false;
 	WindowControlsWidget *_windowControls = nullptr;
+	std::shared_ptr<OpenMeeting::AgentCoordinator> _agentCoordinator;
+	OpenMeeting::CopilotSidebarWidget *_copilotSidebar = nullptr;
+	bool _copilotVisible = false;
+	bool _copilotExpanded = false;
 	OpenMeeting::MeetingCatalogController *_meetingCatalog = nullptr;
+	Cohavora::Update::UpdateService *_updateService = nullptr;
 	bool _sessionInvalidationDialogActive = false;
 	MeetingEntryGuard _meetingEntryGuard;
 	std::unique_ptr<QObject> _pendingMeetingReservation;

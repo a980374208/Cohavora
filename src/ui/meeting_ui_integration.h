@@ -7,6 +7,7 @@
 #include <QtCore/QObject>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QDir>
+#include <QtCore/QFile>
 #include <QtCore/QTimer>
 #include <QtWidgets/QWidget>
 
@@ -30,6 +31,11 @@ public:
 	}
 
 	QString emojiCacheFolder() override {
+		// Only enable disk sprite caching when bundled webp emoji resources exist;
+		// otherwise Ui::Emoji::Instance::generateCache() asserts on empty sprites.
+		if (!QFile::exists(QStringLiteral(":/gui/emoji/emoji_1.webp"))) {
+			return QString();
+		}
 		const auto path = _emojiCache.isEmpty()
 			? QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/emoji"
 			: _emojiCache;

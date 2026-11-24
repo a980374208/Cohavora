@@ -2565,8 +2565,292 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>显示当前说话者</translation>
     </message>
     <message>
+        <source>Show live captions</source>
+        <translation>显示实时字幕</translation>
+    </message>
+    <message>
+        <source>Agent Offline</source>
+        <translation>Agent 离线</translation>
+    </message>
+    <message>
+        <source>Agent Online</source>
+        <translation>Agent 在线</translation>
+    </message>
+    <message>
+        <source>Agent Listening</source>
+        <translation>Agent 聆听中</translation>
+    </message>
+    <message>
+        <source>Agent Thinking</source>
+        <translation>Agent 思考中</translation>
+    </message>
+    <message>
+        <source>Agent Speaking</source>
+        <translation>Agent 发言中</translation>
+    </message>
+    <message>
+        <source>Agent Starting</source>
+        <translation>Agent 启动中</translation>
+    </message>
+    <message>
+        <source>No LiveKit Agent is currently online in this room.</source>
+        <translation>当前房间暂无在线的 LiveKit Agent。</translation>
+    </message>
+    <message>
+        <source>Local Translating</source>
+        <translation>本地转译中</translation>
+    </message>
+    <message>
+        <source>%1 (You)</source>
+        <translation>%1 (本机)</translation>
+    </message>
+    <message>
+        <source>You are currently acting as the room transcription/translation Agent.</source>
+        <translation>你当前正在充当本房间的实时转录/翻译 Agent。</translation>
+    </message>
+    <message>
+        <source>Local meeting translation is active (visible only to you).</source>
+        <translation>会中本地转译已开启（仅自己可见）。</translation>
+    </message>
+    <message>
+        <source>Click to manage live translation and room Agent role.</source>
+        <translation>点击管理会中转译与房间 Agent 角色。</translation>
+    </message>
+    <message>
+        <source>Live Translation &amp; Room Agent</source>
+        <translation>实时转译与会中 Agent</translation>
+    </message>
+    <message>
+        <source>Enable local meeting transcription/translation on join</source>
+        <translation>入会时默认开启会中本地转译</translation>
+    </message>
+    <message>
+        <source>Working Mode</source>
+        <translation>工作模式</translation>
+    </message>
+    <message>
+        <source>Local translation only</source>
+        <translation>仅本地转译（仅自己可见）</translation>
+    </message>
+    <message>
+        <source>Also act as room Agent when available</source>
+        <translation>同时充当会中 Agent（广播给全员）</translation>
+    </message>
+    <message>
+        <source>Reuse existing room Agent captions instead of running local API</source>
+        <translation>房间已有 Agent 时优先复用房间字幕（节省个人 API 额度）</translation>
+    </message>
+    <message>
+        <source>Translate captions to target language (uses Copilot model)</source>
+        <translation>将字幕翻译为目标语言（使用 Copilot 模型）</translation>
+    </message>
+    <message>
+        <source>Target Language</source>
+        <translation>目标语言</translation>
+    </message>
+    <message>
+        <source>French (fr)</source>
+        <translation>法语 (fr)</translation>
+    </message>
+    <message>
+        <source>German (de)</source>
+        <translation>德语 (de)</translation>
+    </message>
+    <message>
+        <source>Spanish (es)</source>
+        <translation>西班牙语 (es)</translation>
+    </message>
+    <message>
+        <source>Caption Style</source>
+        <translation>字幕样式</translation>
+    </message>
+    <message>
+        <source>Bilingual (Original + Translation)</source>
+        <translation>双语（原文 + 译文）</translation>
+    </message>
+    <message>
+        <source>Translation only</source>
+        <translation>仅显示译文</translation>
+    </message>
+    <message>
+        <source>Original only</source>
+        <translation>仅显示原文</translation>
+    </message>
+    <message>
+        <source>Include my own microphone speech in local translation</source>
+        <translation>本地转译包含我自己的麦克风发言</translation>
+    </message>
+    <message>
+        <source>Speech recognition reuses your &quot;Speech &amp; Dictation (ASR)&quot; API settings; caption translation reuses &quot;Models &amp; Chat&quot; when enabled. You can start/stop translation or claim/release the room Agent role anytime from the top Agent badge in a meeting.</source>
+        <translation>语音识别复用「语音听写 (ASR)」中的 API 配置，开启字幕翻译时复用「模型与对话」中的模型配置。会中可随时点击顶部 Agent 状态胶囊开启/中断转译或充当/取消充当会中 Agent。</translation>
+    </message>
+    <message>
+        <source>Live Translation</source>
+        <translation>实时转译</translation>
+    </message>
+    <message>
+        <source>Room Agent</source>
+        <translation>会中 Agent</translation>
+    </message>
+    <message>
+        <source>Room Agent Already Online</source>
+        <translation>房间已有在线 Agent</translation>
+    </message>
+    <message>
+        <source>This meeting room already has an active Agent (%1).
+
+As the host, would you like to take over and replace it with your client?</source>
+        <translation>当前会议房间已有在线 Agent（%1）。
+
+作为主持人，是否强制接管并由本机充当会中 Agent？</translation>
+    </message>
+    <message>
+        <source>This meeting room already has an active Agent (%1). Your client will stay in local-only translation mode.</source>
+        <translation>当前会议房间已有在线 Agent（%1），本机将继续保持仅本地转译模式。</translation>
+    </message>
+    <message>
+        <source>Room Agent Role Released</source>
+        <translation>已退出会中 Agent 角色</translation>
+    </message>
+    <message>
+        <source>Room agent role was taken over by the meeting host. Local translation remains active.</source>
+        <translation>会中 Agent 角色已被会议主持人接管，你的本地转译将继续运行。</translation>
+    </message>
+    <message>
+        <source>Encrypted Meeting Audio Notice</source>
+        <translation>加密会议音频提醒</translation>
+    </message>
+    <message>
+        <source>This meeting uses end-to-end encryption (E2EE). Starting local translation will send decrypted speech segments to your configured Speech-to-Text / Copilot API endpoint.
+
+Continue enabling local translation for this meeting?</source>
+        <translation>当前会议已开启端到端加密（E2EE）。开启本地转译会将解密后的语音片段发送至你配置的 STT / Copilot API 服务。
+
+是否确认为本次会议开启本地转译？</translation>
+    </message>
+    <message>
+        <source>Confirm Plaintext Caption Broadcast (E2EE)</source>
+        <translation>确认在加密会议中明文广播字幕</translation>
+    </message>
+    <message>
+        <source>This meeting is end-to-end encrypted (E2EE). Acting as the room Agent will broadcast recognized and translated captions in plaintext via LiveKit lk.transcription to all participants in this room.
+
+Do you confirm broadcasting captions to the room?</source>
+        <translation>当前会议已开启端到端加密（E2EE）。充当会中 Agent 将通过未加密的 LiveKit lk.transcription 通道向房间内所有参会者广播识别与翻译后的明文字幕。
+
+是否确认继续广播？</translation>
+    </message>
+    <message>
+        <source>AI Agent (%1)</source>
+        <translation>AI Agent (%1)</translation>
+    </message>
+    <message>
+        <source>Room Agent: Active (This Device)</source>
+        <translation>房间 Agent：在线（由本机充当）</translation>
+    </message>
+    <message>
+        <source>Room Agent: Online (%1)</source>
+        <translation>房间 Agent：在线（%1）</translation>
+    </message>
+    <message>
+        <source>Room Agent: Offline</source>
+        <translation>房间 Agent：离线</translation>
+    </message>
+    <message>
+        <source>Remote</source>
+        <translation>远端</translation>
+    </message>
+    <message>
+        <source>Stop Live Translation</source>
+        <translation>中断会中转译</translation>
+    </message>
+    <message>
+        <source>Start Live Translation (Local)</source>
+        <translation>开启会中转译（仅本地）</translation>
+    </message>
+    <message>
+        <source>Release Room Agent Role (Keep Local Only)</source>
+        <translation>取消充当会中 Agent（保留本地转译）</translation>
+    </message>
+    <message>
+        <source>Take Over as Room Agent (Host)</source>
+        <translation>接管为会中 Agent（主持人）</translation>
+    </message>
+    <message>
+        <source>Take Over Room Agent</source>
+        <translation>接管会中 Agent</translation>
+    </message>
+    <message>
+        <source>Disconnect the current room Agent (%1) and broadcast captions from this device instead?</source>
+        <translation>是否断开当前房间 Agent（%1），改为由本机向全员广播实时字幕？</translation>
+    </message>
+    <message>
+        <source>Room Agent Occupied (Host Can Take Over)</source>
+        <translation>房间已有在线 Agent（仅主持人可接管）</translation>
+    </message>
+    <message>
+        <source>Act as Room Agent (Broadcast Captions)</source>
+        <translation>充当会中 Agent（向全员广播字幕）</translation>
+    </message>
+    <message>
+        <source>Translation Target</source>
+        <translation>翻译目标语言</translation>
+    </message>
+    <message>
+        <source>Original Only (No Translation)</source>
+        <translation>仅原文字幕（不翻译）</translation>
+    </message>
+    <message>
+        <source>Translation &amp; Copilot Settings...</source>
+        <translation>转译与 Copilot 设置...</translation>
+    </message>
+    <message>
+        <source>Join a meeting before starting live translation.</source>
+        <translation>请先加入会议后再开启实时转译。</translation>
+    </message>
+    <message>
+        <source>Configure a Speech-to-Text (STT) or Copilot endpoint in Settings before starting live translation.</source>
+        <translation>请先在“设置 → Copilot”中配置 STT 语音识别或 Copilot 接口后再开启实时转译。</translation>
+    </message>
+    <message>
+        <source>Configure Copilot Base URL and Model in Settings to enable translation.</source>
+        <translation>请先在“设置 → Copilot”中配置接口地址和模型以启用翻译功能。</translation>
+    </message>
+    <message>
+        <source>Another Agent is already active in this meeting room.</source>
+        <translation>当前会议房间已有其他在线 Agent。</translation>
+    </message>
+    <message>
+        <source>Failed to request room Agent token.</source>
+        <translation>申请会中 Agent Token 失败。</translation>
+    </message>
+    <message>
+        <source>Server returned an incomplete LiveKit Agent credential.</source>
+        <translation>服务端返回的 LiveKit Agent 凭据不完整。</translation>
+    </message>
+    <message>
+        <source>Room agent connection disconnected (%1).</source>
+        <translation>会中 Agent 连接已断开（%1）。</translation>
+    </message>
+    <message>
         <source>Stay in the meeting when the screen is locked</source>
         <translation>锁屏时不退出会议</translation>
+    </message>
+    <message>
+        <source>Continuously collect WebRTC stats every second</source>
+        <translation>每秒持续采集 WebRTC 统计信息</translation>
+    </message>
+    <message>
+        <source>Disabled by default to reduce periodic stats polling and track parsing overhead. Enable to populate real-time network and media stats in the telemetry panel.</source>
+        <translation>默认关闭以减少周期性统计轮询与轨道解析开销。开启后可在遥测面板查看实时网络与媒体统计信息。</translation>
+    </message>
+    <message>
+        <source>Telemetry: Continuous stats sampling is off (enable in Settings)</source>
+        <translation>遥测：持续统计采集已关闭（可在设置中开启）</translation>
+    </message>
+    <message>
+        <source>Continuous stats sampling is off (enable in Settings)</source>
+        <translation>持续统计采集已关闭（可在设置中开启）</translation>
     </message>
     <message>
         <source>Camera Preview</source>
@@ -4504,6 +4788,2778 @@ Sign in with your own account in a client configured for the same meeting servic
     <message><source>Sending</source><translation>发送</translation></message>
     <message><source>Encrypted meetings support VP8 and H264. Auto prefers hardware H264, then VP8; select a supported codec in Settings for camera and screen sharing.</source><translation>加密会议支持 VP8 和 H264，自动模式优先硬件 H264，失败后回退 VP8。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
     <message><source>Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings.</source><translation>加密会议支持 VP8 和 H264。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
+    <message>
+        <source>Local audio and video could not be started</source>
+        <translation>本地音视频未能启动</translation>
+    </message>
+    <message>
+        <source>You</source>
+        <translation>你</translation>
+    </message>
+    <message>
+        <source>AI Copilot</source>
+        <translation>AI 助手</translation>
+    </message>
+    <message>
+        <source>Copilot</source>
+        <translation>AI 助手</translation>
+    </message>
+    <message>
+        <source>Thinking...</source>
+        <translation>思考中...</translation>
+    </message>
+    <message>
+        <source>Generating...</source>
+        <translation>生成中...</translation>
+    </message>
+    <message>
+        <source>Stopped</source>
+        <translation>已停止</translation>
+    </message>
+    <message>
+        <source>Request failed</source>
+        <translation>请求失败</translation>
+    </message>
+    <message>
+        <source>Open Copilot settings</source>
+        <translation>打开 AI 助手设置</translation>
+    </message>
+    <message>
+        <source>Close Copilot</source>
+        <translation>关闭 AI 助手</translation>
+    </message>
+    <message>
+        <source>Encrypted meeting: context is withheld until allowed.</source>
+        <translation>加密会议：在获得明确授权前，不会发送会议上下文。</translation>
+    </message>
+    <message>
+        <source>Allow</source>
+        <translation>允许</translation>
+    </message>
+    <message>
+        <source>Connect your Agent API</source>
+        <translation>接入自定义智能体 API</translation>
+    </message>
+    <message>
+        <source>Configure an OpenAI-compatible API, custom REST webhook, or local model server to chat with AI Copilot.</source>
+        <translation>请先配置 OpenAI 兼容接口、自定义 REST Webhook 或本地模型服务以启用 AI 助手。</translation>
+    </message>
+    <message>
+        <source>Configure Copilot</source>
+        <translation>配置 AI 助手</translation>
+    </message>
+    <message>
+        <source>Ask AI Copilot to summarize notes, draft agendas, or answer technical questions.</source>
+        <translation>可以向 AI 助手提问、整理会议要点或起草会议议程。</translation>
+    </message>
+    <message>
+        <source>Copilot message input</source>
+        <translation>AI 助手消息输入框</translation>
+    </message>
+    <message>
+        <source>Stop</source>
+        <translation>停止</translation>
+    </message>
+    <message>
+        <source>Unavailable</source>
+        <translation>不可用</translation>
+    </message>
+    <message>
+        <source>Configure a custom OpenAI-compatible API, Responses API, Anthropic Messages API, Google Gemini API, or custom REST webhook for AI Copilot.</source>
+        <translation>为 AI 助手配置自定义 OpenAI 兼容 API、Responses API、Anthropic Messages API、Google Gemini API 或自定义 REST Webhook。</translation>
+    </message>
+    <message>
+        <source>Connection Profile</source>
+        <translation>连接配置</translation>
+    </message>
+    <message>
+        <source>Custom Agent</source>
+        <translation>自定义智能体</translation>
+    </message>
+    <message>
+        <source>Protocol Dialect</source>
+        <translation>协议方言</translation>
+    </message>
+    <message>
+        <source>OpenAI ChatCompletions (SSE)</source>
+        <translation>OpenAI ChatCompletions (SSE)</translation>
+    </message>
+    <message>
+        <source>OpenAI Responses (SSE)</source>
+        <translation>OpenAI Responses (SSE)</translation>
+    </message>
+    <message>
+        <source>Anthropic Messages (SSE)</source>
+        <translation>Anthropic Messages (SSE)</translation>
+    </message>
+    <message>
+        <source>Google Gemini (SSE)</source>
+        <translation>Google Gemini (SSE)</translation>
+    </message>
+    <message>
+        <source>Custom Webhook (JSON / SSE)</source>
+        <translation>自定义 Webhook (JSON / SSE)</translation>
+    </message>
+    <message>
+        <source>Base URL / Endpoint</source>
+        <translation>基础 URL / 接口地址</translation>
+    </message>
+    <message>
+        <source>HTTPS is required for remote endpoints. HTTP is permitted only for localhost / 127.0.0.1 (e.g. Ollama or vLLM).</source>
+        <translation>远程服务要求使用 HTTPS；仅 localhost / 127.0.0.1 本地服务（如 Ollama / vLLM）允许使用 HTTP。</translation>
+    </message>
+    <message>
+        <source>Model Name</source>
+        <translation>模型名称</translation>
+    </message>
+    <message>
+        <source>API Key / Bearer Token</source>
+        <translation>API Key / 访问令牌</translation>
+    </message>
+    <message>
+        <source>Enter API key (leave blank to keep saved key)</source>
+        <translation>输入 API Key（留空则保留已保存的密钥）</translation>
+    </message>
+    <message>
+        <source>Save Key</source>
+        <translation>保存密钥</translation>
+    </message>
+    <message>
+        <source>Clear Key</source>
+        <translation>清除密钥</translation>
+    </message>
+    <message>
+        <source>Persist encrypted API key on this device (DPAPI / Keyring)</source>
+        <translation>在本设备加密保存 API Key（DPAPI / 密钥环）</translation>
+    </message>
+    <message>
+        <source>Recommended. When unchecked, the API key is kept only in process memory for the current session.</source>
+        <translation>推荐开启。取消勾选后，API Key 仅保留在当前进程内存中，退出后自动清除。</translation>
+    </message>
+    <message>
+        <source>Prompt &amp; Runtime Options</source>
+        <translation>提示词与运行参数</translation>
+    </message>
+    <message>
+        <source>System Prompt</source>
+        <translation>系统提示词</translation>
+    </message>
+    <message>
+        <source>Custom Headers</source>
+        <translation>自定义请求头</translation>
+    </message>
+    <message>
+        <source>Optional, one per line: Header-Name: value</source>
+        <translation>可选，每行一个：Header-Name: value</translation>
+    </message>
+    <message>
+        <source>Max Context Messages</source>
+        <translation>最大上下文消息数</translation>
+    </message>
+    <message>
+        <source>Temperature</source>
+        <translation>采样温度 (Temperature)</translation>
+    </message>
+    <message>
+        <source>Test Connection</source>
+        <translation>测试连接</translation>
+    </message>
+    <message>
+        <source>Connection verified.</source>
+        <translation>连接测试成功。</translation>
+    </message>
+    <message>
+        <source>Connection verified (%1).</source>
+        <translation>连接测试成功（%1）。</translation>
+    </message>
+    <message>
+        <source>Test chat model connection</source>
+        <translation>测试对话模型连接</translation>
+    </message>
+    <message>
+        <source>Test speech-to-text model connection</source>
+        <translation>测试语音转文字模型连接</translation>
+    </message>
+    <message>
+        <source>Failed to start speech connection test.</source>
+        <translation>无法启动语音识别连接测试。</translation>
+    </message>
+    <message>
+        <source>OS encrypted storage is unavailable on this platform; key kept in session memory only.</source>
+        <translation>当前平台加密存储不可用，密钥已仅保存在本次会话内存中。</translation>
+    </message>
+    <message>
+        <source>Unable to write encrypted API key to settings; kept in session memory only.</source>
+        <translation>无法将加密密钥写入配置，已仅保存在本次会话内存中。</translation>
+    </message>
+    <message>
+        <source>No API key saved (optional for local keyless servers).</source>
+        <translation>未保存 API Key（本地免密模型服务可留空）。</translation>
+    </message>
+    <message>
+        <source>API key saved (encrypted on this device).</source>
+        <translation>API Key 已在本设备加密保存。</translation>
+    </message>
+    <message>
+        <source>API key loaded (session memory only).</source>
+        <translation>API Key 已加载（仅限本次会话内存）。</translation>
+    </message>
+    <message>
+        <source>Testing connection...</source>
+        <translation>正在测试连接...</translation>
+    </message>
+    <message>
+        <source>Mute Microphone</source>
+        <translation>关闭麦克风</translation>
+    </message>
+    <message>
+        <source>Unmute Microphone</source>
+        <translation>开启麦克风</translation>
+    </message>
+    <message>
+        <source>Turn off your microphone in the active meeting.</source>
+        <translation>在当前会议中关闭您的麦克风。</translation>
+    </message>
+    <message>
+        <source>Turn on your microphone in the active meeting.</source>
+        <translation>在当前会议中开启您的麦克风。</translation>
+    </message>
+    <message>
+        <source>Start sending local camera video to the meeting.</source>
+        <translation>在当前会议中开启本地摄像头画面。</translation>
+    </message>
+    <message>
+        <source>Stop sending local camera video to the meeting.</source>
+        <translation>在当前会议中关闭本地摄像头画面。</translation>
+    </message>
+    <message>
+        <source>Send Meeting Chat</source>
+        <translation>发送会议聊天消息</translation>
+    </message>
+    <message>
+        <source>Post to public chat: &quot;%1&quot;</source>
+        <translation>发送到公共聊天：&quot;%1&quot;</translation>
+    </message>
+    <message>
+        <source>End Meeting for Everyone</source>
+        <translation>为所有人结束会议</translation>
+    </message>
+    <message>
+        <source>End the active meeting for all participants.</source>
+        <translation>为所有参会人结束当前会议。</translation>
+    </message>
+    <message>
+        <source>Disconnect and leave the active meeting.</source>
+        <translation>断开连接并离开当前会议。</translation>
+    </message>
+    <message>
+        <source>Action expired because the meeting or account session changed.</source>
+        <translation>会议或账号会话已变更，该操作已失效。</translation>
+    </message>
+    <message>
+        <source>Executed.</source>
+        <translation>已执行。</translation>
+    </message>
+    <message>
+        <source>Cancelled by user.</source>
+        <translation>用户已取消。</translation>
+    </message>
+    <message>
+        <source>Conversation cleared.</source>
+        <translation>对话已清空。</translation>
+    </message>
+    <message>
+        <source>Meeting ended.</source>
+        <translation>会议已结束。</translation>
+    </message>
+    <message>
+        <source>Meeting session changed.</source>
+        <translation>会议会话已变更。</translation>
+    </message>
+    <message>
+        <source>Refresh Models</source>
+        <translation>刷新模型</translation>
+    </message>
+    <message>
+        <source>Fetching models...</source>
+        <translation>正在获取模型列表...</translation>
+    </message>
+    <message>
+        <source>Loaded %1 model(s).</source>
+        <translation>已获取 %1 个模型。</translation>
+    </message>
+    <message>
+        <source>No models returned; enter model name manually.</source>
+        <translation>未返回模型列表，可手动输入模型名称。</translation>
+    </message>
+    <message>
+        <source>Click Refresh Models to fetch available chat models from the endpoint, or enter a model name manually.</source>
+        <translation>点击“刷新模型”可从当前接口获取可用对话模型，也可直接手动输入模型名称。</translation>
+    </message>
+    <message>
+        <source>The model returned an empty response.</source>
+        <translation>模型未返回任何文本内容，请检查所选模型是否支持当前文本对话接口。</translation>
+    </message>
+    <message>
+        <source>Hint: Authentication failed. Please check that the API key is filled in, valid, and matches the current Base URL / platform account.</source>
+        <translation>排查提示：身份验证失败，请检查 API Key 是否已填写、未失效，以及是否与当前 Base URL / 平台账号匹配。</translation>
+    </message>
+    <message>
+        <source>Hint: Access to this model or endpoint was denied. Please check that the model is activated on the platform, permitted for this API key, and that the Base URL matches your plan.</source>
+        <translation>排查提示：无权调用该模型或接口，请检查平台是否已开通该模型、API Key 是否具备对应模型权限，以及 Base URL 是否与所用套餐端点一致。</translation>
+    </message>
+    <message>
+        <source>Detail: Detected a Bailian Token/Coding Plan key (sk-sp-...) against a standard DashScope endpoint. Please switch Base URL to your plan endpoint (e.g. coding.dashscope.aliyuncs.com or token-plan.*.maas.aliyuncs.com) or use a standard DashScope API key (sk-...).</source>
+        <translation>详情：检测到百炼 Token/Coding Plan 密钥（sk-sp-...）正请求标准 DashScope 端点。请将 Base URL 切换为套餐专属端点（如 coding.dashscope.aliyuncs.com 或 token-plan.*.maas.aliyuncs.com），或改用标准 DashScope API Key（sk-...）。</translation>
+    </message>
+    <message>
+        <source>Detail: Detected a standard sk-... key against a Bailian Token/Coding Plan host. Please use the Token/Coding Plan sk-sp-... key for this endpoint, or switch Base URL to the standard DashScope endpoint.</source>
+        <translation>详情：检测到标准 sk-... 密钥正请求百炼 Token/Coding Plan 专属端点。请为该端点使用 Token/Coding Plan 密钥（sk-sp-...），或将 Base URL 切回标准 DashScope 端点。</translation>
+    </message>
+    <message>
+        <source>Hint: Endpoint not found. Please check that the Base URL, Protocol Dialect, and Model Name match what this provider supports.</source>
+        <translation>排查提示：未找到接口地址，请检查 Base URL、协议方言与模型名称是否与该服务商支持的一致。</translation>
+    </message>
+    <message>
+        <source>Request path: %1</source>
+        <translation>请求路径：%1</translation>
+    </message>
+    <message>
+        <source>Copy Selected</source>
+        <translation>复制选中内容</translation>
+    </message>
+    <message>
+        <source>Copy Message</source>
+        <translation>复制整条消息</translation>
+    </message>
+    <message>
+        <source>Model &amp; Reasoning</source>
+        <translation>模型与推理</translation>
+    </message>
+    <message>
+        <source>Weekdays (Mon-Fri)</source>
+        <translation>工作日（周一至周五）</translation>
+    </message>
+    <message>
+        <source>, %1 occurrence(s)</source>
+        <translation>，共 %1 次</translation>
+    </message>
+    <message>
+        <source>None (Default)</source>
+        <translation>无（默认不设密码）</translation>
+    </message>
+    <message>
+        <source>Password Protected</source>
+        <translation>已设密码</translation>
+    </message>
+    <message>
+        <source>Title: %1
+Start: %2 (%3, %4 min)
+Recurrence: %5
+Password: %6</source>
+        <translation>主题：%1
+时间：%2（%3，%4 分钟）
+周期：%5
+密码：%6</translation>
+    </message>
+    <message>
+        <source>Update Scheduled Meeting</source>
+        <translation>修改预定会议</translation>
+    </message>
+    <message>
+        <source>Title -&gt; %1</source>
+        <translation>主题 → %1</translation>
+    </message>
+    <message>
+        <source>Start -&gt; %1 (%2)</source>
+        <translation>开始时间 → %1（%2）</translation>
+    </message>
+    <message>
+        <source>Duration -&gt; %1 min</source>
+        <translation>时长 → %1 分钟</translation>
+    </message>
+    <message>
+        <source>Recurrence -&gt; %1</source>
+        <translation>周期 → %1</translation>
+    </message>
+    <message>
+        <source>Password -&gt; Cleared</source>
+        <translation>密码 → 已清除（无密码）</translation>
+    </message>
+    <message>
+        <source>Password -&gt; Updated</source>
+        <translation>密码 → 已更新</translation>
+    </message>
+    <message>
+        <source>Mute Participants on Join -&gt; Enabled</source>
+        <translation>参会者入会时静音 → 开启</translation>
+    </message>
+    <message>
+        <source>Mute Participants on Join -&gt; Disabled</source>
+        <translation>参会者入会时静音 → 关闭</translation>
+    </message>
+    <message>
+        <source>Turn Off Camera on Join -&gt; Enabled</source>
+        <translation>参会者入会时关闭摄像头 → 开启</translation>
+    </message>
+    <message>
+        <source>Turn Off Camera on Join -&gt; Disabled</source>
+        <translation>参会者入会时关闭摄像头 → 关闭</translation>
+    </message>
+    <message>
+        <source>Allow Early Join -&gt; Enabled</source>
+        <translation>允许成员在主持人进会前加入 → 开启</translation>
+    </message>
+    <message>
+        <source>Allow Early Join -&gt; Disabled</source>
+        <translation>允许成员在主持人进会前加入 → 关闭</translation>
+    </message>
+    <message>
+        <source>Meeting ID: %1
+%2</source>
+        <translation>会议号：%1
+%2</translation>
+    </message>
+    <message>
+        <source>Cancel scheduled meeting (ID: %1).</source>
+        <translation>确认取消预定会议（会议号：%1）。</translation>
+    </message>
+    <message>
+        <source>Cancel &quot;%1&quot; (ID: %2).</source>
+        <translation>确认取消预定会议“%1”（会议号：%2）。</translation>
+    </message>
+    <message>
+        <source>Update Join Media Settings</source>
+        <translation>修改入会默认音视频设置</translation>
+    </message>
+    <message>
+        <source>Enabled</source>
+        <translation>开启</translation>
+    </message>
+    <message>
+        <source>Disabled</source>
+        <translation>关闭</translation>
+    </message>
+    <message>
+        <source>Disabled (Muted on Join)</source>
+        <translation>关闭（默认静音入会）</translation>
+    </message>
+    <message>
+        <source>Enable microphone when joining a meeting: %1 -&gt; %2</source>
+        <translation>入会时默认开启麦克风：%1 → %2</translation>
+    </message>
+    <message>
+        <source>Enable microphone when joining a meeting -&gt; %1</source>
+        <translation>入会时默认开启麦克风 → %1</translation>
+    </message>
+    <message>
+        <source>Enable camera when joining a meeting: %1 -&gt; %2</source>
+        <translation>入会时开启摄像头：%1 → %2</translation>
+    </message>
+    <message>
+        <source>Enable camera when joining a meeting -&gt; %1</source>
+        <translation>入会时开启摄像头 → %1</translation>
+    </message>
+    <message>
+        <source>Use computer audio when joining a meeting: %1 -&gt; %2</source>
+        <translation>入会时使用电脑音频：%1 → %2</translation>
+    </message>
+    <message>
+        <source>Use computer audio when joining a meeting -&gt; %1</source>
+        <translation>入会时使用电脑音频 → %1</translation>
+    </message>
+    <message>
+        <source>&quot;Enable microphone when joining a meeting&quot; is now turned ON</source>
+        <translation>「设置 → 音频 → 入会时默认开启麦克风」已设为开启</translation>
+    </message>
+    <message>
+        <source>&quot;Enable microphone when joining a meeting&quot; is now turned OFF (muted by default on join)</source>
+        <translation>「设置 → 音频 → 入会时默认开启麦克风」已设为关闭（默认静音入会）</translation>
+    </message>
+    <message>
+        <source>&quot;Enable camera when joining a meeting&quot; is now turned ON</source>
+        <translation>「设置 → 视频 → 入会时开启摄像头」已设为开启</translation>
+    </message>
+    <message>
+        <source>&quot;Enable camera when joining a meeting&quot; is now turned OFF</source>
+        <translation>「设置 → 视频 → 入会时开启摄像头」已设为关闭</translation>
+    </message>
+    <message>
+        <source>&quot;Use computer audio when joining a meeting&quot; is now turned ON</source>
+        <translation>「设置 → 音频 → 入会时使用电脑音频」已设为开启</translation>
+    </message>
+    <message>
+        <source>&quot;Use computer audio when joining a meeting&quot; is now turned OFF</source>
+        <translation>「设置 → 音频 → 入会时使用电脑音频」已设为关闭</translation>
+    </message>
+    <message>
+        <source>Join media settings updated: %1.</source>
+        <translation>已更新本地入会音视频设置：%1。</translation>
+    </message>
+    <message>
+        <source>Settings updated.</source>
+        <translation>设置已更新。</translation>
+    </message>
+    <message>
+        <source>Client settings have been updated.</source>
+        <translation>客户端设置已更新。</translation>
+    </message>
+    <message>
+        <source>Reasoning Effort</source>
+        <translation>推理强度</translation>
+    </message>
+    <message>
+        <source>Reasoning</source>
+        <translation>推理强度</translation>
+    </message>
+    <message>
+        <source>Default</source>
+        <translation>默认</translation>
+    </message>
+    <message>
+        <source>Default (Provider / Model Default)</source>
+        <translation>默认（跟随服务端 / 模型默认）</translation>
+    </message>
+    <message>
+        <source>Low</source>
+        <translation>低 (Low)</translation>
+    </message>
+    <message>
+        <source>Medium</source>
+        <translation>中 (Medium)</translation>
+    </message>
+    <message>
+        <source>High</source>
+        <translation>高 (High)</translation>
+    </message>
+    <message>
+        <source>Extra (xhigh)</source>
+        <translation>极高 (Extra)</translation>
+    </message>
+    <message>
+        <source>Reasoning effort is not sent for the Custom Webhook protocol.</source>
+        <translation>自定义 Webhook 协议不发送推理强度参数。</translation>
+    </message>
+    <message>
+        <source>Controls extended thinking budget sent to capable models. Keep Default unless overriding.</source>
+        <translation>控制发往支持扩展思考模型的 thinking budget 预算；无需覆盖时保持“默认”即可。</translation>
+    </message>
+    <message>
+        <source>Controls thinking budget/level sent to capable Gemini models. Keep Default unless overriding.</source>
+        <translation>控制发往支持思考的 Gemini 模型的思考预算/等级；无需覆盖时保持“默认”即可。</translation>
+    </message>
+    <message>
+        <source>Controls reasoning_effort sent to reasoning-capable models. Keep Default unless overriding.</source>
+        <translation>控制发往支持思考模型的 reasoning_effort 参数；无需覆盖时保持“默认”即可。</translation>
+    </message>
+    <message>
+        <source>Server /models metadata reports reasoning support (%1).</source>
+        <translation>服务端 /models 元数据声明当前模型支持推理强度调节（%1）。</translation>
+    </message>
+    <message>
+        <source>Detected as reasoning-capable by model name rule (%1). You can override if needed.</source>
+        <translation>已根据模型名称规则识别为支持推理强度调节（%1），可按需切换。</translation>
+    </message>
+    <message>
+        <source>Server /models metadata did not list reasoning parameters for this model; Default is recommended (manual override allowed).</source>
+        <translation>服务端 /models 元数据未声明该模型的推理参数；建议保持“默认”（如确认接口支持也可手动指定）。</translation>
+    </message>
+    <message>
+        <source>No server capability metadata or known reasoning prefix detected; Default is recommended (manual override allowed).</source>
+        <translation>未检测到服务端能力元数据或已知推理模型前缀；建议保持“默认”（如确认接口支持也可手动覆盖）。</translation>
+    </message>
+    <message>
+        <source>Loaded %1 chat model(s) (%2 non-chat hidden).</source>
+        <translation>已加载 %1 个对话模型（已自动过滤 %2 个生图/语音/向量等非对话模型）。</translation>
+    </message>
+    <message>
+        <source>Cancel Scheduled Meeting</source>
+        <translation>取消预定会议</translation>
+    </message>
+    <message>
+        <source>Meeting scheduled successfully (Meeting ID: %1). The schedule list has been refreshed.</source>
+        <translation>会议预定成功（会议号：%1），右侧日程列表已自动刷新。</translation>
+    </message>
+    <message>
+        <source>Meeting &quot;%1&quot; (ID: %2) has been scheduled for %3 (%4 min, %5). Created without a password by default since none was specified, and the schedule list has been refreshed.</source>
+        <translation>会议“%1”（会议号：%2）已预定成功，时间：%3（%4 分钟，%5）。由于未指定密码，已默认创建为无密码会议，右侧日程列表已自动刷新。</translation>
+    </message>
+    <message>
+        <source>Meeting &quot;%1&quot; (ID: %2) has been scheduled for %3 (%4 min, %5, password protected), and the schedule list has been refreshed.</source>
+        <translation>会议“%1”（会议号：%2）已预定成功，时间：%3（%4 分钟，%5，已设密码），右侧日程列表已自动刷新。</translation>
+    </message>
+    <message>
+        <source>Submitting request...</source>
+        <translation>正在提交请求...</translation>
+    </message>
+    <message>
+        <source>Meeting catalog is unavailable.</source>
+        <translation>会议日程服务不可用。</translation>
+    </message>
+    <message>
+        <source>Operation failed.</source>
+        <translation>操作失败。</translation>
+    </message>
+    <message>
+        <source>Scheduled (ID: %1).</source>
+        <translation>已预定（会议号：%1）。</translation>
+    </message>
+    <message>
+        <source>Meeting updated and schedule list refreshed.</source>
+        <translation>会议已更新，日程列表已刷新。</translation>
+    </message>
+    <message>
+        <source>Scheduled meeting %1 has been updated, and the schedule list has been refreshed.</source>
+        <translation>预定会议 %1 已更新，右侧日程列表已自动刷新。</translation>
+    </message>
+    <message>
+        <source>Meeting cancelled and schedule list refreshed.</source>
+        <translation>会议已取消，日程列表已刷新。</translation>
+    </message>
+    <message>
+        <source>Scheduled meeting %1 has been cancelled, and the schedule list has been refreshed.</source>
+        <translation>预定会议 %1 已取消，右侧日程列表已自动刷新。</translation>
+    </message>
+    <message>
+        <source>Select Images</source>
+        <translation>选择图片</translation>
+    </message>
+    <message>
+        <source>Images (*.png *.jpg *.jpeg *.webp *.gif)</source>
+        <translation>图片文件 (*.png *.jpg *.jpeg *.webp *.gif)</translation>
+    </message>
+    <message>
+        <source>Remove image</source>
+        <translation>移除图片</translation>
+    </message>
+    <message>
+        <source>Up to %1 images can be attached per message.</source>
+        <translation>单条消息最多可添加 %1 张图片。</translation>
+    </message>
+    <message>
+        <source>Unsupported or corrupted image file (only PNG, JPEG, WebP, and GIF are allowed).</source>
+        <translation>不支持或已损坏的图片文件（仅允许 PNG、JPEG、WebP 和 GIF）。</translation>
+    </message>
+    <message>
+        <source>Image file exceeds the 10 MB limit.</source>
+        <translation>图片文件超过 10 MB 大小限制。</translation>
+    </message>
+    <message>
+        <source>Image resolution exceeds the supported limit.</source>
+        <translation>图片分辨率超过支持上限。</translation>
+    </message>
+    <message>
+        <source>Current model (%1) may not support image input.</source>
+        <translation>当前模型（%1）可能不支持图片输入。</translation>
+    </message>
+    <message>
+        <source>End-to-end encrypted meeting: please authorize AI sharing in the banner before sending images.</source>
+        <translation>当前为端到端加密会议：发送图片前请先在顶部横幅中点击“允许”。</translation>
+    </message>
+    <message>
+        <source>Image input: supported.</source>
+        <translation>图片输入：支持。</translation>
+    </message>
+    <message>
+        <source>Image input: not listed by server metadata.</source>
+        <translation>图片输入：服务端元数据未声明支持。</translation>
+    </message>
+    <message>
+        <source>Hint: The selected model only accepts text and does not support image input. Please switch to a vision-capable model (e.g. qwen3.8-omni-flash, kimi-k3, *-vl, gpt-4o, gemini).</source>
+        <translation>排查提示：当前所选模型仅支持纯文本（&apos;text&apos;），不支持图片输入；请切换为支持视觉的多模态模型（如 qwen3.8-omni-flash、kimi-k3、*-vl、gpt-4o、gemini 等）。</translation>
+    </message>
+    <message>
+        <source>Dismiss error</source>
+        <translation>关闭错误提示</translation>
+    </message>
+    <message>
+        <source>Thought for %1s</source>
+        <translation>已思考 %1 秒</translation>
+    </message>
+    <message>
+        <source>Thinking process</source>
+        <translation>思考过程</translation>
+    </message>
+    <message>
+        <source>#meeting-chat</source>
+        <translation>#会议聊天</translation>
+    </message>
+    <message>
+        <source>#telemetry</source>
+        <translation>#音视频遥测</translation>
+    </message>
+    <message>
+        <source>#participants</source>
+        <translation>#参会成员</translation>
+    </message>
+    <message>
+        <source>#schedule</source>
+        <translation>#会议日程</translation>
+    </message>
+    <message>
+        <source>Open Settings</source>
+        <translation>打开设置</translation>
+    </message>
+    <message>
+        <source>Copied</source>
+        <translation>已复制</translation>
+    </message>
+    <message>
+        <source>Attach context</source>
+        <translation>附加会议上下文</translation>
+    </message>
+    <message>
+        <source>Jump to latest message</source>
+        <translation>滚动到底部最新消息</translation>
+    </message>
+    <message>
+        <source>Jump to bottom</source>
+        <translation>滚动到底部</translation>
+    </message>
+    <message>
+        <source>Remove context chip %1</source>
+        <translation>移除上下文 %1</translation>
+    </message>
+    <message>
+        <source>Attach recent meeting chat messages</source>
+        <translation>附加近期会议聊天消息</translation>
+    </message>
+    <message>
+        <source>Attach A/V quality and network telemetry</source>
+        <translation>附加当前音视频与网络遥测快照</translation>
+    </message>
+    <message>
+        <source>Attach current participant list and media state</source>
+        <translation>附加当前参会成员列表与音视频状态</translation>
+    </message>
+    <message>
+        <source>Attach upcoming scheduled meetings</source>
+        <translation>附加即将开始的预定会议列表</translation>
+    </message>
+    <message>
+        <source>Summarize meeting chat and action items</source>
+        <translation>总结近期会议讨论与待办</translation>
+    </message>
+    <message>
+        <source>Summarize key points, decisions, and action items from the recent meeting.</source>
+        <translation>请总结近期会议的核心讨论要点、结论与后续待办事项。</translation>
+    </message>
+    <message>
+        <source>Diagnose A/V quality and network issues</source>
+        <translation>诊断音视频质量与网络状态</translation>
+    </message>
+    <message>
+        <source>Analyze current audio/video telemetry and network quality and suggest fixes.</source>
+        <translation>请结合当前音视频遥测与网络质量，诊断卡顿或设备异常并给出排查建议。</translation>
+    </message>
+    <message>
+        <source>Check upcoming scheduled meetings</source>
+        <translation>查看即将开始的会议日程</translation>
+    </message>
+    <message>
+        <source>List my upcoming scheduled meetings and highlight the next one.</source>
+        <translation>请列出我的近期预定会议并高亮下一场待开会议。</translation>
+    </message>
+    <message>
+        <source>Inspect client &amp; join media preferences</source>
+        <translation>查看客户端与入会媒体偏好</translation>
+    </message>
+    <message>
+        <source>Show my client preferences and join media defaults.</source>
+        <translation>请查看我当前的客户端偏好与入会音视频默认设置。</translation>
+    </message>
+    <message>
+        <source>Switch to Ask (read-only Q&amp;A) mode</source>
+        <translation>切换到 Ask（只读问答）模式</translation>
+    </message>
+    <message>
+        <source>Switch to Agent (tool actions) mode</source>
+        <translation>切换到 Agent（智能执行）模式</translation>
+    </message>
+    <message>
+        <source>Clear current Copilot conversation</source>
+        <translation>清空当前 Copilot 对话记录</translation>
+    </message>
+    <message>
+        <source>End-to-end encrypted meeting: please authorize AI sharing in the banner before attaching meeting context.</source>
+        <translation>当前为端到端加密会议：附加会议上下文前请先在顶部横幅点击“允许”。</translation>
+    </message>
+    <message>
+        <source>Turn retried.</source>
+        <translation>已重新发起本轮对话。</translation>
+    </message>
+    <message>
+        <source>Cancelled: %1</source>
+        <translation>已取消：%1</translation>
+    </message>
+    <message>
+        <source>Check participants</source>
+        <translation>查看参会者</translation>
+    </message>
+    <message>
+        <source>List the current meeting participants and their media status.</source>
+        <translation>请列出当前会议参会成员及音视频状态。</translation>
+    </message>
+    <message>
+        <source>Adjust join media settings</source>
+        <translation>查看入会默认设置</translation>
+    </message>
+    <message>
+        <source>Show my join media preferences.</source>
+        <translation>请查看我当前的入会默认音视频设置。</translation>
+    </message>
+    <message>
+        <source>Join media defaults</source>
+        <translation>入会音视频默认</translation>
+    </message>
+    <message>
+        <source>Show my default microphone, camera, and speaker settings for joining meetings.</source>
+        <translation>请查看我加入会议时的默认麦克风、摄像头和扬声器设置。</translation>
+    </message>
+    <message>
+        <source>Check app preferences</source>
+        <translation>查看客户端偏好</translation>
+    </message>
+    <message>
+        <source>Show my current client preferences.</source>
+        <translation>请查看我当前的客户端偏好设置。</translation>
+    </message>
+    <message>
+        <source>Extract action items</source>
+        <translation>提取待办事项</translation>
+    </message>
+    <message>
+        <source>List the key decisions and action items from the recent meeting chat.</source>
+        <translation>请从近期会议聊天中提炼关键决议和待办事项。</translation>
+    </message>
+    <message>
+        <source>Diagnose A/V quality</source>
+        <translation>诊断音视频质量</translation>
+    </message>
+    <message>
+        <source>Check current audio/video telemetry and network quality.</source>
+        <translation>请检查当前会议的音视频遥测与网络质量状态。</translation>
+    </message>
+    <message>
+        <source>Summarize chat</source>
+        <translation>总结聊天记录</translation>
+    </message>
+    <message>
+        <source>Summarize the recent meeting chat messages.</source>
+        <translation>请总结近期的会议聊天消息内容。</translation>
+    </message>
+    <message>
+        <source>Upcoming schedule</source>
+        <translation>查看近期日程</translation>
+    </message>
+    <message>
+        <source>List my upcoming scheduled meetings.</source>
+        <translation>请列出我即将开始的预定会议。</translation>
+    </message>
+    <message>
+        <source>Check client preferences</source>
+        <translation>检查客户端偏好</translation>
+    </message>
+    <message>
+        <source>Reading meeting overview...</source>
+        <translation>正在读取会议概览...</translation>
+    </message>
+    <message>
+        <source>Read meeting overview</source>
+        <translation>已读取会议概览</translation>
+    </message>
+    <message>
+        <source>Failed to read meeting overview</source>
+        <translation>读取会议概览失败</translation>
+    </message>
+    <message>
+        <source>Checking participant list...</source>
+        <translation>正在查询参会者列表...</translation>
+    </message>
+    <message>
+        <source>Checked participant list</source>
+        <translation>已查询参会者列表</translation>
+    </message>
+    <message>
+        <source>Failed to check participants</source>
+        <translation>查询参会者失败</translation>
+    </message>
+    <message>
+        <source>Reading recent meeting chat...</source>
+        <translation>正在读取近期聊天记录...</translation>
+    </message>
+    <message>
+        <source>Read recent meeting chat</source>
+        <translation>已读取近期聊天记录</translation>
+    </message>
+    <message>
+        <source>Failed to read recent meeting chat</source>
+        <translation>读取聊天记录失败</translation>
+    </message>
+    <message>
+        <source>Reading audio/video telemetry...</source>
+        <translation>正在读取音视频遥测...</translation>
+    </message>
+    <message>
+        <source>Read audio/video telemetry</source>
+        <translation>已读取音视频遥测</translation>
+    </message>
+    <message>
+        <source>Failed to read telemetry</source>
+        <translation>读取遥测失败</translation>
+    </message>
+    <message>
+        <source>Updating meeting state...</source>
+        <translation>正在更新协作状态...</translation>
+    </message>
+    <message>
+        <source>Updated meeting state</source>
+        <translation>已更新协作状态</translation>
+    </message>
+    <message>
+        <source>Failed to update meeting state</source>
+        <translation>更新协作状态失败</translation>
+    </message>
+    <message>
+        <source>Leaving the meeting...</source>
+        <translation>正在离开会议...</translation>
+    </message>
+    <message>
+        <source>Left the meeting</source>
+        <translation>已离开会议</translation>
+    </message>
+    <message>
+        <source>Failed to leave the meeting</source>
+        <translation>离开会议失败</translation>
+    </message>
+    <message>
+        <source>Listing scheduled meetings...</source>
+        <translation>正在查询会议日程...</translation>
+    </message>
+    <message>
+        <source>Listed scheduled meetings</source>
+        <translation>已查询会议日程</translation>
+    </message>
+    <message>
+        <source>Failed to list scheduled meetings</source>
+        <translation>查询会议日程失败</translation>
+    </message>
+    <message>
+        <source>Loading scheduled meeting details...</source>
+        <translation>正在读取会议详情...</translation>
+    </message>
+    <message>
+        <source>Loaded scheduled meeting details</source>
+        <translation>已读取会议详情</translation>
+    </message>
+    <message>
+        <source>Failed to load meeting details</source>
+        <translation>读取会议详情失败</translation>
+    </message>
+    <message>
+        <source>Reading client preferences...</source>
+        <translation>正在读取客户端偏好...</translation>
+    </message>
+    <message>
+        <source>Read client preferences</source>
+        <translation>已读取客户端偏好</translation>
+    </message>
+    <message>
+        <source>Failed to read client preferences</source>
+        <translation>读取客户端偏好失败</translation>
+    </message>
+    <message>
+        <source>Reading join media preferences...</source>
+        <translation>正在读取入会媒体设置...</translation>
+    </message>
+    <message>
+        <source>Read join media preferences</source>
+        <translation>已读取入会媒体设置</translation>
+    </message>
+    <message>
+        <source>Failed to read join media preferences</source>
+        <translation>读取入会媒体设置失败</translation>
+    </message>
+    <message>
+        <source>Listing audio/video devices...</source>
+        <translation>正在枚举音视频设备...</translation>
+    </message>
+    <message>
+        <source>Listed audio/video devices</source>
+        <translation>已枚举音视频设备</translation>
+    </message>
+    <message>
+        <source>Failed to list media devices</source>
+        <translation>枚举音视频设备失败</translation>
+    </message>
+    <message>
+        <source>Checking app update status...</source>
+        <translation>正在检查更新状态...</translation>
+    </message>
+    <message>
+        <source>Checked app update status</source>
+        <translation>已检查更新状态</translation>
+    </message>
+    <message>
+        <source>Failed to check update status</source>
+        <translation>检查更新状态失败</translation>
+    </message>
+    <message>
+        <source>Checking for app updates...</source>
+        <translation>正在检查客户端更新...</translation>
+    </message>
+    <message>
+        <source>Checked for app updates</source>
+        <translation>已完成更新检查</translation>
+    </message>
+    <message>
+        <source>Failed to check for updates</source>
+        <translation>检查更新失败</translation>
+    </message>
+    <message>
+        <source>Applying app update action...</source>
+        <translation>正在执行客户端更新操作...</translation>
+    </message>
+    <message>
+        <source>Completed app update action</source>
+        <translation>已完成更新操作</translation>
+    </message>
+    <message>
+        <source>App update action failed</source>
+        <translation>客户端更新操作失败</translation>
+    </message>
+    <message>
+        <source>Updating client preferences...</source>
+        <translation>正在修改客户端偏好...</translation>
+    </message>
+    <message>
+        <source>Updated client preferences</source>
+        <translation>已更新客户端偏好</translation>
+    </message>
+    <message>
+        <source>Failed to update client preferences</source>
+        <translation>修改客户端偏好失败</translation>
+    </message>
+    <message>
+        <source>Updating join media preferences...</source>
+        <translation>正在修改入会媒体设置...</translation>
+    </message>
+    <message>
+        <source>Updated join media preferences</source>
+        <translation>已更新入会媒体设置</translation>
+    </message>
+    <message>
+        <source>Failed to update join media preferences</source>
+        <translation>修改入会媒体设置失败</translation>
+    </message>
+    <message>
+        <source>Muting microphone...</source>
+        <translation>正在关闭麦克风...</translation>
+    </message>
+    <message>
+        <source>Muted microphone</source>
+        <translation>已关闭麦克风</translation>
+    </message>
+    <message>
+        <source>Failed to mute microphone</source>
+        <translation>关闭麦克风失败</translation>
+    </message>
+    <message>
+        <source>Unmuting microphone...</source>
+        <translation>正在开启麦克风...</translation>
+    </message>
+    <message>
+        <source>Unmuted microphone</source>
+        <translation>已开启麦克风</translation>
+    </message>
+    <message>
+        <source>Failed to unmute microphone</source>
+        <translation>开启麦克风失败</translation>
+    </message>
+    <message>
+        <source>Turning on camera...</source>
+        <translation>正在开启摄像头...</translation>
+    </message>
+    <message>
+        <source>Turned on camera</source>
+        <translation>已开启摄像头</translation>
+    </message>
+    <message>
+        <source>Failed to turn on camera</source>
+        <translation>开启摄像头失败</translation>
+    </message>
+    <message>
+        <source>Turning off camera...</source>
+        <translation>正在关闭摄像头...</translation>
+    </message>
+    <message>
+        <source>Turned off camera</source>
+        <translation>已关闭摄像头</translation>
+    </message>
+    <message>
+        <source>Failed to turn off camera</source>
+        <translation>关闭摄像头失败</translation>
+    </message>
+    <message>
+        <source>Sending meeting chat message...</source>
+        <translation>正在发送会议聊天消息...</translation>
+    </message>
+    <message>
+        <source>Sent meeting chat message</source>
+        <translation>已发送会议聊天消息</translation>
+    </message>
+    <message>
+        <source>Failed to send meeting chat</source>
+        <translation>发送聊天消息失败</translation>
+    </message>
+    <message>
+        <source>Moderating participant...</source>
+        <translation>正在执行主持人管理操作...</translation>
+    </message>
+    <message>
+        <source>Moderated participant</source>
+        <translation>已执行会场管理操作</translation>
+    </message>
+    <message>
+        <source>Failed to moderate participant</source>
+        <translation>会场管理操作失败</translation>
+    </message>
+    <message>
+        <source>Scheduling meeting...</source>
+        <translation>正在预定会议...</translation>
+    </message>
+    <message>
+        <source>Scheduled meeting</source>
+        <translation>已预定会议</translation>
+    </message>
+    <message>
+        <source>Failed to schedule meeting</source>
+        <translation>预定会议失败</translation>
+    </message>
+    <message>
+        <source>Scheduling meeting &quot;%1&quot;...</source>
+        <translation>正在预定会议“%1”...</translation>
+    </message>
+    <message>
+        <source>Scheduled meeting &quot;%1&quot;</source>
+        <translation>已预定会议“%1”</translation>
+    </message>
+    <message>
+        <source>Failed to schedule &quot;%1&quot;</source>
+        <translation>预定会议“%1”失败</translation>
+    </message>
+    <message>
+        <source>Updating scheduled meeting...</source>
+        <translation>正在修改预定会议...</translation>
+    </message>
+    <message>
+        <source>Updated scheduled meeting</source>
+        <translation>已更新预定会议</translation>
+    </message>
+    <message>
+        <source>Failed to update scheduled meeting</source>
+        <translation>修改预定会议失败</translation>
+    </message>
+    <message>
+        <source>Canceling scheduled meeting...</source>
+        <translation>正在取消预定会议...</translation>
+    </message>
+    <message>
+        <source>Canceled scheduled meeting</source>
+        <translation>已取消预定会议</translation>
+    </message>
+    <message>
+        <source>Failed to cancel scheduled meeting</source>
+        <translation>取消预定会议失败</translation>
+    </message>
+    <message>
+        <source>Joining or starting meeting...</source>
+        <translation>正在加入或发起会议...</translation>
+    </message>
+    <message>
+        <source>Joined or started meeting</source>
+        <translation>已加入或发起会议</translation>
+    </message>
+    <message>
+        <source>Failed to join or start meeting</source>
+        <translation>加入或发起会议失败</translation>
+    </message>
+    <message>
+        <source>Running %1...</source>
+        <translation>正在执行 %1...</translation>
+    </message>
+    <message>
+        <source>Completed %1</source>
+        <translation>已完成 %1</translation>
+    </message>
+    <message>
+        <source>Tool %1 failed</source>
+        <translation>工具 %1 执行失败</translation>
+    </message>
+    <message>
+        <source>New Chat</source>
+        <translation>新对话</translation>
+    </message>
+    <message>
+        <source>Image prompt</source>
+        <translation>图片提问</translation>
+    </message>
+    <message>
+        <source>New chat</source>
+        <translation>新建对话</translation>
+    </message>
+    <message>
+        <source>Start a new Copilot conversation</source>
+        <translation>开启一个新的 Copilot 对话</translation>
+    </message>
+    <message>
+        <source>Chat history and actions</source>
+        <translation>历史对话与操作</translation>
+    </message>
+    <message>
+        <source>Editing previous message — sending will re-run from here</source>
+        <translation>正在编辑历史消息 —— 发送后将从此处重新生成</translation>
+    </message>
+    <message>
+        <source>Copy Code Block</source>
+        <translation>复制代码块</translation>
+    </message>
+    <message>
+        <source>Edit &amp; Resend</source>
+        <translation>编辑并重发</translation>
+    </message>
+    <message>
+        <source>Regenerate Response</source>
+        <translation>重新生成回复</translation>
+    </message>
+    <message>
+        <source>Export Conversation (.md)</source>
+        <translation>导出对话 (.md)</translation>
+    </message>
+    <message>
+        <source>Rename Conversation</source>
+        <translation>重命名对话</translation>
+    </message>
+    <message>
+        <source>Save</source>
+        <translation>保存</translation>
+    </message>
+    <message>
+        <source>Export Copilot Conversation</source>
+        <translation>导出 Copilot 对话</translation>
+    </message>
+    <message>
+        <source>Markdown (*.md);;Text Files (*.txt);;All Files (*.*)</source>
+        <translation>Markdown 文件 (*.md);;文本文件 (*.txt);;所有文件 (*.*)</translation>
+    </message>
+    <message>
+        <source>Failed to save exported conversation.</source>
+        <translation>保存导出的对话文件失败。</translation>
+    </message>
+    <message>
+        <source>Switched conversation.</source>
+        <translation>已切换对话。</translation>
+    </message>
+    <message>
+        <source>Conversation deleted.</source>
+        <translation>对话已删除。</translation>
+    </message>
+    <message>
+        <source>Save Copilot chat history locally per account</source>
+        <translation>按账号在本地保存 Copilot 历史对话</translation>
+    </message>
+    <message>
+        <source>Clear Saved History</source>
+        <translation>清除本地历史</translation>
+    </message>
+    <message>
+        <source>Saved Copilot chat history cleared for the current account.</source>
+        <translation>当前账号保存的 Copilot 对话历史已清除。</translation>
+    </message>
+    <message>
+        <source>Attach meeting chat, telemetry, participants, schedule, or images (or type #)</source>
+        <translation>附加会议聊天、音视频遥测、参会成员、会议日程或图片（也可输入 #）</translation>
+    </message>
+    <message>
+        <source>Attach image...</source>
+        <translation>添加图片...</translation>
+    </message>
+    <message>
+        <source>Account session changed.</source>
+        <translation>账号会话已变更。</translation>
+    </message>
+    <message>
+        <source>Action is no longer available in the current meeting or permission state.</source>
+        <translation>当前会议或权限状态下该操作已不可用。</translation>
+    </message>
+    <message>
+        <source>Read-only query requiring confirmation under current permission mode.</source>
+        <translation>当前权限模式下，此只读查询需要您确认后执行。</translation>
+    </message>
+    <message>
+        <source>Restore default panel width</source>
+        <translation>恢复默认面板宽度</translation>
+    </message>
+    <message>
+        <source>Expand panel width</source>
+        <translation>加宽面板宽度</translation>
+    </message>
+    <message>
+        <source>More Copilot actions</source>
+        <translation>更多 Copilot 操作</translation>
+    </message>
+    <message>
+        <source>Clear, export, or open settings</source>
+        <translation>清空、导出对话或打开设置</translation>
+    </message>
+    <message>
+        <source>Toggle conversation history</source>
+        <translation>切换会话历史</translation>
+    </message>
+    <message>
+        <source>Browse saved conversations</source>
+        <translation>浏览已保存的对话</translation>
+    </message>
+    <message>
+        <source>Switch saved conversations</source>
+        <translation>切换已保存的对话</translation>
+    </message>
+    <message>
+        <source>Conversations</source>
+        <translation>历史对话</translation>
+    </message>
+    <message>
+        <source>+ New Chat</source>
+        <translation>+ 新建对话</translation>
+    </message>
+    <message>
+        <source>Rename...</source>
+        <translation>重命名...</translation>
+    </message>
+    <message>
+        <source>Delete</source>
+        <translation>删除</translation>
+    </message>
+    <message>
+        <source>Export .md</source>
+        <translation>导出 .md</translation>
+    </message>
+    <message>
+        <source>Dictation</source>
+        <translation>语音听写</translation>
+    </message>
+    <message>
+        <source>Close Dictation</source>
+        <translation>关闭语音听写</translation>
+    </message>
+    <message>
+        <source>Speak and it becomes text. Adjust &lt;a href=&quot;cohavora://settings/audio&quot;&gt;settings&lt;/a&gt; or &lt;a href=&quot;cohavora://dictation/info&quot;&gt;how it works&lt;/a&gt;.</source>
+        <translation>说话即可转为文字。可随时调整 &lt;a href=&quot;cohavora://settings/audio&quot;&gt;设置&lt;/a&gt; 或查看 &lt;a href=&quot;cohavora://dictation/info&quot;&gt;工作原理&lt;/a&gt;。</translation>
+    </message>
+    <message>
+        <source>Dictation microphone</source>
+        <translation>听写麦克风</translation>
+    </message>
+    <message>
+        <source>System Default Microphone</source>
+        <translation>系统默认麦克风</translation>
+    </message>
+    <message>
+        <source>Waveform preview active — live speech-to-text transcription will arrive in the next phase.</source>
+        <translation>声波预览已开启 —— 实时语音转文字功能将在下一阶段上线。</translation>
+    </message>
+    <message>
+        <source>Chat with Copilot (/ commands, # context)</source>
+        <translation>向 Copilot 提问（支持 / 指令、# 上下文）</translation>
+    </message>
+    <message>
+        <source>Switch AI model and reasoning</source>
+        <translation>切换 AI 模型与推理能力</translation>
+    </message>
+    <message>
+        <source>Toggle voice dictation</source>
+        <translation>开启或关闭语音听写</translation>
+    </message>
+    <message>
+        <source>Voice dictation (waveform preview)</source>
+        <translation>语音听写（声波预览）</translation>
+    </message>
+    <message>
+        <source>Send message (Enter)</source>
+        <translation>发送消息（Enter）</translation>
+    </message>
+    <message>
+        <source>Copilot mode and tool permissions</source>
+        <translation>Copilot 模式与工具权限</translation>
+    </message>
+    <message>
+        <source>Copilot connection status</source>
+        <translation>Copilot 连接状态</translation>
+    </message>
+    <message>
+        <source>Conversation History</source>
+        <translation>历史对话记录</translation>
+    </message>
+    <message>
+        <source>Configure Model</source>
+        <translation>配置模型</translation>
+    </message>
+    <message>
+        <source>Configure AI Copilot endpoint and model</source>
+        <translation>配置 AI Copilot 接口地址与模型</translation>
+    </message>
+    <message>
+        <source>Model</source>
+        <translation>模型</translation>
+    </message>
+    <message>
+        <source>Context window</source>
+        <translation>上下文窗口</translation>
+    </message>
+    <message>
+        <source>Interactive | Manual permissions</source>
+        <translation>交互模式 | 手动授权</translation>
+    </message>
+    <message>
+        <source>Copilot unavailable</source>
+        <translation>Copilot 不可用</translation>
+    </message>
+    <message>
+        <source>Ask | Read-only</source>
+        <translation>问答模式 | 只读</translation>
+    </message>
+    <message>
+        <source>Interactive | Confirm all</source>
+        <translation>交互模式 | 全部确认</translation>
+    </message>
+    <message>
+        <source>Switch interaction mode (Agent / Ask) and tool approval policy</source>
+        <translation>切换交互模式（Agent / 只读问答）与工具审批策略</translation>
+    </message>
+    <message>
+        <source>API not configured — click to open settings</source>
+        <translation>未配置 API —— 点击打开设置</translation>
+    </message>
+    <message>
+        <source>Encrypted meeting: context sharing requires approval</source>
+        <translation>加密会议：共享上下文需要确认</translation>
+    </message>
+    <message>
+        <source>Connected &amp; ready — click to open Copilot settings</source>
+        <translation>已连接并就绪 —— 点击打开 Copilot 设置</translation>
+    </message>
+    <message>
+        <source>Stop generating</source>
+        <translation>停止生成</translation>
+    </message>
+    <message>
+        <source>%1 messages</source>
+        <translation>%1 条消息</translation>
+    </message>
+    <message>
+        <source>Clear Conversation</source>
+        <translation>清空当前对话</translation>
+    </message>
+    <message>
+        <source>Copilot Settings...</source>
+        <translation>Copilot 设置...</translation>
+    </message>
+    <message>
+        <source>Refreshing models...</source>
+        <translation>正在刷新模型列表...</translation>
+    </message>
+    <message>
+        <source>Refresh Available Models</source>
+        <translation>刷新可用模型</translation>
+    </message>
+    <message>
+        <source>Configure Endpoint &amp; API Key...</source>
+        <translation>配置接口地址与 API 密钥...</translation>
+    </message>
+    <message>
+        <source>Interactive (Agent tools)</source>
+        <translation>交互模式（可调用工具）</translation>
+    </message>
+    <message>
+        <source>Ask (Read-only Q&amp;A)</source>
+        <translation>问答模式（仅只读回答）</translation>
+    </message>
+    <message>
+        <source>Manual permissions (confirm actions)</source>
+        <translation>手动权限（操作前确认）</translation>
+    </message>
+    <message>
+        <source>Confirm all tools (strict)</source>
+        <translation>严格确认全部工具</translation>
+    </message>
+    <message>
+        <source>Hint: Speech recognition authentication failed. Check the API key and permissions in Copilot Settings.</source>
+        <translation>提示：语音识别鉴权失败。请在 Copilot 设置中检查 API Key 及权限。</translation>
+    </message>
+    <message>
+        <source>Detail: Detected a Bailian Token/Coding Plan key (sk-sp-...) against a standard DashScope endpoint. Speech recognition requires a standard DashScope API key (sk-...) or a matching plan endpoint.</source>
+        <translation>详情：检测到百炼 Token/Coding Plan 密钥（sk-sp-...）正请求标准 DashScope 端点。语音识别通常需使用标准 DashScope API Key（sk-...）或对应的专属端点。</translation>
+    </message>
+    <message>
+        <source>Detail: Detected a standard sk-... key against a Bailian Token/Coding Plan host. Plan endpoints require an sk-sp-... key, and speech ASR models generally require the standard DashScope endpoint (dashscope.aliyuncs.com).</source>
+        <translation>详情：检测到标准 sk-... 密钥正请求百炼 Token/Coding Plan 专属端点。套餐端点需搭配 sk-sp-... 密钥，且语音识别 ASR 模型通常需指向标准 DashScope 端点（dashscope.aliyuncs.com）。</translation>
+    </message>
+    <message>
+        <source>Detail: Detected a Groq API key (gsk_...) against a non-Groq speech endpoint. Use a matching provider API key (e.g. sk-... for SiliconFlow/OpenAI/DashScope) or switch the STT endpoint to https://api.groq.com/openai/v1.</source>
+        <translation>详情：检测到 Groq API 密钥（gsk_...）正请求非 Groq 语音端点。请使用对应服务商的 API 密钥（如硅基流动/OpenAI/DashScope 的 sk-...），或将 STT 端点切换为 https://api.groq.com/openai/v1。</translation>
+    </message>
+    <message>
+        <source>Hint: This endpoint rejected the speech recognition request or does not support the selected ASR model on this route. Try another STT model or configure a dedicated Speech-to-Text Endpoint in Copilot Settings.</source>
+        <translation>提示：当前端点拒绝了该语音识别请求，或此路径暂不支持所选 ASR 模型。可尝试切换其他 STT 模型，或在 Copilot 设置中单独配置语音转文字（STT）端点。</translation>
+    </message>
+    <message>
+        <source>Hint: This model is not activated for your account in this region yet. Please activate it in your provider console (e.g. Volcengine Ark Open Management) or select an activated model/endpoint ID.</source>
+        <translation>提示：当前账号在该区域尚未开通此模型服务。请前往服务商控制台（如火山方舟“开通管理”）开通该模型，或在设置中切换为已开通的模型/推理接入点 ID。</translation>
+    </message>
+    <message>
+        <source>Hint: This endpoint may not expose /audio/transcriptions or the selected STT model is unsupported. You can configure a dedicated Speech-to-Text Endpoint/Model in Copilot Settings.</source>
+        <translation>提示：当前端点可能未开放 /audio/transcriptions 接口，或不支持所选 STT 模型。您可以在 Copilot 设置中单独配置语音转文字（STT）端点/模型。</translation>
+    </message>
+    <message>
+        <source>Microphone became unavailable. Check system audio permissions.</source>
+        <translation>麦克风已不可用，请检查系统音频权限。</translation>
+    </message>
+    <message>
+        <source>Unable to access the selected microphone. Check permissions or select another device.</source>
+        <translation>无法访问所选麦克风，请检查权限或切换其他设备。</translation>
+    </message>
+    <message>
+        <source>Local microphone dictation capture requires Windows WASAPI or an unmuted meeting with live transcription.</source>
+        <translation>本地麦克风听写需要 Windows WASAPI 支持，或在未静音的会议中启用服务端实时转录。</translation>
+    </message>
+    <message>
+        <source>Saved API key could not be decrypted. Please re-enter it in Settings &gt; Copilot.</source>
+        <translation>已保存的 API Key 无法解密，请在“设置 &gt; Copilot”中重新输入。</translation>
+    </message>
+    <message>
+        <source>Saved STT API key could not be decrypted. Please re-enter it in Settings &gt; Copilot.</source>
+        <translation>已保存的语音识别（STT）API 密钥无法解密，请在“设置 &gt; Copilot”中重新输入。</translation>
+    </message>
+    <message>
+        <source>Saved API key could not be accessed (OS encrypted storage is locked or unavailable). Please unlock your keyring or re-enter it in Settings &gt; Copilot.</source>
+        <translation>无法读取已保存的 API 密钥（系统加密存储被锁定或不可用），请先解锁系统密钥环，或在“设置 &gt; Copilot”中重新输入。</translation>
+    </message>
+    <message>
+        <source>Saved STT API key could not be accessed (OS encrypted storage is locked or unavailable). Please unlock your keyring or re-enter it in Settings &gt; Copilot.</source>
+        <translation>无法读取已保存的语音识别（STT）API 密钥（系统加密存储被锁定或不可用），请先解锁系统密钥环，或在“设置 &gt; Copilot”中重新输入。</translation>
+    </message>
+    <message>
+        <source>A separate STT API key is required for the custom Speech-to-Text endpoint. Please enter it in Settings &gt; Copilot.</source>
+        <translation>自定义语音转文字（STT）端点需要单独配置 STT API 密钥，请在“设置 &gt; Copilot”中输入并保存。</translation>
+    </message>
+    <message>
+        <source>Reading meeting voice transcripts...</source>
+        <translation>正在读取会议语音转录...</translation>
+    </message>
+    <message>
+        <source>Read meeting voice transcripts</source>
+        <translation>已读取会议语音转录</translation>
+    </message>
+    <message>
+        <source>Failed to read meeting transcripts</source>
+        <translation>读取会议语音转录失败</translation>
+    </message>
+    <message>
+        <source>#transcript</source>
+        <translation>#语音转录</translation>
+    </message>
+    <message>
+        <source>Attach recent meeting AI voice transcript</source>
+        <translation>附加最近的会议 AI 语音转录记录</translation>
+    </message>
+    <message>
+        <source>Summarize meeting chat, voice transcript, and action items</source>
+        <translation>总结会议聊天、语音转录与待办事项</translation>
+    </message>
+    <message>
+        <source>Summarize live AI voice transcript</source>
+        <translation>总结实时 AI 语音转录内容</translation>
+    </message>
+    <message>
+        <source>Summarize the recent AI voice transcript and highlight speakers and decisions.</source>
+        <translation>总结最近的 AI 语音转录内容，并提炼发言人要点与会议结论。</translation>
+    </message>
+    <message>
+        <source>Speak and it becomes text. Adjust &lt;a href=&quot;cohavora://settings/copilot/asr&quot;&gt;settings&lt;/a&gt; or &lt;a href=&quot;cohavora://dictation/info&quot;&gt;how it works&lt;/a&gt;.</source>
+        <translation>说话即可转为文字。随时调整 &lt;a href=&quot;cohavora://settings/copilot/asr&quot;&gt;设置&lt;/a&gt; 或查看 &lt;a href=&quot;cohavora://dictation/info&quot;&gt;工作原理&lt;/a&gt;。</translation>
+    </message>
+    <message>
+        <source>Voice dictation (speak into message box)</source>
+        <translation>语音听写（直接将语音转为输入框文本）</translation>
+    </message>
+    <message>
+        <source>Transcribing...</source>
+        <translation>正在转写...</translation>
+    </message>
+    <message>
+        <source>Voice dictation error</source>
+        <translation>语音听写出错</translation>
+    </message>
+    <message>
+        <source>Uses live room captions when unmuted with server transcription; otherwise captures local microphone audio and sends it to your configured speech recognition service (WebSocket streaming ASR or HTTP STT).</source>
+        <translation>当处于未静音的会议且服务端已开启实时转录时，直接复用实时字幕；否则在本地采集麦克风语音并发送至已配置的语音识别服务（支持 WebSocket 流式 ASR 与 HTTP STT）。</translation>
+    </message>
+    <message>
+        <source>Using live meeting captions for voice input.</source>
+        <translation>正在复用会议实时字幕作为语音输入。</translation>
+    </message>
+    <message>
+        <source>Speech Recognition &amp; Dictation (ASR / STT)</source>
+        <translation>语音识别与听写 (ASR / STT)</translation>
+    </message>
+    <message>
+        <source>Shared by Copilot voice dictation and in-meeting live transcription/translation. Supports both WebSocket streaming ASR and HTTP STT.</source>
+        <translation>同时用于 Copilot 语音听写与会中实时转译，支持 WebSocket 流式 ASR 与 HTTP STT。</translation>
+    </message>
+    <message>
+        <source>Shared by Copilot voice dictation and live meeting transcription. Reuse your active &quot;Models &amp; Chat&quot; connection, or switch to Custom Speech Profiles to manage multiple dedicated ASR endpoints.</source>
+        <translation>同时用于 Copilot 语音听写与会中实时转译。可直接复用当前「模型与对话」的连接与密钥，也可切换为“自定义语音配置”管理多套独立识别端点。</translation>
+    </message>
+    <message>
+        <source>Speech Endpoint URL (HTTP / WSS)</source>
+        <translation>语音识别端点 URL (HTTP / WSS)</translation>
+    </message>
+    <message>
+        <source>Optional — supports https:// or wss:// (leave blank for Chat URL or default streaming endpoint)</source>
+        <translation>可选 — 支持 https:// 或 wss://（留空复用对话地址或所选流式协议默认端点）</translation>
+    </message>
+    <message>
+        <source>Speech API Key</source>
+        <translation>语音识别 API 密钥</translation>
+    </message>
+    <message>
+        <source>Speech API Key (Bearer Token)</source>
+        <translation>语音识别 API 密钥 (Bearer Token)</translation>
+    </message>
+    <message>
+        <source>Enter separate speech API key (optional on same host)</source>
+        <translation>输入独立语音识别密钥（同域名可留空复用）</translation>
+    </message>
+    <message>
+        <source>No separate speech API key saved (reuses Chat key on the same host; required for third-party HTTP or WebSocket streaming providers such as OpenAI, DashScope, Deepgram, AssemblyAI, Volcengine, ElevenLabs, xAI, or Groq).</source>
+        <translation>未保存独立语音识别密钥（同域名将复用主对话密钥；使用第三方 HTTP 或 WebSocket 流式语音服务，如 OpenAI、百炼、Deepgram、AssemblyAI、火山引擎、ElevenLabs、xAI、Groq 等时请单独填写并保存）。</translation>
+    </message>
+    <message>
+        <source>Dedicated speech API key saved (encrypted on this device).</source>
+        <translation>独立语音识别密钥已保存（已在本设备加密存储）。</translation>
+    </message>
+    <message>
+        <source>Dedicated speech API key loaded (session memory only).</source>
+        <translation>独立语音识别密钥已加载（仅当前会话内存保存）。</translation>
+    </message>
+    <message>
+        <source>Warning: Bailian Token/Coding Plan key (sk-sp-...) is not valid for standard DashScope speech endpoints; use a standard sk-... key.</source>
+        <translation>警告：百炼 Token/Coding Plan 密钥（sk-sp-...）不能用于标准 DashScope 语音端点；请改用标准 sk-... 密钥。</translation>
+    </message>
+    <message>
+        <source>Warning: Bailian Token/Coding Plan key (sk-sp-...) requires a plan endpoint (e.g. coding.dashscope.aliyuncs.com or token-plan.*.maas.aliyuncs.com), not a standard DashScope URL.</source>
+        <translation>警告：百炼 Token/Coding Plan 密钥（sk-sp-...）需配合套餐专属端点（如 coding.dashscope.aliyuncs.com 或 token-plan.*.maas.aliyuncs.com）使用，不适用于标准 DashScope 地址。</translation>
+    </message>
+    <message>
+        <source>Warning: Standard sk-... key does not match a Bailian Token/Coding Plan host, and speech ASR models generally require the standard DashScope endpoint (dashscope.aliyuncs.com).</source>
+        <translation>警告：标准 sk-... 密钥与百炼 Token/Coding Plan 端点不匹配，且语音识别 ASR 模型通常需指向标准 DashScope 端点（dashscope.aliyuncs.com）。</translation>
+    </message>
+    <message>
+        <source>Warning: Standard sk-... key does not match a Bailian Token/Coding Plan endpoint (use an sk-sp-... plan key or switch to the standard DashScope URL).</source>
+        <translation>警告：标准 sk-... 密钥与百炼 Token/Coding Plan 端点不匹配（请填写 sk-sp-... 套餐密钥，或切回标准 DashScope 地址）。</translation>
+    </message>
+    <message>
+        <source>Warning: Detected a Groq API key (gsk_...) against a non-Groq STT endpoint. Use a matching provider key (e.g. sk-... for SiliconFlow/OpenAI/DashScope) or set the STT URL to https://api.groq.com/openai/v1.</source>
+        <translation>警告：检测到 Groq API 密钥（gsk_...）正用于非 Groq 的 STT 端点。请改用对应服务商的密钥（如硅基流动/OpenAI/DashScope 的 sk-...），或将 STT 地址设为 https://api.groq.com/openai/v1。</translation>
+    </message>
+    <message>
+        <source>Warning: Detected a Groq API key (gsk_...) against a non-Groq endpoint. Use a matching provider key or switch the Base URL to https://api.groq.com/openai/v1.</source>
+        <translation>警告：检测到 Groq API 密钥（gsk_...）正用于非 Groq 端点。请改用对应服务商的密钥，或将 Base URL 切换为 https://api.groq.com/openai/v1。</translation>
+    </message>
+    <message>
+        <source>Warning: Speech Endpoint URL is blank or shares the Chat host, so this separate speech key overrides your Chat API key for speech recognition. Click Clear Key to reuse the Chat key.</source>
+        <translation>警告：当前语音识别端点为空或与主对话同域名，该独立密钥正在覆盖主对话密钥；如需复用主对话密钥请点击“清除密钥”。</translation>
+    </message>
+    <message>
+        <source>Recognition Protocol</source>
+        <translation>识别协议</translation>
+    </message>
+    <message>
+        <source>Auto mode routes wss:// URLs and streaming models (e.g. gpt-4o-transcribe, paraformer-realtime-v2, qwen3-asr-flash-realtime) to WebSocket streaming ASR, while keeping https:// + whisper-1 / qwen3-asr-flash on HTTP STT. Selecting a specific streaming protocol lets you leave the URL blank to use its official wss:// endpoint.</source>
+        <translation>自动模式下，wss:// 地址或流式模型（如 gpt-4o-transcribe、paraformer-realtime-v2、qwen3-asr-flash-realtime）会自动走 WebSocket 流式 ASR，https:// + whisper-1 / qwen3-asr-flash 保持 HTTP STT。手动选择具体流式协议时，URL 留空会自动使用其官方 wss:// 端点。</translation>
+    </message>
+    <message>
+        <source>Auto mode routes wss:// URLs and streaming models (e.g. gpt-4o-transcribe, paraformer-realtime-v2, qwen3-asr-flash-realtime) to WebSocket streaming ASR, while keeping https:// + whisper-1 / qwen3-asr-flash on HTTP STT. Select a specific streaming protocol in Custom Speech Profiles to use its official wss:// endpoint with a dedicated key.</source>
+        <translation>自动模式下，wss:// 地址或流式模型（如 gpt-4o-transcribe、paraformer-realtime-v2、qwen3-asr-flash-realtime）会自动走 WebSocket 流式 ASR，https:// + whisper-1 / qwen3-asr-flash 保持 HTTP STT。若需使用带专属 wss:// 端点和独立密钥的流式服务，请切换为“自定义语音配置”并选择对应协议。</translation>
+    </message>
+    <message>
+        <source>Auto (Recommended)</source>
+        <translation>自动（推荐）</translation>
+    </message>
+    <message>
+        <source>OpenAI Transcriptions (/audio/transcriptions)</source>
+        <translation>OpenAI Transcriptions (/audio/transcriptions)</translation>
+    </message>
+    <message>
+        <source>Chat Audio (/chat/completions)</source>
+        <translation>Chat Audio (/chat/completions)</translation>
+    </message>
+    <message>
+        <source>DashScope Multimodal (multimodal-generation)</source>
+        <translation>DashScope 多模态 (multimodal-generation)</translation>
+    </message>
+    <message>
+        <source>Speech Model</source>
+        <translation>识别模型</translation>
+    </message>
+    <message>
+        <source>Auto (e.g. gpt-4o-transcribe / paraformer-realtime-v2 / qwen3-asr-flash / whisper-1)</source>
+        <translation>自动（如 gpt-4o-transcribe / paraformer-realtime-v2 / qwen3-asr-flash / whisper-1）</translation>
+    </message>
+    <message>
+        <source>Auto (Groq default: whisper-large-v3-turbo)</source>
+        <translation>自动（Groq 默认: whisper-large-v3-turbo）</translation>
+    </message>
+    <message>
+        <source>Auto (default: %1)</source>
+        <translation>自动（默认: %1）</translation>
+    </message>
+    <message>
+        <source>Model '%1' is a text-to-speech synthesis model and cannot be used for microphone dictation. Please select a synchronous speech recognition model such as %2.</source>
+        <translation>模型“%1”为语音合成（TTS）模型，不支持麦克风听写。请选择同步语音识别模型（如 %2）。</translation>
+    </message>
+    <message>
+        <source>Model '%1' is a general audio understanding model rather than dedicated dictation ASR (unless declared with audio-to-text capability). Please select a synchronous speech recognition model such as %2.</source>
+        <translation>模型“%1”为通用音频理解模型（需服务端声明 audio→text 能力后方可用于听写）。请选择同步语音识别模型（如 %2）。</translation>
+    </message>
+    <message>
+        <source>Model '%1' requires WebSocket streaming ASR and cannot be used with the selected HTTP protocol. Switch Recognition Protocol to Auto (Recommended) or the matching WebSocket streaming protocol, or choose a synchronous HTTP model such as %2.</source>
+        <translation>模型“%1”为 WebSocket 实时流式模型，不支持当前选中的 HTTP 协议。请将识别协议切换为“自动（推荐）”或对应的 WebSocket 流式协议，或改选同步 HTTP 模型（如 %2）。</translation>
+    </message>
+    <message>
+        <source>Model '%1' is an async file-URL transcription model and cannot be used for live microphone recognition. Please select a streaming or synchronous model such as %2.</source>
+        <translation>模型“%1”为异步文件 URL 任务模型，不支持实时麦克风语音识别。请选择流式或同步语音识别模型（如 %2）。</translation>
+    </message>
+    <message>
+        <source>Auto-detect</source>
+        <translation>自动检测</translation>
+    </message>
+    <message>
+        <source>Chinese (zh)</source>
+        <translation>中文 (zh)</translation>
+    </message>
+    <message>
+        <source>English (en)</source>
+        <translation>英文 (en)</translation>
+    </message>
+    <message>
+        <source>Japanese (ja)</source>
+        <translation>日文 (ja)</translation>
+    </message>
+    <message>
+        <source>Korean (ko)</source>
+        <translation>韩文 (ko)</translation>
+    </message>
+    <message>
+        <source>Auto-Send Pause</source>
+        <translation>停顿自动发送</translation>
+    </message>
+    <message>
+        <source>Manual send only (0 ms)</source>
+        <translation>仅手动发送 (0 ms)</translation>
+    </message>
+    <message>
+        <source>1.5 s pause (1500 ms)</source>
+        <translation>停顿 1.5 秒 (1500 ms)</translation>
+    </message>
+    <message>
+        <source>2.5 s pause (2500 ms)</source>
+        <translation>停顿 2.5 秒 (2500 ms)</translation>
+    </message>
+    <message>
+        <source>[AI]</source>
+        <translation>[AI]</translation>
+    </message>
+    <message>
+        <source>[AI] %1</source>
+        <translation>[AI] %1</translation>
+    </message>
+    <message>
+        <source>Update Client Settings</source>
+        <translation>更新客户端设置</translation>
+    </message>
+    <message>
+        <source>Video capture FPS</source>
+        <translation>摄像头采集帧率</translation>
+    </message>
+    <message>
+        <source>Send meeting context by default</source>
+        <translation>默认附带会议上下文</translation>
+    </message>
+    <message>
+        <source>Start Instant Meeting</source>
+        <translation>发起即时会议</translation>
+    </message>
+    <message>
+        <source>Enter 9-digit meeting ID to join, or click Join...</source>
+        <translation>输入 9 位会议号加入，或直接点击加入...</translation>
+    </message>
+    <message>
+        <source>Join</source>
+        <translation>加入</translation>
+    </message>
+    <message>
+        <source>Join Presets</source>
+        <translation>入会预设</translation>
+    </message>
+    <message>
+        <source>Mic: On</source>
+        <translation>麦克风：开</translation>
+    </message>
+    <message>
+        <source>Mic: Off</source>
+        <translation>麦克风：关</translation>
+    </message>
+    <message>
+        <source>Click to toggle default microphone state on joining</source>
+        <translation>点击切换入会时默认麦克风状态</translation>
+    </message>
+    <message>
+        <source>Camera: On</source>
+        <translation>摄像头：开</translation>
+    </message>
+    <message>
+        <source>Camera: Off</source>
+        <translation>摄像头：关</translation>
+    </message>
+    <message>
+        <source>Click to toggle default camera state on joining</source>
+        <translation>点击切换入会时默认摄像头状态</translation>
+    </message>
+    <message>
+        <source>Encryption: Key Needed</source>
+        <translation>加密：待设密钥</translation>
+    </message>
+    <message>
+        <source>Encryption: On</source>
+        <translation>加密：已启用</translation>
+    </message>
+    <message>
+        <source>Encryption: Custom</source>
+        <translation>加密：部分启用</translation>
+    </message>
+    <message>
+        <source>Encryption: On Demand</source>
+        <translation>加密：按需</translation>
+    </message>
+    <message>
+        <source>Open security and end-to-end encryption settings</source>
+        <translation>打开安全与端到端加密设置</translation>
+    </message>
+    <message>
+        <source>More Settings</source>
+        <translation>更多设置</translation>
+    </message>
+    <message>
+        <source>Upcoming Meetings</source>
+        <translation>即将开始的会议</translation>
+    </message>
+    <message>
+        <source>No meetings scheduled today</source>
+        <translation>今天暂无安排会议</translation>
+    </message>
+    <message>
+        <source>Scheduled meetings will appear here in chronological order.</source>
+        <translation>已预定的会议将按时间顺序显示在这里</translation>
+    </message>
+    <message>
+        <source>Search settings...</source>
+        <translation>搜索设置项...</translation>
+    </message>
+    <message>
+        <source>Preferences</source>
+        <translation>偏好设置</translation>
+    </message>
+    <message>
+        <source>Advanced &amp; Integrations</source>
+        <translation>高级与集成</translation>
+    </message>
+    <message>
+        <source>Appearance &amp; Language</source>
+        <translation>外观与语言</translation>
+    </message>
+    <message>
+        <source>Default Join Preferences</source>
+        <translation>入会默认偏好</translation>
+    </message>
+    <message>
+        <source>Meeting Display &amp; Window</source>
+        <translation>会中显示与窗口</translation>
+    </message>
+    <message>
+        <source>Camera &amp; Preview</source>
+        <translation>摄像头与预览</translation>
+    </message>
+    <message>
+        <source>Receive quality &amp; Mirror</source>
+        <translation>接收质量与镜像</translation>
+    </message>
+    <message>
+        <source>Input &amp; Output Devices</source>
+        <translation>输入与输出设备</translation>
+    </message>
+    <message>
+        <source>Audio Behavior</source>
+        <translation>音频行为</translation>
+    </message>
+    <message>
+        <source>Simulate</source>
+        <translation>模拟</translation>
+    </message>
+    <message>
+        <source>Muted</source>
+        <translation>已静音</translation>
+    </message>
+    <message>
+        <source>Off</source>
+        <translation>已关</translation>
+    </message>
+    <message>
+        <source>Share</source>
+        <translation>共享</translation>
+    </message>
+    <message>
+        <source>Board</source>
+        <translation>白板</translation>
+    </message>
+    <message>
+        <source>Leave</source>
+        <translation>离开</translation>
+    </message>
+    <message>
+        <source>Server Settings</source>
+        <translation>服务器设置</translation>
+    </message>
+    <message>
+        <source>Server: %1</source>
+        <translation>服务节点：%1</translation>
+    </message>
+    <message>
+        <source>Saved session on this device</source>
+        <translation>本地已保存登录凭证</translation>
+    </message>
+    <message>
+        <source>Show or hide password</source>
+        <translation>显示或隐藏密码</translation>
+    </message>
+    <message>
+        <source>Already have an account? Sign in</source>
+        <translation>已有账号？直接登录</translation>
+    </message>
+    <message>
+        <source>Account / Phone</source>
+        <translation>账号 / 手机号</translation>
+    </message>
+    <message>
+        <source>Sign-in Password</source>
+        <translation>登录密码</translation>
+    </message>
+    <message>
+        <source>Display Nickname</source>
+        <translation>显示昵称</translation>
+    </message>
+    <message>
+        <source>Set Password</source>
+        <translation>设置密码</translation>
+    </message>
+    <message>
+        <source>Confirm Password</source>
+        <translation>确认密码</translation>
+    </message>
+    <message>
+        <source>%1-%2 characters</source>
+        <translation>%1–%2 位字符</translation>
+    </message>
+    <message>
+        <source>Name shown in meetings</source>
+        <translation>参会显示名称</translation>
+    </message>
+    <message>
+        <source>Guest Display Name</source>
+        <translation>访客显示昵称</translation>
+    </message>
+    <message>
+        <source>Debug HTTP (Unencrypted)</source>
+        <translation>调试 HTTP 未加密</translation>
+    </message>
+    <message>
+        <source>Debug HTTP traffic is unencrypted.</source>
+        <translation>当前为调试 HTTP 节点，网络传输未加密。</translation>
+    </message>
+    <message>
+        <source>HTTPS Encrypted</source>
+        <translation>HTTPS 加密连接</translation>
+    </message>
+    <message>
+        <source>Sign-in traffic uses HTTPS encryption.</source>
+        <translation>登录与服务请求使用 HTTPS 加密连接。</translation>
+    </message>
+    <message>
+        <source>Activate the shared meeting whiteboard.</source>
+        <translation>打开共享会议白板。</translation>
+    </message>
+    <message>
+        <source>Adjust Screen Share Quality</source>
+        <translation>调整屏幕共享画质</translation>
+    </message>
+    <message>
+        <source>Allow participants to write</source>
+        <translation>允许参会者协作书写</translation>
+    </message>
+    <message>
+        <source>Ask "%1" to turn on their camera.</source>
+        <translation>邀请“%1”开启摄像头。</translation>
+    </message>
+    <message>
+        <source>Ask "%1" to turn on their microphone.</source>
+        <translation>邀请“%1”解除静音。</translation>
+    </message>
+    <message>
+        <source>Cancel Update</source>
+        <translation>取消更新</translation>
+    </message>
+    <message>
+        <source>Cancel the ongoing update check or download.</source>
+        <translation>取消正在进行的更新检查或下载。</translation>
+    </message>
+    <message>
+        <source>Download the available Cohavora update package.</source>
+        <translation>下载可用的 Cohavora 更新包。</translation>
+    </message>
+    <message>
+        <source>Join meeting (ID: %1).</source>
+        <translation>加入会议（会议号：%1）。</translation>
+    </message>
+    <message>
+        <source>Launch the verified installer to update Cohavora.</source>
+        <translation>启动已校验的安装程序以更新 Cohavora。</translation>
+    </message>
+    <message>
+        <source>Lock whiteboard</source>
+        <translation>锁定白板</translation>
+    </message>
+    <message>
+        <source>Mute "%1"'s microphone.</source>
+        <translation>将“%1”静音。</translation>
+    </message>
+    <message>
+        <source>Mute All Participants</source>
+        <translation>全体静音</translation>
+    </message>
+    <message>
+        <source>Mute all remote participants in the meeting.</source>
+        <translation>将会议中所有远端参会者静音。</translation>
+    </message>
+    <message>
+        <source>Open Whiteboard</source>
+        <translation>打开白板</translation>
+    </message>
+    <message>
+        <source>Quick Meeting</source>
+        <translation>快速会议</translation>
+    </message>
+    <message>
+        <source>Remove "%1" from the current meeting.</source>
+        <translation>将“%1”移出当前会议。</translation>
+    </message>
+    <message>
+        <source>Remove Participant</source>
+        <translation>移出参会者</translation>
+    </message>
+    <message>
+        <source>Request Participant Camera</source>
+        <translation>邀请参会者开启摄像头</translation>
+    </message>
+    <message>
+        <source>Request Participant Unmute</source>
+        <translation>邀请参会者解除静音</translation>
+    </message>
+    <message>
+        <source>Request all remote participants to unmute.</source>
+        <translation>邀请会议中所有远端参会者解除静音。</translation>
+    </message>
+    <message>
+        <source>Restrict whiteboard to host</source>
+        <translation>限制仅主持人可书写白板</translation>
+    </message>
+    <message>
+        <source>Set screen share quality to %1 at %2 fps.</source>
+        <translation>将屏幕共享画质设为 %1（%2 fps）。</translation>
+    </message>
+    <message>
+        <source>Start Quick Meeting</source>
+        <translation>发起快速会议</translation>
+    </message>
+    <message>
+        <source>Stop Screen Share</source>
+        <translation>停止屏幕共享</translation>
+    </message>
+    <message>
+        <source>Stop sharing your screen with the meeting.</source>
+        <translation>停止向会议共享屏幕。</translation>
+    </message>
+    <message>
+        <source>Title: %1 (%2 min)</source>
+        <translation>主题：%1（%2 分钟）</translation>
+    </message>
+    <message>
+        <source>Transfer Host Role</source>
+        <translation>移交主持人权限</translation>
+    </message>
+    <message>
+        <source>Transfer meeting host permissions to "%1".</source>
+        <translation>将会议主持人权限移交给“%1”。</translation>
+    </message>
+    <message>
+        <source>Turn Off Participant Camera</source>
+        <translation>关闭参会者摄像头</translation>
+    </message>
+    <message>
+        <source>Turn off "%1"'s camera.</source>
+        <translation>关闭“%1”的摄像头。</translation>
+    </message>
+    <message>
+        <source>Unlock whiteboard</source>
+        <translation>解锁白板</translation>
+    </message>
+    <message>
+        <source>Unmute All Participants</source>
+        <translation>解除全体静音</translation>
+    </message>
+    <message>
+        <source>Update Whiteboard Permissions</source>
+        <translation>更新白板权限</translation>
+    </message>
+    <message>
+        <source>Unable to cancel because your sign-in session has expired. Please sign in again.</source>
+        <translation>取消失败，当前登录状态已过期，请重新登录。</translation>
+    </message>
+    <message>
+        <source>Unable to cancel. The server rejected this request (code %1). Refresh the meeting list and try again.</source>
+        <translation>取消失败，服务端拒绝了该请求（错误码 %1）。请刷新会议列表后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to cancel. The server rejected this request. Refresh the meeting list and try again.</source>
+        <translation>取消失败，服务端拒绝了该请求。请刷新会议列表后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to cancel. Please check the server configuration and try again.</source>
+        <translation>取消失败，请检查服务器配置后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to cancel (HTTP %1). Refresh the meeting list and try again.</source>
+        <translation>取消失败（HTTP %1）。请刷新会议列表后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to cancel. Please try again later.</source>
+        <translation>取消失败，请稍后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to save because your sign-in session has expired. Please sign in again.</source>
+        <translation>保存失败，当前登录状态已过期，请重新登录。</translation>
+    </message>
+    <message>
+        <source>Unable to save. The server rejected this request (code %1). Refresh the meeting list and try again.</source>
+        <translation>保存失败，服务端拒绝了该请求（错误码 %1）。请刷新会议列表后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to save. The server rejected this request. Refresh the meeting list and try again.</source>
+        <translation>保存失败，服务端拒绝了该请求。请刷新会议列表后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to save. Please check the server configuration and try again.</source>
+        <translation>保存失败，请检查服务器配置后重试。</translation>
+    </message>
+    <message>
+        <source>Unable to save (HTTP %1). Refresh the meeting list and try again.</source>
+        <translation>保存失败（HTTP %1）。请刷新会议列表后重试。</translation>
+    </message>
+    <message>
+        <source>OpenAI Realtime (WebSocket)</source>
+        <translation>OpenAI Realtime (WebSocket)</translation>
+    </message>
+    <message>
+        <source>DashScope Inference (WebSocket · Paraformer/Fun-ASR)</source>
+        <translation>阿里云百炼 Inference (WebSocket · Paraformer/Fun-ASR)</translation>
+    </message>
+    <message>
+        <source>DashScope Qwen3 Realtime (WebSocket)</source>
+        <translation>阿里云百炼 Qwen3 Realtime (WebSocket)</translation>
+    </message>
+    <message>
+        <source>Deepgram Streaming (WebSocket)</source>
+        <translation>Deepgram 流式识别 (WebSocket)</translation>
+    </message>
+    <message>
+        <source>AssemblyAI v3 (WebSocket)</source>
+        <translation>AssemblyAI v3 流式识别 (WebSocket)</translation>
+    </message>
+    <message>
+        <source>Volcengine Doubao SAUC v3 (WebSocket)</source>
+        <translation>火山引擎豆包 SAUC v3 (WebSocket)</translation>
+    </message>
+    <message>
+        <source>ElevenLabs Scribe Realtime (WebSocket)</source>
+        <translation>ElevenLabs Scribe Realtime (WebSocket)</translation>
+    </message>
+    <message>
+        <source>xAI Grok STT (WebSocket)</source>
+        <translation>xAI Grok STT (WebSocket)</translation>
+    </message>
+    <message>
+        <source>Volcengine App Key (Optional · Legacy X-Api-App-Key)</source>
+        <translation>火山引擎 App Key（可选 · 旧版 X-Api-App-Key）</translation>
+    </message>
+    <message>
+        <source>Optional — leave blank for single X-Api-Key auth</source>
+        <translation>可选 — 新版单 X-Api-Key 鉴权请留空</translation>
+    </message>
+    <message>
+        <source>Volcengine Resource ID</source>
+        <translation>火山引擎 Resource ID</translation>
+    </message>
+    <message>
+        <source>DashScope Workspace ID</source>
+        <translation>百炼 Workspace ID</translation>
+    </message>
+    <message>
+        <source>Optional — X-DashScope-WorkSpace</source>
+        <translation>可选 — X-DashScope-WorkSpace</translation>
+    </message>
+    <message>
+        <source>Recognition Prompt</source>
+        <translation>识别提示词</translation>
+    </message>
+    <message>
+        <source>Optional — names, acronyms, or domain terms to improve accuracy</source>
+        <translation>可选 — 填写人名、缩写或专业术语以提高识别准确率</translation>
+    </message>
+    <message>
+        <source>Audio payload exceeds the 25 MB transcription upload limit.</source>
+        <translation>音频数据超过 25 MB 的转录上传上限。</translation>
+    </message>
+    <message>
+        <source>Max Concurrent Streaming Connections</source>
+        <translation>最大并发流式识别连接数</translation>
+    </message>
+    <message>
+        <source>Limits simultaneous per-speaker WebSocket ASR connections during a meeting. Inactive speakers auto-release after 12 s of silence; speech wakes them with a 250 ms pre-roll buffer.</source>
+        <translation>限制会议中同时保持的发言人 WebSocket 流式识别连接数。静音 12 秒自动释放连接，开口说话时自动唤醒并补发 250 ms Pre-Roll 音频。</translation>
+    </message>
+    <message>
+        <source>OS encrypted storage is unavailable; Volcengine App Key is kept in session memory only.</source>
+        <translation>当前系统加密存储不可用，火山引擎 App Key 仅保存在本次会话内存中。</translation>
+    </message>
+    <message>
+        <source>No Volcengine App Key saved (optional — leave blank to use single X-Api-Key auth; fill only for legacy X-Api-App-Key + X-Api-Access-Key).</source>
+        <translation>未保存火山引擎 App Key（可选 — 新版单 X-Api-Key 鉴权请留空；仅旧版 X-Api-App-Key + X-Api-Access-Key 需要填写）。</translation>
+    </message>
+    <message>
+        <source>Volcengine App Key saved (encrypted on this device).</source>
+        <translation>火山引擎 App Key 已在本机加密保存。</translation>
+    </message>
+    <message>
+        <source>Volcengine App Key loaded (session memory only).</source>
+        <translation>火山引擎 App Key 已加载（仅保存在会话内存中）。</translation>
+    </message>
+    <message>
+        <source>Optional — leave blank to use %1</source>
+        <translation>可选 — 留空则默认使用 %1</translation>
+    </message>
+    <message>
+        <source>Volcengine API Key / Access Key (X-Api-Key)</source>
+        <translation>火山引擎 API Key / Access Key (X-Api-Key)</translation>
+    </message>
+    <message>
+        <source>Enter Volcengine API Key (or legacy Access Key)</source>
+        <translation>输入火山引擎 API Key（或旧版 Access Key）</translation>
+    </message>
+    <message>
+        <source>Speech API Key (Deepgram Token)</source>
+        <translation>语音识别 API 密钥 (Deepgram Token)</translation>
+    </message>
+    <message>
+        <source>Enter Deepgram API Key</source>
+        <translation>输入 Deepgram API Key</translation>
+    </message>
+    <message>
+        <source>Speech API Key (Authorization Key)</source>
+        <translation>语音识别 API 密钥 (Authorization Key)</translation>
+    </message>
+    <message>
+        <source>Enter AssemblyAI API Key</source>
+        <translation>输入 AssemblyAI API Key</translation>
+    </message>
+    <message>
+        <source>Speech API Key (xi-api-key)</source>
+        <translation>语音识别 API 密钥 (xi-api-key)</translation>
+    </message>
+    <message>
+        <source>Enter ElevenLabs API Key</source>
+        <translation>输入 ElevenLabs API Key</translation>
+    </message>
+    <message>
+        <source>Hint: Streaming ASR authentication failed. Check the API key, App Key/Resource ID (if Volcengine), and permissions in Copilot Settings.</source>
+        <translation>提示：流式语音识别鉴权失败，请检查 Copilot 设置中的 API Key、App Key / Resource ID（如使用火山引擎）及接口权限。</translation>
+    </message>
+    <message>
+        <source>Hint: The WebSocket streaming ASR endpoint returned HTTP 404. Verify the Speech-to-Text URL and selected STT Protocol in Copilot Settings.</source>
+        <translation>提示：WebSocket 流式语音识别端点返回 HTTP 404，请核对 Copilot 设置中的语音识别地址与 STT 协议。</translation>
+    </message>
+    <message>
+        <source>Hint: Streaming ASR quota or rate limit exceeded.</source>
+        <translation>提示：流式语音识别配额不足或触发限流。</translation>
+    </message>
+    <message>
+        <source>Streaming speech recognition connection failed.</source>
+        <translation>流式语音识别连接失败。</translation>
+    </message>
+    <message>
+        <source>Invalid streaming speech recognition configuration.</source>
+        <translation>流式语音识别配置无效。</translation>
+    </message>
+    <message>
+        <source>An STT API key is required for WebSocket streaming ASR.</source>
+        <translation>WebSocket 流式语音识别需要填写 STT API Key。</translation>
+    </message>
+    <message>
+        <source>An STT API key is required for DashScope Inference WebSocket ASR.</source>
+        <translation>阿里云百炼 Inference WebSocket 语音识别需要填写 STT API Key。</translation>
+    </message>
+    <message>
+        <source>Free quota exhausted or 'use free tier only' mode is enabled for this model/region. Verify your DashScope region/workspace or disable free-tier-only in the console.</source>
+        <translation>该模型/地域的免费额度已用完或开启了“仅使用免费额度（用尽即停）”。请核对百炼地域与工作空间是否匹配，或在控制台关闭“免费额度用尽即停”开关。</translation>
+    </message>
+    <message>
+        <source>A Deepgram API key is required for Deepgram WebSocket ASR.</source>
+        <translation>Deepgram WebSocket 语音识别需要填写 Deepgram API Key。</translation>
+    </message>
+    <message>
+        <source>An AssemblyAI API key is required for AssemblyAI v3 WebSocket ASR.</source>
+        <translation>AssemblyAI v3 WebSocket 语音识别需要填写 AssemblyAI API Key。</translation>
+    </message>
+    <message>
+        <source>Volcengine streaming ASR requires an API Key (or legacy App Key + Access Key).</source>
+        <translation>火山引擎流式语音识别需要配置 API Key（或旧版 App Key + Access Key）。</translation>
+    </message>
+    <message>
+        <source>An ElevenLabs API key is required for ElevenLabs Scribe WebSocket ASR.</source>
+        <translation>ElevenLabs Scribe WebSocket 语音识别需要填写 ElevenLabs API Key。</translation>
+    </message>
+    <message>
+        <source>An xAI API key is required for xAI Grok STT WebSocket ASR.</source>
+        <translation>xAI Grok STT WebSocket 语音识别需要填写 xAI API Key。</translation>
+    </message>
+    <message>
+        <source>Saved Volcengine App Key could not be decrypted. Please re-enter it in Settings &gt; Copilot.</source>
+        <translation>已保存的火山引擎 App Key 解密失败，请在“设置 &gt; Copilot”中重新输入。</translation>
+    </message>
+    <message>
+        <source>Saved Volcengine App Key could not be accessed (OS encrypted storage is locked or unavailable).</source>
+        <translation>无法读取已保存的火山引擎 App Key（系统加密存储已锁定或不可用）。</translation>
+    </message>
+    <message>
+        <source>WebSocket speech connection test timed out.</source>
+        <translation>WebSocket 语音识别连接测试超时。</translation>
+    </message>
+    <message>
+        <source>Failed to create streaming speech recognition session.</source>
+        <translation>创建流式语音识别会话失败。</translation>
+    </message>
+    <message>
+        <source>WebSocket closed before speech session became ready.</source>
+        <translation>WebSocket 连接在语音识别会话就绪前已关闭。</translation>
+    </message>
+    <message>
+        <source>WebSocket connection verified (%1).</source>
+        <translation>WebSocket 连接测试通过（%1）。</translation>
+    </message>
+    <message>
+        <source>WebSocket verified (%1: %2).</source>
+        <translation>WebSocket 测试通过（%1：%2）。</translation>
+    </message>
+    <message>
+        <source>Failed to create speaker streaming ASR session.</source>
+        <translation>创建发言人流式语音识别会话失败。</translation>
+    </message>
+    <message>
+        <source>Profile %1</source>
+        <translation>配置 %1</translation>
+    </message>
+    <message>
+        <source>Active Profile</source>
+        <translation>当前配置</translation>
+    </message>
+    <message>
+        <source>New</source>
+        <translation>新建</translation>
+    </message>
+    <message>
+        <source>Duplicate</source>
+        <translation>复制</translation>
+    </message>
+    <message>
+        <source>%1 (Copy)</source>
+        <translation>%1（副本）</translation>
+    </message>
+    <message>
+        <source>Delete Connection Profile</source>
+        <translation>删除连接配置</translation>
+    </message>
+    <message>
+        <source>Delete profile &quot;%1&quot; and remove its saved API key?</source>
+        <translation>确定删除配置“%1”并清除其已保存的 API 密钥吗？</translation>
+    </message>
+    <message>
+        <source>Switch Profile</source>
+        <translation>切换配置</translation>
+    </message>
+    <message>
+        <source>Connect Timeout</source>
+        <translation>连接超时</translation>
+    </message>
+    <message>
+        <source>Idle Timeout</source>
+        <translation>空闲超时</translation>
+    </message>
+    <message>
+        <source>Manual (0 ms)</source>
+        <translation>手动发送 (0 ms)</translation>
+    </message>
+    <message>
+        <source>VAD Threshold</source>
+        <translation>VAD 触发阈值</translation>
+    </message>
+    <message>
+        <source>Voice Activity Detection (VAD)</source>
+        <translation>语音活动检测 (VAD)</translation>
+    </message>
+    <message>
+        <source>Threshold controls microphone/speaker wake sensitivity (-60 dBFS more sensitive, -15 dBFS stricter). Silence Split sets pause duration to commit a segment in HTTP STT mode.</source>
+        <translation>触发阈值控制语音唤醒灵敏度（-60 dBFS 更敏感，-15 dBFS 更严格，嘈杂环境可适当调高）；静音切分时长控制 HTTP 离线 STT 模式下停顿多久提交一段语音。</translation>
+    </message>
+    <message>
+        <source>VAD Silence Split</source>
+        <translation>静音切分时长</translation>
+    </message>
+    <message>
+        <source>Translation Profile</source>
+        <translation>翻译专用配置</translation>
+    </message>
+    <message>
+        <source>Follow Active Copilot Profile</source>
+        <translation>跟随当前 Copilot 配置</translation>
+    </message>
+    <message>
+        <source>Translation Model Override</source>
+        <translation>翻译模型覆盖</translation>
+    </message>
+    <message>
+        <source>Optional — e.g. gpt-4o-mini / qwen-turbo (leave blank to use profile model)</source>
+        <translation>可选 — 例如 gpt-4o-mini / qwen-turbo（留空则使用上方配置的模型）</translation>
+    </message>
+    <message>
+        <source>Translation Prompt</source>
+        <translation>翻译提示词</translation>
+    </message>
+    <message>
+        <source>Optional — leave blank for default prompt; supports {target_language} placeholder</source>
+        <translation>可选 — 留空使用默认翻译提示词；支持 {target_language} 目标语言占位符</translation>
+    </message>
+    <message>
+        <source>Idle Stream Release</source>
+        <translation>流式空闲释放</translation>
+    </message>
+    <message>
+        <source>Limits simultaneous per-speaker WebSocket ASR connections during a meeting. Inactive speakers auto-release after the configured idle timeout; speech wakes them with a 250 ms pre-roll buffer.</source>
+        <translation>限制会议中同时为发言人维持的 WebSocket 流式识别连接数。无发言超过所设空闲释放时间后自动断开以节省配额；再次开口时通过 250 ms 音频预卷缓冲无损唤醒。</translation>
+    </message>
+    <message>
+        <source>Custom (%1)</source>
+        <translation>自定义 (%1)</translation>
+    </message>
+    <message>
+        <source>Reset</source>
+        <translation>重置</translation>
+    </message>
+    <message>
+        <source>Restore default values</source>
+        <translation>恢复默认值</translation>
+    </message>
+    <message>
+        <source>Customized (%1)</source>
+        <translation>已自定义 (%1)</translation>
+    </message>
+    <message>
+        <source>Models &amp; Chat</source>
+        <translation>模型与对话</translation>
+    </message>
+    <message>
+        <source>Speech &amp; Dictation (ASR)</source>
+        <translation>语音听写 (ASR)</translation>
+    </message>
+    <message>
+        <source>Live Translation &amp; Agent</source>
+        <translation>实时转译与 Agent</translation>
+    </message>
+    <message>
+        <source>Duplicate or delete profile</source>
+        <translation>复制或删除配置</translation>
+    </message>
+    <message>
+        <source>Profile actions</source>
+        <translation>配置操作</translation>
+    </message>
+    <message>
+        <source>Connection &amp; Model</source>
+        <translation>连接与模型</translation>
+    </message>
+    <message>
+        <source>Per Profile</source>
+        <translation>随配置切换</translation>
+    </message>
+    <message>
+        <source>Advanced Runtime &amp; Privacy</source>
+        <translation>高级运行与隐私参数</translation>
+    </message>
+    <message>
+        <source>Privacy &amp; Local Storage</source>
+        <translation>密钥与本地存储</translation>
+    </message>
+    <message>
+        <source>Global</source>
+        <translation>全局共享</translation>
+    </message>
+    <message>
+        <source>Custom Endpoint / Key</source>
+        <translation>自定义端点/密钥</translation>
+    </message>
+    <message>
+        <source>Dedicated Speech Endpoint &amp; Key</source>
+        <translation>独立语音端点与密钥</translation>
+    </message>
+    <message>
+        <source>Reuse Chat Key</source>
+        <translation>复用 Chat 密钥</translation>
+    </message>
+    <message>
+        <source>Advanced Acoustic &amp; Recognition</source>
+        <translation>高级声学与识别参数</translation>
+    </message>
+    <message>
+        <source>Applies to reused room captions as well</source>
+        <translation>复用房间字幕时同样生效</translation>
+    </message>
+    <message>
+        <source>Advanced Translation &amp; Streaming</source>
+        <translation>高级转译模型与流式并发</translation>
+    </message>
+    <message>
+        <source>Dedicated Translation Override</source>
+        <translation>独立翻译模型覆盖</translation>
+    </message>
+    <message>
+        <source>Enabled when caption translation is on</source>
+        <translation>开启字幕翻译后生效</translation>
+    </message>
+    <message>
+        <source>Streaming Concurrency &amp; Idle Release</source>
+        <translation>流式并发与资源控制</translation>
+    </message>
+    <message>
+        <source>Duplicate Current Profile</source>
+        <translation>复制当前配置</translation>
+    </message>
+    <message>
+        <source>Delete Current Profile</source>
+        <translation>删除当前配置</translation>
+    </message>
+    <message>
+        <source>Custom headers</source>
+        <translation>自定义请求头</translation>
+    </message>
+    <message>
+        <source>%1 turns</source>
+        <translation>%1 轮</translation>
+    </message>
+    <message>
+        <source>Temp %1</source>
+        <translation>温度 %1</translation>
+    </message>
+    <message>
+        <source>Connect %1 ms</source>
+        <translation>连接 %1 ms</translation>
+    </message>
+    <message>
+        <source>Idle %1 ms</source>
+        <translation>空闲 %1 ms</translation>
+    </message>
+    <message>
+        <source>Session-only key</source>
+        <translation>仅会话密钥</translation>
+    </message>
+    <message>
+        <source>History not persisted</source>
+        <translation>不保存历史</translation>
+    </message>
+    <message>
+        <source>Default · 16 turns · 0.70 temp · 10s / 30s</source>
+        <translation>默认 · 16 轮 · 温度 0.70 · 10s / 30s</translation>
+    </message>
+    <message>
+        <source>Recognition prompt</source>
+        <translation>识别提示词</translation>
+    </message>
+    <message>
+        <source>VAD %1 dBFS</source>
+        <translation>VAD %1 dBFS</translation>
+    </message>
+    <message>
+        <source>Silence %1 ms</source>
+        <translation>静音 %1 ms</translation>
+    </message>
+    <message>
+        <source>Default · -42 dBFS · 600 ms</source>
+        <translation>默认 · -42 dBFS · 600 ms</translation>
+    </message>
+    <message>
+        <source>Dedicated translation profile</source>
+        <translation>独立翻译配置</translation>
+    </message>
+    <message>
+        <source>Model: %1</source>
+        <translation>模型: %1</translation>
+    </message>
+    <message>
+        <source>Custom translation prompt</source>
+        <translation>自定义翻译提示词</translation>
+    </message>
+    <message>
+        <source>%1 streams</source>
+        <translation>%1 并发</translation>
+    </message>
+    <message>
+        <source>Idle release %1 s</source>
+        <translation>空闲释放 %1 s</translation>
+    </message>
+    <message>
+        <source>Default · Follow active profile · 3 streams · 12s</source>
+        <translation>默认 · 跟随当前配置 · 3 并发 · 12s</translation>
+    </message>
+    <message>
+        <source>Active Chat profile</source>
+        <translation>当前对话配置</translation>
+    </message>
+    <message>
+        <source>Reusing active Chat endpoint &amp; key (%1)</source>
+        <translation>当前复用「模型与对话」端点与密钥 (%1)</translation>
+    </message>
+    <message>
+        <source>Custom Speech Endpoint &amp; Key</source>
+        <translation>自定义语音端点与密钥</translation>
+    </message>
+    <message>
+        <source>Default Speech</source>
+        <translation>默认语音配置</translation>
+    </message>
+    <message>
+        <source>Speech Profile %1</source>
+        <translation>语音配置 %1</translation>
+    </message>
+    <message>
+        <source>Volcengine SAUC</source>
+        <translation>火山引擎豆包流式</translation>
+    </message>
+    <message>
+        <source>Speech Source</source>
+        <translation>语音来源</translation>
+    </message>
+    <message>
+        <source>Reuse &quot;Models &amp; Chat&quot;</source>
+        <translation>复用「模型与对话」</translation>
+    </message>
+    <message>
+        <source>Custom Speech Profiles</source>
+        <translation>自定义语音配置</translation>
+    </message>
+    <message>
+        <source>Speech Profile</source>
+        <translation>语音配置</translation>
+    </message>
+    <message>
+        <source>Duplicate or delete speech profile</source>
+        <translation>复制或删除当前语音配置</translation>
+    </message>
+    <message>
+        <source>Speech profile actions</source>
+        <translation>语音配置操作</translation>
+    </message>
+    <message>
+        <source>Follows Chat</source>
+        <translation>跟随对话配置</translation>
+    </message>
+    <message>
+        <source>Per Speech Profile</source>
+        <translation>随语音配置切换</translation>
+    </message>
+    <message>
+        <source>Profile Name</source>
+        <translation>配置名称</translation>
+    </message>
+    <message>
+        <source>e.g. ElevenLabs / Deepgram / Groq</source>
+        <translation>例如：ElevenLabs / Deepgram / Groq</translation>
+    </message>
+    <message>
+        <source>Optional — https:// or wss:// (leave blank for protocol default)</source>
+        <translation>可选 — 填写 https:// 或 wss://（留空则使用所选协议默认端点）</translation>
+    </message>
+    <message>
+        <source>Enter speech API key (leave blank to keep saved key)</source>
+        <translation>输入语音识别 API 密钥（留空保留已保存密钥）</translation>
+    </message>
+    <message>
+        <source>Recognition Language</source>
+        <translation>识别语言</translation>
+    </message>
+    <message>
+        <source>Delete Speech Profile</source>
+        <translation>删除语音配置</translation>
+    </message>
+    <message>
+        <source>Delete speech profile &quot;%1&quot; and remove its saved API keys?</source>
+        <translation>确定删除语音配置“%1”并清除其保存的密钥吗？</translation>
+    </message>
+    <message>
+        <source>Duplicate Speech Profile</source>
+        <translation>复制当前语音配置</translation>
+    </message>
+    <message>
+        <source>Reusing &quot;%1&quot; — configure a Base URL in &quot;Models &amp; Chat&quot; first</source>
+        <translation>当前复用「%1」— 请先在「模型与对话」中配置接口地址 (Base URL)</translation>
+    </message>
+    <message>
+        <source>Reusing &quot;%1&quot; (%2) — endpoint URL &amp; API key synced automatically</source>
+        <translation>当前复用「%1」(%2) — 已自动同步端点地址与 API 密钥</translation>
+    </message>
+    <message>
+        <source>Reusing &quot;%1&quot; (%2) — endpoint synced (no Chat API key saved)</source>
+        <translation>当前复用「%1」(%2) — 已同步端点地址（尚未保存对话 API 密钥）</translation>
+    </message>
+    <message>
+        <source>The selected protocol or model targets an external streaming endpoint different from &quot;%1&quot;. Switch to &quot;Custom Speech Profiles&quot; above to configure a dedicated endpoint and API key.</source>
+        <translation>当前选择的识别协议或模型指向独立第三方流式服务，与「%1」的接口地址不同；请点击上方“自定义语音配置”配置专属端点与密钥。</translation>
+    </message>
 </context>
 <context>
     <name>MeetingUI::AnnotationOverlayWindow</name>
@@ -5074,7 +8130,7 @@ Sign in with your own account in a client configured for the same meeting servic
     </message>
     <message>
         <source>startup</source>
-        <translation>启动本地媒体</translation>
+        <translation>启动会话</translation>
     </message>
     <message>
         <source>publish_batch</source>

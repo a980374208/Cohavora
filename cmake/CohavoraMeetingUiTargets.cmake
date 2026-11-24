@@ -25,6 +25,16 @@ function(cohavora_configure_meeting_ui_objects target)
         FOLDER "meeting/ui")
 endfunction()
 
+add_library(cohavora_device_discovery STATIC
+    ${PROJECT_SOURCE_DIR}/src/ui/cached_device_discovery.h
+    ${PROJECT_SOURCE_DIR}/src/ui/camera_device_discovery.h
+    ${PROJECT_SOURCE_DIR}/src/ui/camera_device_discovery.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/audio_device_discovery.h
+    ${PROJECT_SOURCE_DIR}/src/ui/audio_device_discovery.cpp)
+target_include_directories(cohavora_device_discovery PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(cohavora_device_discovery PRIVATE cohavora_core Qt5::Core)
+set_target_properties(cohavora_device_discovery PROPERTIES AUTOMOC OFF FOLDER "meeting/ui")
+
 add_library(cohavora_meeting_widgets OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_panel_model.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_panel_controller.h
@@ -46,11 +56,19 @@ add_library(cohavora_meeting_widgets OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/participants_sidebar_widget.h
     ${PROJECT_SOURCE_DIR}/src/ui/participants_sidebar_widget.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_chat_sidebar_widget.h
-    ${PROJECT_SOURCE_DIR}/src/ui/meeting_chat_sidebar_widget.cpp)
+    ${PROJECT_SOURCE_DIR}/src/ui/meeting_chat_sidebar_widget.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/copilot_markdown_parser.h
+    ${PROJECT_SOURCE_DIR}/src/ui/copilot_markdown_parser.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/copilot_chat_canvas_widget.h
+    ${PROJECT_SOURCE_DIR}/src/ui/copilot_chat_canvas_widget.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/copilot_sidebar_widget.h
+    ${PROJECT_SOURCE_DIR}/src/ui/copilot_sidebar_widget.cpp)
 cohavora_configure_meeting_ui_objects(cohavora_meeting_widgets)
 target_link_libraries(cohavora_meeting_widgets PRIVATE
+    cohavora_device_discovery
     cohavora_meeting_network
-    cohavora_meeting_runtime)
+    cohavora_meeting_runtime
+    cohavora_agent)
 
 add_library(cohavora_video_canvas_ui OBJECT
     ${PROJECT_SOURCE_DIR}/src/render/backend_module.h
@@ -71,16 +89,6 @@ target_link_libraries(cohavora_video_canvas_ui PRIVATE
 if(WIN32)
     target_link_libraries(cohavora_video_canvas_ui PRIVATE d3d11 dxgi)
 endif()
-
-add_library(cohavora_device_discovery STATIC
-    ${PROJECT_SOURCE_DIR}/src/ui/cached_device_discovery.h
-    ${PROJECT_SOURCE_DIR}/src/ui/camera_device_discovery.h
-    ${PROJECT_SOURCE_DIR}/src/ui/camera_device_discovery.cpp
-    ${PROJECT_SOURCE_DIR}/src/ui/audio_device_discovery.h
-    ${PROJECT_SOURCE_DIR}/src/ui/audio_device_discovery.cpp)
-target_include_directories(cohavora_device_discovery PRIVATE ${PROJECT_SOURCE_DIR})
-target_link_libraries(cohavora_device_discovery PRIVATE cohavora_core Qt5::Core)
-set_target_properties(cohavora_device_discovery PROPERTIES AUTOMOC OFF FOLDER "meeting/ui")
 
 add_library(cohavora_meeting_window_ui OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_layout_controls.h
@@ -103,5 +111,7 @@ target_link_libraries(cohavora_meeting_window_ui PRIVATE
     cohavora_device_discovery
     cohavora_meeting_network
     cohavora_meeting_runtime
+    cohavora_agent
+    cohavora_meeting_widgets
     cohavora_qt_video_render
     cohavora_whiteboard_ui)

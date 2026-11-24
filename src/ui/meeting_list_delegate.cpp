@@ -48,15 +48,22 @@ void MeetingListDelegate::paint(
 
 	const bool selected = option.state.testFlag(QStyle::State_Selected);
 	const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
-	painter->setPen(QPen(selected ? Theme::color(Theme::ColorRole::Accent) : Theme::color(Theme::ColorRole::Border), 1));
+	const auto status = index.data(MeetingStatusRole).toString();
+	const bool inProgress = status == QCoreApplication::translate("MeetingUI", "In Progress");
+	const QColor baseBg = _compact
+		? (inProgress ? Theme::color(Theme::ColorRole::AccentSoft) : Theme::color(Theme::ColorRole::Window))
+		: Theme::color(Theme::ColorRole::Surface);
+	const QColor borderColor = (selected || (_compact && inProgress))
+		? Theme::color(Theme::ColorRole::Accent)
+		: Theme::color(Theme::ColorRole::Border);
+	painter->setPen(QPen(borderColor, 1));
 	painter->setBrush(selected
 		? Theme::color(Theme::ColorRole::AccentSoft)
-		: (hovered ? Theme::color(Theme::ColorRole::Hover) : Theme::color(Theme::ColorRole::Surface)));
-	painter->drawRoundedRect(content, 7, 7);
+		: (hovered ? Theme::color(Theme::ColorRole::Hover) : baseBg));
+	painter->drawRoundedRect(content, _compact ? 9 : 7, _compact ? 9 : 7);
 
 	const auto title = index.data(MeetingTitleRole).toString();
 	const auto creator = index.data(MeetingCreatorRole).toString();
-	const auto status = index.data(MeetingStatusRole).toString();
 
 	const int left = content.left() + 13;
 	const int right = content.right() - 13;

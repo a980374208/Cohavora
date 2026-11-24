@@ -123,12 +123,19 @@ void ParticipantsSidebarWidget::setupUi() {
 }
 
 void ParticipantsSidebarWidget::updateParticipants(const std::vector<ParticipantInfo> &participants) {
-    _listModel->setParticipants(participants);
+    std::vector<ParticipantInfo> visible;
+    visible.reserve(participants.size());
+    for (const auto &p : participants) {
+        if (!p.isAgent) {
+            visible.push_back(p);
+        }
+    }
+    _listModel->setParticipants(visible);
     QString mId = _coordinator ? _coordinator->currentMeetingId() : "";
     if (!mId.isEmpty()) {
-        _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Participants (%1) · Meeting ID: %2").arg(participants.size()).arg(mId));
+        _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Participants (%1) · Meeting ID: %2").arg(visible.size()).arg(mId));
     } else {
-        _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(participants.size()));
+        _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(visible.size()));
     }
     updateHostControlsVisibility();
 }

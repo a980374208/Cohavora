@@ -41,6 +41,36 @@ QString durationText(qint64 seconds) {
 	return QCoreApplication::translate("MeetingUI", "%1 min").arg(minutes);
 }
 
+QString cancelFailureText(const OpenMeeting::HttpError &error) {
+	if (error.failureLayer == OpenMeeting::HttpFailureLayer::Business) {
+		if (error.isTokenExpired()) {
+			return QCoreApplication::translate("MeetingUI",
+				"Unable to cancel because your sign-in session has expired. Please sign in again.");
+		}
+		if (error.businessCode > 0) {
+			return QCoreApplication::translate("MeetingUI",
+				"Unable to cancel. The server rejected this request (code %1). Refresh the meeting list and try again.")
+				.arg(error.businessCode);
+		}
+		return QCoreApplication::translate("MeetingUI",
+			"Unable to cancel. The server rejected this request. Refresh the meeting list and try again.");
+	}
+	if (error.failureLayer == OpenMeeting::HttpFailureLayer::Policy) {
+		return QCoreApplication::translate("MeetingUI",
+			"Unable to cancel. Please check the server configuration and try again.");
+	}
+	if (error.failureLayer == OpenMeeting::HttpFailureLayer::Http && error.httpStatus >= 400) {
+		return QCoreApplication::translate("MeetingUI",
+			"Unable to cancel (HTTP %1). Refresh the meeting list and try again.")
+			.arg(error.httpStatus);
+	}
+	if (error.code == 0) {
+		return QCoreApplication::translate("MeetingUI", "Unable to cancel. Please try again later.");
+	}
+	return QCoreApplication::translate("MeetingUI",
+		"Unable to cancel. A network interruption may leave the result unknown. Refresh the meeting list before trying again.");
+}
+
 } // namespace
 
 MeetingDetailDialog::MeetingDetailDialog(
@@ -236,7 +266,7 @@ void MeetingDetailDialog::handleWriteState() {
 	}
 	if (_detail) populate(*_detail, false);
 	MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-9");
-	_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Unable to cancel. A network interruption may leave the result unknown. Refresh the meeting list before trying again."));
+	_stateLabel->setText(cancelFailureText(result.error));
 }
 
 void MeetingDetailDialog::editMeeting() {

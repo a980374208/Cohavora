@@ -1,5 +1,7 @@
 #include <QtCore/QCoreApplication>
+#include <QtCore/QUrl>
 #include "src/ui/app_theme.h"
+#include "src/ui/app_icons.h"
 #include "src/ui/app_branding.h"
 #include "src/ui/login_dialog.h"
 #ifdef Q_OS_LINUX
@@ -29,6 +31,8 @@
 #include <QtGui/QShowEvent>
 #include <QtWidgets/QScrollArea>
 #include <QtWidgets/QScrollBar>
+#include <QtGui/QIcon>
+#include <QtGui/QPainterPath>
 
 namespace MeetingUI {
 namespace {
@@ -82,6 +86,123 @@ private:
     }
 };
 
+class LoginBrandBadge final : public QWidget {
+public:
+    explicit LoginBrandBadge(QWidget *parent = nullptr)
+        : QWidget(parent) {
+        setFixedSize(56, 56);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+
+        QColor bgColor(QStringLiteral("#f1f7f6"));
+        QColor borderColor(QStringLiteral("#d7e6e3"));
+        switch (AppTheme::effectiveTheme()) {
+        case AppTheme::Theme::Dark:
+            bgColor = QColor(QStringLiteral("#2c3440"));
+            borderColor = QColor(QStringLiteral("#3d4859"));
+            break;
+        case AppTheme::Theme::Teal:
+            bgColor = QColor(QStringLiteral("#e4f4ee"));
+            borderColor = QColor(QStringLiteral("#bfd9ce"));
+            break;
+        case AppTheme::Theme::Light:
+        case AppTheme::Theme::System:
+            break;
+        }
+
+        p.setPen(QPen(borderColor, 1.0));
+        p.setBrush(bgColor);
+        p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 15.0, 15.0);
+
+        const QRect iconRect(10, 10, 36, 36);
+        if (!_logoIcon.isNull()) {
+            _logoIcon.paint(&p, iconRect, Qt::AlignCenter);
+        } else {
+            AppTheme::icon(AppTheme::Icon::Video, AppTheme::ColorRole::Accent).paint(&p, iconRect);
+        }
+    }
+
+private:
+    QIcon _logoIcon{QStringLiteral(":/meeting-ui/icons/cohavora.svg")};
+};
+
+class LoginTransportGlyph final : public QWidget {
+public:
+    explicit LoginTransportGlyph(QWidget *parent = nullptr)
+        : QWidget(parent) {
+        setFixedSize(14, 14);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+    }
+
+    void setWarning(bool warning) {
+        if (_warning == warning) return;
+        _warning = warning;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        if (_warning) {
+            p.scale(width() / 24.0, height() / 24.0);
+            p.setPen(QPen(AppTheme::color(AppTheme::ColorRole::Warning), 2.0,
+                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(Qt::NoBrush);
+            QPainterPath triangle;
+            triangle.moveTo(12.0, 4.0);
+            triangle.lineTo(20.5, 19.5);
+            triangle.lineTo(3.5, 19.5);
+            triangle.closeSubpath();
+            p.drawPath(triangle);
+            p.drawLine(QPointF(12.0, 9.5), QPointF(12.0, 13.8));
+            p.drawPoint(QPointF(12.0, 16.8));
+            return;
+        }
+        AppTheme::icon(AppTheme::Icon::Shield, AppTheme::ColorRole::TextMuted).paint(&p, rect());
+    }
+
+private:
+    bool _warning = false;
+};
+
+QVBoxLayout *makeFieldGroup(const QString &labelText, QWidget *field, QWidget *parent) {
+    auto *group = new QVBoxLayout();
+    group->setContentsMargins(0, 0, 0, 0);
+    group->setSpacing(6);
+    auto *label = new QLabel(labelText, parent);
+    label->setObjectName(QStringLiteral("loginFieldLabel"));
+    label->setWordWrap(false);
+    group->addWidget(label);
+    group->addWidget(field);
+    return group;
+}
+
+void repolishLoginWidget(QWidget *w) {
+    if (!w) return;
+    w->style()->unpolish(w);
+    w->style()->polish(w);
+    w->update();
+}
+
+QString compactEndpointLabel(const QString &rawUrl) {
+    const QString trimmed = rawUrl.trimmed();
+    if (trimmed.isEmpty()) return {};
+    const QUrl parsed = QUrl::fromUserInput(trimmed);
+    if (parsed.isValid() && !parsed.host().isEmpty()) {
+        return parsed.port() > 0
+            ? QStringLiteral("%1:%2").arg(parsed.host()).arg(parsed.port())
+            : parsed.host();
+    }
+    return trimmed;
+}
+
 } // namespace
 
 LoginDialog::LoginDialog(QWidget *parent)
@@ -91,22 +212,30 @@ LoginDialog::LoginDialog(QWidget *parent)
 LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
     : QDialog(parent), _session(session) {
     setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora Sign In"));
-    resize(460, 600);
+    resize(512, 580);
     setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground, true);
 
     initUI();
-    AppTheme::makeDialogAdaptive(*this, QSize(460, 600));
+    AppTheme::makeDialogAdaptive(*this, QSize(512, 580));
+    for (auto *label : findChildren<QLabel *>()) {
+        const auto name = label->objectName();
+        if (name != QStringLiteral("loginStatus")
+            && name != QStringLiteral("loginGuestNotice")
+            && name != QStringLiteral("loginRegHint")) {
+            label->setWordWrap(false);
+        }
+    }
 #ifdef Q_OS_LINUX
     const QPointer<QWidget> card = findChild<QWidget *>(QStringLiteral("loginCard"));
     LinuxWindowFrameOptions frameOptions;
     frameOptions.radius = 16;
     frameOptions.captionHitTest = [this, card](QPoint point) {
-        if (!card || !card->isVisibleTo(this) || !_tabWidget) return false;
+        if (!card || !card->isVisibleTo(this) || !_segmentBar) return false;
         const auto local = card->mapFrom(this, point);
-        if (!card->rect().contains(local) || local.y() >= _tabWidget->mapTo(card, QPoint()).y()) return false;
+        if (!card->rect().contains(local) || local.y() >= _segmentBar->mapTo(card, QPoint()).y()) return false;
         // The shared application filter also sees the title labels. Limit the
-        // caption to the header and leave its Close button independently usable.
+        // caption to the header and leave its Close/Server buttons independently usable.
         for (auto *child = card->childAt(local); child && child != card;
                 child = child->parentWidget()) {
             if (qobject_cast<QAbstractButton *>(child) || child->focusPolicy() != Qt::NoFocus) return false;
@@ -115,6 +244,7 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
     };
     installLinuxWindowFrame(*this, std::move(frameOptions));
 #endif
+    AppTheme::observeChanges(*this, [this] { refreshThemeVisuals(); });
     loadSavedData();
     connect(_rememberBox, &QCheckBox::toggled, this, [this](bool checked) {
         _autoLoginBox->setEnabled(checked &&
@@ -148,6 +278,7 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
             _session.registrationServerBaseUrl(_serverUrlInput->text()));
         updateSavedSessionAction();
         updateEndpointOptions();
+        syncServerSummary();
     });
 }
 
@@ -184,106 +315,131 @@ void LoginDialog::initUI() {
     rootLayout->addWidget(card);
 
     auto cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(28, 20, 28, 24);
-    cardLayout->setSpacing(12);
+    cardLayout->setContentsMargins(0, 0, 0, 0);
+    cardLayout->setSpacing(0);
 
-    // 顶部操作栏（关闭按钮）
-    auto topBar = new QHBoxLayout();
-    topBar->addStretch();
-    auto closeBtn = new QPushButton(QString::fromUtf8("✕"), card);
-    closeBtn->setObjectName("closeBtn");
-    closeBtn->setFixedSize(28, 28);
-    connect(closeBtn, &QPushButton::clicked, this, &QDialog::reject);
-    topBar->addWidget(closeBtn);
-    cardLayout->addLayout(topBar);
+    auto *body = new QWidget(card);
+    body->setObjectName(QStringLiteral("loginBody"));
+    _bodyLayout = new QVBoxLayout(body);
+    _bodyLayout->setContentsMargins(36, 26, 36, 22);
+    _bodyLayout->setSpacing(18);
 
-    // 标题区域
-    auto titleBox = new QVBoxLayout();
-    titleBox->setSpacing(4);
-    auto title = new QLabel(AppBranding::name(), card);
-#ifdef Q_OS_LINUX
+    // 顶部居中品牌头（右侧保留关闭按钮）
+    auto *headerLayout = new QVBoxLayout();
+    headerLayout->setContentsMargins(0, 0, 0, 2);
+    headerLayout->setSpacing(8);
+
+    auto *headerTopRow = new QGridLayout();
+    headerTopRow->setContentsMargins(0, 0, 0, 0);
+    headerTopRow->setSpacing(0);
+    headerTopRow->setColumnMinimumWidth(0, 32);
+    headerTopRow->setColumnStretch(1, 1);
+    headerTopRow->setColumnMinimumWidth(2, 32);
+    headerTopRow->setRowMinimumHeight(0, 60);
+
+    _brandBadge = new LoginBrandBadge(body);
+    headerTopRow->addWidget(_brandBadge, 0, 1, Qt::AlignHCenter | Qt::AlignBottom);
+
+    _closeBtn = new QPushButton(body);
+    _closeBtn->setObjectName("closeBtn");
+    _closeBtn->setFixedSize(32, 32);
+    _closeBtn->setIconSize(QSize(16, 16));
+    _closeBtn->setCursor(Qt::PointingHandCursor);
+    _closeBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Close"));
+    _closeBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Close"));
+    connect(_closeBtn, &QPushButton::clicked, this, &QDialog::reject);
+    headerTopRow->addWidget(_closeBtn, 0, 2, Qt::AlignRight | Qt::AlignTop);
+    headerLayout->addLayout(headerTopRow);
+
+    auto *titleBox = new QVBoxLayout();
+    titleBox->setContentsMargins(0, 0, 0, 0);
+    titleBox->setSpacing(3);
+    auto *title = new QLabel(AppBranding::name(), body);
     title->setObjectName(QStringLiteral("loginTitle"));
-#endif
+    title->setAlignment(Qt::AlignHCenter);
     QFont tf = title->font();
-    tf.setPixelSize(22);
+    tf.setPixelSize(21);
     tf.setBold(true);
     title->setFont(tf);
-    title->setAlignment(Qt::AlignCenter);
 
-    auto subtitle = new QLabel(AppBranding::tagline(), card);
-#ifdef Q_OS_LINUX
+    auto *subtitle = new QLabel(AppBranding::tagline(), body);
     subtitle->setObjectName(QStringLiteral("loginSubtitle"));
-#endif
+    subtitle->setAlignment(Qt::AlignHCenter);
     MeetingUI::AppTheme::setStyleVariant(*subtitle, "login-dialog-subtitle");
-    subtitle->setAlignment(Qt::AlignCenter);
-    subtitle->setWordWrap(true);
+    subtitle->setWordWrap(false);
 
     titleBox->addWidget(title);
     titleBox->addWidget(subtitle);
-    cardLayout->addLayout(titleBox);
-    cardLayout->addSpacing(8);
+    headerLayout->addLayout(titleBox);
+    _bodyLayout->addLayout(headerLayout);
 
-    // 选项卡：账号登录 vs 用户注册 vs 访客体验
-    _tabWidget = new CurrentPageTabWidget(card);
+    // 胶囊分段切换栏（驱动隐藏 TabBar 的 CurrentPageTabWidget）
+    _segmentBar = new QFrame(body);
+    _segmentBar->setObjectName(QStringLiteral("loginSegmentBar"));
+    auto segLayout = new QHBoxLayout(_segmentBar);
+    segLayout->setContentsMargins(3, 3, 3, 3);
+    segLayout->setSpacing(3);
+    const std::array<QString, 3> tabLabels = {
+        QCoreApplication::translate("MeetingUI", "Account Sign-In"),
+        QCoreApplication::translate("MeetingUI", "Create Account"),
+        QCoreApplication::translate("MeetingUI", "Guest Access")
+    };
+    for (int i = 0; i < 3; ++i) {
+        auto *btn = new QPushButton(tabLabels[static_cast<size_t>(i)], _segmentBar);
+        btn->setObjectName(QStringLiteral("loginSegmentBtn"));
+        btn->setCheckable(true);
+        btn->setFixedHeight(38);
+        btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        btn->setCursor(Qt::PointingHandCursor);
+        connect(btn, &QPushButton::clicked, this, [this, i] {
+            if (_tabWidget) _tabWidget->setCurrentIndex(i);
+        });
+        segLayout->addWidget(btn);
+        _segmentButtons[static_cast<size_t>(i)] = btn;
+    }
+    _bodyLayout->addWidget(_segmentBar);
+
+    // 选项卡内容区：账号登录 vs 用户注册 vs 访客体验
+    _tabWidget = new CurrentPageTabWidget(body);
     _tabWidget->setDocumentMode(true);
+    _tabWidget->tabBar()->hide();
 
     // --- Tab 1: 账号登录 ---
     auto accountTab = new QWidget(_tabWidget);
     auto accLayout = new QVBoxLayout(accountTab);
-    accLayout->setContentsMargins(0, 12, 0, 0);
-    accLayout->setSpacing(12);
+    accLayout->setContentsMargins(0, 2, 0, 0);
+    accLayout->setSpacing(14);
 
-    _accountInput = new QLineEdit(accountTab);
-    _accountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Phone number or account (%1-%2 characters)")
-        .arg(OpenMeeting::kMinAccountLength).arg(OpenMeeting::kMaxAccountLength));
-    _accountInput->setAccessibleName(_accountInput->placeholderText());
-    accLayout->addWidget(_accountInput);
+    // 已保存会话快速继续卡片
+    _savedSessionCard = new QFrame(accountTab);
+    _savedSessionCard->setObjectName(QStringLiteral("loginSavedSessionCard"));
+    auto savedLayout = new QHBoxLayout(_savedSessionCard);
+    savedLayout->setContentsMargins(14, 10, 14, 10);
+    savedLayout->setSpacing(10);
 
-    auto pwdLayout = new QHBoxLayout();
-    _passwordInput = new QLineEdit(accountTab);
-    _passwordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password (%1-%2 characters)")
-        .arg(OpenMeeting::kMinPasswordLength).arg(OpenMeeting::kMaxPasswordLength));
-    _passwordInput->setAccessibleName(_passwordInput->placeholderText());
-    _passwordInput->setEchoMode(QLineEdit::Password);
-    pwdLayout->addWidget(_passwordInput);
+    _savedAvatarLabel = new QLabel(QStringLiteral("U"), _savedSessionCard);
+    _savedAvatarLabel->setObjectName(QStringLiteral("loginSavedAvatar"));
+    _savedAvatarLabel->setFixedSize(36, 36);
+    _savedAvatarLabel->setAlignment(Qt::AlignCenter);
+    savedLayout->addWidget(_savedAvatarLabel, 0, Qt::AlignVCenter);
 
-    _togglePwdBtn = new QPushButton(QString::fromUtf8("👁"), accountTab);
-    _togglePwdBtn->setFixedSize(36, 36);
-    MeetingUI::AppTheme::setStyleVariant(*_togglePwdBtn, "login-dialog-togglepwdbtn");
-    connect(_togglePwdBtn, &QPushButton::clicked, this, &LoginDialog::togglePasswordVisibility);
-    pwdLayout->addWidget(_togglePwdBtn);
-    accLayout->addLayout(pwdLayout);
+    auto savedTextLayout = new QVBoxLayout();
+    savedTextLayout->setContentsMargins(0, 0, 0, 0);
+    savedTextLayout->setSpacing(1);
+    _savedAccountLabel = new QLabel(_savedSessionCard);
+    _savedAccountLabel->setObjectName(QStringLiteral("loginSavedAccount"));
+    auto savedHint = new QLabel(QCoreApplication::translate("MeetingUI", "Saved session on this device"), _savedSessionCard);
+    savedHint->setObjectName(QStringLiteral("loginSavedHint"));
+    savedTextLayout->addWidget(_savedAccountLabel);
+    savedTextLayout->addWidget(savedHint);
+    savedLayout->addLayout(savedTextLayout, 1);
 
-    // 记住登录状态与自动登录 + 快速去注册
-    auto optLayout = new QHBoxLayout();
-    _rememberBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Remember sign-in"), accountTab);
-    _rememberBox->setObjectName("rememberSession");
-    _autoLoginBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Sign in automatically"), accountTab);
-    _autoLoginBox->setObjectName("autoLogin");
-    if (!OpenMeeting::credentialPersistenceSupported()) {
-        const auto reason = QCoreApplication::translate("MeetingUI",
-            "Remembering sign-in is not available on this platform yet.");
-        _rememberBox->setToolTip(reason);
-        _autoLoginBox->setToolTip(reason);
-    }
-    optLayout->addWidget(_rememberBox);
-    optLayout->addWidget(_autoLoginBox);
-    optLayout->addStretch();
-    _toRegisterLinkBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Create an account ➔"), accountTab);
-    _toRegisterLinkBtn->setObjectName("linkBtn");
-    connect(_toRegisterLinkBtn, &QPushButton::clicked, this, [this]() {
-        if (_tabWidget) _tabWidget->setCurrentIndex(1);
-    });
-    optLayout->addWidget(_toRegisterLinkBtn);
-    accLayout->addLayout(optLayout);
-
-    _loginBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Sign In"), accountTab);
-    _loginBtn->setObjectName("primaryBtn");
-    _loginBtn->setMinimumHeight(40);
-    connect(_loginBtn, &QPushButton::clicked, this, &LoginDialog::onLoginClicked);
-    _resumeBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Continue with Saved Account"), accountTab);
+    _resumeBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Continue"), _savedSessionCard);
     _resumeBtn->setObjectName("resumeSavedSession");
-    accLayout->addWidget(_resumeBtn);
+    _resumeBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Continue with Saved Account"));
+    _resumeBtn->setMinimumHeight(32);
+    _resumeBtn->setCursor(Qt::PointingHandCursor);
+    savedLayout->addWidget(_resumeBtn, 0, Qt::AlignVCenter);
     connect(_resumeBtn, &QPushButton::clicked, this, [this] {
         if (_accountInput->text().trimmed() != _session.savedAccount() ||
             OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) != _session.serverBaseUrl()) return;
@@ -324,114 +480,237 @@ void LoginDialog::initUI() {
         finished(resumed);
 #endif
     });
-    accLayout->addWidget(_loginBtn);
+    _savedSessionCard->setVisible(false);
+    accLayout->addWidget(_savedSessionCard);
 
-    _tabWidget->addTab(accountTab, QCoreApplication::translate("MeetingUI", "Account Sign-In"));
+    _accountInput = new QLineEdit(accountTab);
+    _accountInput->setObjectName("loginAccount");
+    _accountInput->setMinimumHeight(44);
+    _accountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Phone number or account (%1-%2 characters)")
+        .arg(OpenMeeting::kMinAccountLength).arg(OpenMeeting::kMaxAccountLength));
+    _accountInput->setAccessibleName(_accountInput->placeholderText());
+    accLayout->addLayout(makeFieldGroup(
+        QCoreApplication::translate("MeetingUI", "Account / Phone"), _accountInput, accountTab));
+
+    _pwdBox = new QFrame(accountTab);
+    _pwdBox->setObjectName(QStringLiteral("loginInputBox"));
+    _pwdBox->setProperty("focused", false);
+    auto pwdLayout = new QHBoxLayout(_pwdBox);
+    pwdLayout->setContentsMargins(0, 0, 6, 0);
+    pwdLayout->setSpacing(2);
+    _passwordInput = new QLineEdit(_pwdBox);
+    _passwordInput->setObjectName("loginPassword");
+    _passwordInput->setMinimumHeight(42);
+    _passwordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password (%1-%2 characters)")
+        .arg(OpenMeeting::kMinPasswordLength).arg(OpenMeeting::kMaxPasswordLength));
+    _passwordInput->setAccessibleName(_passwordInput->placeholderText());
+    _passwordInput->setEchoMode(QLineEdit::Password);
+    _passwordInput->installEventFilter(this);
+    pwdLayout->addWidget(_passwordInput, 1);
+
+    _togglePwdBtn = new QPushButton(_pwdBox);
+    _togglePwdBtn->setObjectName(QStringLiteral("loginEyeBtn"));
+    _togglePwdBtn->setFixedSize(32, 32);
+    _togglePwdBtn->setIconSize(QSize(16, 16));
+    _togglePwdBtn->setCursor(Qt::PointingHandCursor);
+    _togglePwdBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Show or hide password"));
+    _togglePwdBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Show or hide password"));
+    connect(_togglePwdBtn, &QPushButton::clicked, this, &LoginDialog::togglePasswordVisibility);
+    pwdLayout->addWidget(_togglePwdBtn, 0, Qt::AlignVCenter);
+    accLayout->addLayout(makeFieldGroup(
+        QCoreApplication::translate("MeetingUI", "Sign-in Password"), _pwdBox, accountTab));
+
+    // 记住登录状态与自动登录
+    auto optLayout = new QHBoxLayout();
+    optLayout->setContentsMargins(0, 2, 0, 2);
+    optLayout->setSpacing(10);
+    _rememberBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Remember sign-in"), accountTab);
+    _rememberBox->setObjectName("rememberSession");
+    _autoLoginBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Sign in automatically"), accountTab);
+    _autoLoginBox->setObjectName("autoLogin");
+    if (!OpenMeeting::credentialPersistenceSupported()) {
+        const auto reason = QCoreApplication::translate("MeetingUI",
+            "Remembering sign-in is not available on this platform yet.");
+        _rememberBox->setToolTip(reason);
+        _autoLoginBox->setToolTip(reason);
+    }
+    optLayout->addWidget(_rememberBox);
+    optLayout->addStretch();
+    optLayout->addWidget(_autoLoginBox);
+    accLayout->addLayout(optLayout);
+
+    _loginBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Sign In"), accountTab);
+    _loginBtn->setObjectName("primaryBtn");
+    _loginBtn->setMinimumHeight(46);
+    _loginBtn->setCursor(Qt::PointingHandCursor);
+    connect(_loginBtn, &QPushButton::clicked, this, &LoginDialog::onLoginClicked);
+    accLayout->addWidget(_loginBtn);
+    accLayout->addStretch();
+
+    _tabWidget->addTab(accountTab, tabLabels[0]);
 
     // --- Tab 2: 新用户注册 ---
     auto regTab = new QWidget(_tabWidget);
     auto regLayout = new QVBoxLayout(regTab);
-    regLayout->setContentsMargins(0, 12, 0, 0);
-    regLayout->setSpacing(10);
+    regLayout->setContentsMargins(0, 2, 0, 0);
+    regLayout->setSpacing(12);
+
+    auto *regTopRow = new QHBoxLayout();
+    regTopRow->setContentsMargins(0, 0, 0, 0);
+    regTopRow->setSpacing(12);
 
     _regAccountInput = new QLineEdit(regTab);
     _regAccountInput->setObjectName("registerAccount");
-    _regAccountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Account or phone number (%1-%2 characters)")
+    _regAccountInput->setMinimumHeight(42);
+    _regAccountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "%1-%2 characters")
         .arg(OpenMeeting::kMinAccountLength).arg(OpenMeeting::kMaxAccountLength));
-    regLayout->addWidget(_regAccountInput);
+    _regAccountInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Account or phone number (%1-%2 characters)")
+        .arg(OpenMeeting::kMinAccountLength).arg(OpenMeeting::kMaxAccountLength));
+    regTopRow->addLayout(makeFieldGroup(
+        QCoreApplication::translate("MeetingUI", "Account / Phone"), _regAccountInput, regTab), 1);
 
     _regNicknameInput = new QLineEdit(regTab);
     _regNicknameInput->setObjectName("registerNickname");
-    _regNicknameInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Display name"));
-    regLayout->addWidget(_regNicknameInput);
+    _regNicknameInput->setMinimumHeight(42);
+    _regNicknameInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Name shown in meetings"));
+    _regNicknameInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Display Nickname"));
+    regTopRow->addLayout(makeFieldGroup(
+        QCoreApplication::translate("MeetingUI", "Display Nickname"), _regNicknameInput, regTab), 1);
+    regLayout->addLayout(regTopRow);
 
-    auto regPwdLayout = new QHBoxLayout();
-    _regPasswordInput = new QLineEdit(regTab);
+    _regPwdBox = new QFrame(regTab);
+    _regPwdBox->setObjectName(QStringLiteral("loginInputBox"));
+    _regPwdBox->setProperty("focused", false);
+    auto regPwdLayout = new QHBoxLayout(_regPwdBox);
+    regPwdLayout->setContentsMargins(0, 0, 6, 0);
+    regPwdLayout->setSpacing(2);
+    _regPasswordInput = new QLineEdit(_regPwdBox);
     _regPasswordInput->setObjectName("registerPassword");
+    _regPasswordInput->setMinimumHeight(40);
     _regPasswordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password (%1-%2 characters)")
         .arg(OpenMeeting::kMinPasswordLength).arg(OpenMeeting::kMaxPasswordLength));
     _regPasswordInput->setEchoMode(QLineEdit::Password);
-    regPwdLayout->addWidget(_regPasswordInput);
+    _regPasswordInput->installEventFilter(this);
+    regPwdLayout->addWidget(_regPasswordInput, 1);
 
-    _toggleRegPwdBtn = new QPushButton(QString::fromUtf8("👁"), regTab);
-    _toggleRegPwdBtn->setFixedSize(36, 36);
-    MeetingUI::AppTheme::setStyleVariant(*_toggleRegPwdBtn, "login-dialog-toggleregpwdbtn");
+    _toggleRegPwdBtn = new QPushButton(_regPwdBox);
+    _toggleRegPwdBtn->setObjectName(QStringLiteral("loginEyeBtn"));
+    _toggleRegPwdBtn->setFixedSize(32, 32);
+    _toggleRegPwdBtn->setIconSize(QSize(16, 16));
+    _toggleRegPwdBtn->setCursor(Qt::PointingHandCursor);
+    _toggleRegPwdBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Show or hide password"));
+    _toggleRegPwdBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Show or hide password"));
     connect(_toggleRegPwdBtn, &QPushButton::clicked, this, &LoginDialog::toggleRegPasswordVisibility);
-    regPwdLayout->addWidget(_toggleRegPwdBtn);
-    regLayout->addLayout(regPwdLayout);
+    regPwdLayout->addWidget(_toggleRegPwdBtn, 0, Qt::AlignVCenter);
+    regLayout->addLayout(makeFieldGroup(
+        QCoreApplication::translate("MeetingUI", "Set Password"), _regPwdBox, regTab));
 
     _regConfirmPwdInput = new QLineEdit(regTab);
     _regConfirmPwdInput->setObjectName("registerConfirmPassword");
+    _regConfirmPwdInput->setMinimumHeight(42);
     _regConfirmPwdInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Confirm password"));
     _regConfirmPwdInput->setEchoMode(QLineEdit::Password);
-    regLayout->addWidget(_regConfirmPwdInput);
+    regLayout->addLayout(makeFieldGroup(
+        QCoreApplication::translate("MeetingUI", "Confirm Password"), _regConfirmPwdInput, regTab));
 
     _registerBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Sign Up"), regTab);
     _registerBtn->setObjectName("primaryBtn");
-    _registerBtn->setMinimumHeight(40);
+    _registerBtn->setMinimumHeight(44);
+    _registerBtn->setCursor(Qt::PointingHandCursor);
     connect(_registerBtn, &QPushButton::clicked, this, &LoginDialog::onRegisterClicked);
     regLayout->addWidget(_registerBtn);
-
-    auto toLoginLayout = new QHBoxLayout();
-    toLoginLayout->addStretch();
-    _toLoginLinkBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Already have an account? Sign in ➔"), regTab);
-    _toLoginLinkBtn->setObjectName("linkBtn");
-    connect(_toLoginLinkBtn, &QPushButton::clicked, this, [this]() {
-        if (_tabWidget) _tabWidget->setCurrentIndex(0);
-    });
-    toLoginLayout->addWidget(_toLoginLinkBtn);
-    regLayout->addLayout(toLoginLayout);
-
     regLayout->addStretch();
 
-    _tabWidget->addTab(regTab, QCoreApplication::translate("MeetingUI", "Create Account"));
+    _tabWidget->addTab(regTab, tabLabels[1]);
 
     // --- Tab 3: 访客/调试体验 ---
     auto guestTab = new QWidget(_tabWidget);
     auto guestLayout = new QVBoxLayout(guestTab);
-    guestLayout->setContentsMargins(0, 12, 0, 0);
-    guestLayout->setSpacing(14);
+    guestLayout->setContentsMargins(0, 2, 0, 0);
+    guestLayout->setSpacing(16);
 
     auto guestDesc = new QLabel(QCoreApplication::translate("MeetingUI", "Enter a display name to join a meeting or test local RTC features without creating an account."), guestTab);
+    guestDesc->setObjectName(QStringLiteral("loginGuestNotice"));
     guestDesc->setWordWrap(true);
     MeetingUI::AppTheme::setStyleVariant(*guestDesc, "login-dialog-guestdesc");
     guestLayout->addWidget(guestDesc);
 
     _guestNicknameInput = new QLineEdit(guestTab);
+    _guestNicknameInput->setMinimumHeight(44);
     _guestNicknameInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Display name (e.g. Alice)"));
     _guestNicknameInput->setAccessibleName(_guestNicknameInput->placeholderText());
-    guestLayout->addWidget(_guestNicknameInput);
+    guestLayout->addLayout(makeFieldGroup(
+        QCoreApplication::translate("MeetingUI", "Guest Display Name"), _guestNicknameInput, guestTab));
 
-    guestLayout->addSpacing(10);
     _guestBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Continue as Guest"), guestTab);
     _guestBtn->setObjectName("guestBtn");
-    _guestBtn->setMinimumHeight(40);
+    _guestBtn->setMinimumHeight(46);
+    _guestBtn->setCursor(Qt::PointingHandCursor);
     connect(_guestBtn, &QPushButton::clicked, this, &LoginDialog::onGuestLoginClicked);
     guestLayout->addWidget(_guestBtn);
     guestLayout->addStretch();
 
-    _tabWidget->addTab(guestTab, QCoreApplication::translate("MeetingUI", "Guest Access"));
+    _tabWidget->addTab(guestTab, tabLabels[2]);
 
-    cardLayout->addWidget(_tabWidget);
+    _bodyLayout->addWidget(_tabWidget);
 
-    // 全局网络设置（登录 / 注册 / 访客通用）
-    auto advToggleLayout = new QHBoxLayout();
-    advToggleLayout->addStretch();
-    _advancedToggleBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▾"), card);
+    // 错误/成功提示 Label（自适应换行，确保不会被卡片边缘截断）
+    _errorLabel = new QLabel(body);
+    _errorLabel->setObjectName("loginStatus");
+    MeetingUI::AppTheme::setStyleVariant(*_errorLabel, "login-dialog-errorlabel");
+    _errorLabel->setAlignment(Qt::AlignCenter);
+    _errorLabel->setWordWrap(true);
+    _errorLabel->setMinimumHeight(34);
+    _errorLabel->setVisible(false);
+    _bodyLayout->addWidget(_errorLabel);
+
+    cardLayout->addWidget(body);
+
+    // 独立页脚带（服务节点配置 + 传输安全状态胶囊）
+    _footerBar = new QFrame(card);
+    _footerBar->setObjectName(QStringLiteral("loginFooterBar"));
+    _footerLayout = new QVBoxLayout(_footerBar);
+    _footerLayout->setContentsMargins(28, 12, 28, 12);
+    _footerLayout->setSpacing(10);
+
+    auto *footerTopRow = new QHBoxLayout();
+    footerTopRow->setContentsMargins(0, 0, 0, 0);
+    footerTopRow->setSpacing(8);
+    _advancedToggleBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Server Settings"), _footerBar);
     _advancedToggleBtn->setObjectName("serverSettingsToggle");
+    _advancedToggleBtn->setIconSize(QSize(14, 14));
+    _advancedToggleBtn->setCursor(Qt::PointingHandCursor);
     MeetingUI::AppTheme::setStyleVariant(*_advancedToggleBtn, "login-dialog-advancedtogglebtn");
     connect(_advancedToggleBtn, &QPushButton::clicked, this, &LoginDialog::toggleAdvancedSettings);
-    advToggleLayout->addWidget(_advancedToggleBtn);
-    advToggleLayout->addStretch();
-    cardLayout->addLayout(advToggleLayout);
+    footerTopRow->addWidget(_advancedToggleBtn);
+    footerTopRow->addStretch();
 
-    _advancedWidget = new QWidget(card);
+    _transportBadge = new QFrame(_footerBar);
+    _transportBadge->setObjectName(QStringLiteral("loginTransportBadge"));
+    auto *badgeLayout = new QHBoxLayout(_transportBadge);
+    badgeLayout->setContentsMargins(8, 3, 8, 3);
+    badgeLayout->setSpacing(4);
+    auto *glyph = new LoginTransportGlyph(_transportBadge);
+    _transportGlyph = glyph;
+    badgeLayout->addWidget(_transportGlyph, 0, Qt::AlignVCenter);
+    _transportBadgeLabel = new QLabel(_transportBadge);
+    _transportBadgeLabel->setObjectName(QStringLiteral("loginTransportBadgeLabel"));
+    badgeLayout->addWidget(_transportBadgeLabel, 0, Qt::AlignVCenter);
+    footerTopRow->addWidget(_transportBadge, 0, Qt::AlignVCenter);
+    _footerLayout->addLayout(footerTopRow);
+
+    auto *advCard = new QFrame(_footerBar);
+    advCard->setObjectName(QStringLiteral("loginAdvancedCard"));
+    _advancedWidget = advCard;
     auto advLayout = new QGridLayout(_advancedWidget);
-    advLayout->setContentsMargins(0, 2, 0, 2);
-    advLayout->setSpacing(6);
+    advLayout->setContentsMargins(14, 12, 14, 12);
+    advLayout->setHorizontalSpacing(10);
+    advLayout->setVerticalSpacing(8);
     auto advLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Meeting service:"), _advancedWidget);
     MeetingUI::AppTheme::setStyleVariant(*advLabel, "login-dialog-advlabel");
     _serverUrlInput = new QLineEdit(_advancedWidget);
+    _serverUrlInput->setObjectName("serverBaseUrl");
+    _serverUrlInput->setMinimumHeight(34);
     _serverUrlInput->setPlaceholderText(QString::fromUtf8("https://api.example.com"));
     _serverUrlInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Meeting service"));
     advLayout->addWidget(advLabel, 0, 0);
@@ -441,6 +720,7 @@ void LoginDialog::initUI() {
     MeetingUI::AppTheme::setStyleVariant(*registrationLabel, "login-dialog-advlabel");
     _registrationServerUrlInput = new QLineEdit(_advancedWidget);
     _registrationServerUrlInput->setObjectName("registrationServerBaseUrl");
+    _registrationServerUrlInput->setMinimumHeight(34);
     _registrationServerUrlInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Leave empty to use the default"));
     advLayout->addWidget(registrationLabel, 1, 0);
     advLayout->addWidget(_registrationServerUrlInput, 1, 1);
@@ -448,21 +728,14 @@ void LoginDialog::initUI() {
 
     auto registrationHint = new QLabel(QCoreApplication::translate("MeetingUI",
         "Default registration port: 11022. You can set a separate service or reverse-proxy base URL."), _advancedWidget);
+    registrationHint->setObjectName(QStringLiteral("loginRegHint"));
     MeetingUI::AppTheme::setStyleVariant(*registrationHint, "login-dialog-advlabel");
     registrationHint->setWordWrap(true);
     advLayout->addWidget(registrationHint, 2, 0, 1, 2);
     _advancedWidget->setVisible(false);
-    cardLayout->addWidget(_advancedWidget);
+    _footerLayout->addWidget(_advancedWidget);
 
-    // 错误/成功提示 Label（自适应换行，确保不会被卡片边缘截断）
-    _errorLabel = new QLabel(card);
-    _errorLabel->setObjectName("loginStatus");
-    MeetingUI::AppTheme::setStyleVariant(*_errorLabel, "login-dialog-errorlabel");
-    _errorLabel->setAlignment(Qt::AlignCenter);
-    _errorLabel->setWordWrap(true);
-    _errorLabel->setMinimumHeight(32);
-    _errorLabel->setVisible(false);
-    cardLayout->addWidget(_errorLabel);
+    cardLayout->addWidget(_footerBar);
 
     // Only the current page's submit action handles Return. In a QDialog,
     // autoDefault otherwise allows auxiliary buttons (including close) to take
@@ -472,6 +745,7 @@ void LoginDialog::initUI() {
         button->setDefault(false);
     }
     const auto updateDefaultButton = [this](int page) {
+        syncSegmentButtons(page);
         _loginBtn->setDefault(false);
         _registerBtn->setDefault(false);
         _guestBtn->setDefault(false);
@@ -489,6 +763,70 @@ void LoginDialog::initUI() {
     };
     connect(_tabWidget, &QTabWidget::currentChanged, this, updateDefaultButton);
     updateDefaultButton(_tabWidget->currentIndex());
+    syncServerSummary();
+    refreshThemeVisuals();
+}
+
+bool LoginDialog::eventFilter(QObject *watched, QEvent *event) {
+    if (event && (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut)) {
+        const bool focused = event->type() == QEvent::FocusIn;
+        if (watched == _passwordInput && _pwdBox) {
+            _pwdBox->setProperty("focused", focused);
+            repolishLoginWidget(_pwdBox);
+        } else if (watched == _regPasswordInput && _regPwdBox) {
+            _regPwdBox->setProperty("focused", focused);
+            repolishLoginWidget(_regPwdBox);
+        }
+    }
+    return QDialog::eventFilter(watched, event);
+}
+
+void LoginDialog::syncSegmentButtons(int index) {
+    for (int i = 0; i < static_cast<int>(_segmentButtons.size()); ++i) {
+        if (auto *btn = _segmentButtons[static_cast<size_t>(i)]) {
+            const QSignalBlocker blocker(btn);
+            btn->setChecked(i == index);
+        }
+    }
+}
+
+void LoginDialog::syncServerSummary() {
+    const bool expanded = _advancedWidget && !_advancedWidget->isHidden();
+    if (_advancedToggleBtn) {
+        const QString host = compactEndpointLabel(_serverUrlInput ? _serverUrlInput->text() : QString());
+        const QString baseText = host.isEmpty()
+            ? QCoreApplication::translate("MeetingUI", "Server Settings")
+            : QCoreApplication::translate("MeetingUI", "Server: %1").arg(host);
+        _advancedToggleBtn->setText(baseText + (expanded ? QStringLiteral(" ▴") : QStringLiteral(" ▾")));
+        _advancedToggleBtn->setProperty("expanded", expanded);
+        repolishLoginWidget(_advancedToggleBtn);
+    }
+    refreshThemeVisuals();
+}
+
+void LoginDialog::refreshThemeVisuals() {
+    if (_brandBadge) _brandBadge->update();
+    if (_transportGlyph) _transportGlyph->update();
+    const bool serverExpanded = _advancedWidget && !_advancedWidget->isHidden();
+    if (_closeBtn) {
+        _closeBtn->setIcon(AppTheme::icon(AppTheme::Icon::Close, AppTheme::ColorRole::TextMuted));
+    }
+    if (_advancedToggleBtn) {
+        const auto toggleRole = serverExpanded ? AppTheme::ColorRole::Accent : AppTheme::ColorRole::TextSecondary;
+        _advancedToggleBtn->setIcon(AppTheme::icon(AppTheme::Icon::Server, toggleRole));
+    }
+    if (_togglePwdBtn && _passwordInput) {
+        const bool visible = _passwordInput->echoMode() != QLineEdit::Password;
+        _togglePwdBtn->setIcon(AppTheme::icon(
+            visible ? AppTheme::Icon::EyeOff : AppTheme::Icon::Eye,
+            visible ? AppTheme::ColorRole::Accent : AppTheme::ColorRole::TextMuted));
+    }
+    if (_toggleRegPwdBtn && _regPasswordInput) {
+        const bool visible = _regPasswordInput->echoMode() != QLineEdit::Password;
+        _toggleRegPwdBtn->setIcon(AppTheme::icon(
+            visible ? AppTheme::Icon::EyeOff : AppTheme::Icon::Eye,
+            visible ? AppTheme::ColorRole::Accent : AppTheme::ColorRole::TextMuted));
+    }
 }
 
 void LoginDialog::loadSavedData() {
@@ -511,8 +849,8 @@ void LoginDialog::loadSavedData() {
     updateEndpointOptions();
     if (session.serverBaseUrl().isEmpty()) {
         _advancedWidget->setVisible(true);
-        _advancedToggleBtn->setText(QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▴"));
     }
+    syncServerSummary();
     if (!session.persistenceMessage().isEmpty()) showError(session.persistenceMessage());
 }
 
@@ -528,10 +866,23 @@ void LoginDialog::refreshPersistenceState() {
 }
 
 void LoginDialog::updateSavedSessionAction() {
-    _resumeBtn->setEnabled(!_loading && !_session.credentialOperationPending());
-    _resumeBtn->setVisible(_session.canResumeSavedSession() &&
+    const bool canResume = _session.canResumeSavedSession() &&
         _accountInput->text().trimmed() == _session.savedAccount() &&
-        OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) == _session.serverBaseUrl());
+        OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) == _session.serverBaseUrl();
+    _resumeBtn->setEnabled(!_loading && !_session.credentialOperationPending());
+    if (_savedSessionCard) {
+        if (canResume) {
+            const QString account = _session.savedAccount().trimmed();
+            if (_savedAccountLabel) _savedAccountLabel->setText(account);
+            if (_savedAvatarLabel) {
+                const QString initial = account.isEmpty() ? QStringLiteral("U") : account.left(1).toUpper();
+                _savedAvatarLabel->setText(initial);
+            }
+        }
+        _savedSessionCard->setVisible(canResume);
+    } else {
+        _resumeBtn->setVisible(canResume);
+    }
     scheduleFormFit();
 }
 
@@ -540,9 +891,27 @@ void LoginDialog::updateEndpointOptions() {
     const bool persistent = OpenMeeting::credentialPersistenceSupported() && OpenMeeting::serviceAllowsCredentialPersistence(_serverUrlInput->text());
     _rememberBox->setEnabled(!_loading && persistent && !_session.credentialOperationPending());
     _autoLoginBox->setEnabled(!_loading && persistent && !_session.credentialOperationPending() && _rememberBox->isChecked());
-    _rememberBox->setText(policy.isDebugHttp()
-        ? QCoreApplication::translate("MeetingUI", "Remember sign-in (debug HTTP traffic is unencrypted)")
-        : QCoreApplication::translate("MeetingUI", "Remember sign-in"));
+    _rememberBox->setText(QCoreApplication::translate("MeetingUI", "Remember sign-in"));
+    if (_transportBadge && _transportBadgeLabel && _transportGlyph) {
+        auto *glyph = static_cast<LoginTransportGlyph *>(_transportGlyph);
+        if (policy.status == OpenMeeting::ServiceEndpointStatus::DebugHttpAllowed) {
+            _transportBadge->setProperty("mode", QStringLiteral("warning"));
+            glyph->setWarning(true);
+            _transportBadgeLabel->setText(QCoreApplication::translate("MeetingUI", "Debug HTTP (Unencrypted)"));
+            _transportBadge->setToolTip(QCoreApplication::translate("MeetingUI", "Debug HTTP traffic is unencrypted."));
+            _transportBadge->setVisible(true);
+        } else if (policy.status == OpenMeeting::ServiceEndpointStatus::HttpsAllowed) {
+            _transportBadge->setProperty("mode", QStringLiteral("secure"));
+            glyph->setWarning(false);
+            _transportBadgeLabel->setText(QCoreApplication::translate("MeetingUI", "HTTPS Encrypted"));
+            _transportBadge->setToolTip(QCoreApplication::translate("MeetingUI", "Sign-in traffic uses HTTPS encryption."));
+            _transportBadge->setVisible(true);
+        } else {
+            _transportBadge->setVisible(false);
+        }
+        repolishLoginWidget(_transportBadge);
+        repolishLoginWidget(_transportBadgeLabel);
+    }
     scheduleFormFit();
 }
 
@@ -559,7 +928,7 @@ void LoginDialog::acceptAuthenticatedSession() {
 void LoginDialog::toggleAdvancedSettings() {
     bool isVisible = !_advancedWidget->isHidden();
     _advancedWidget->setVisible(!isVisible);
-    _advancedToggleBtn->setText(!isVisible ? QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▴") : QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▾"));
+    syncServerSummary();
     scheduleFormFit();
 }
 
@@ -600,13 +969,22 @@ void LoginDialog::fitFormToScreen() {
         content->layout()->setContentsMargins(compact ? 8 : 12, compact ? 8 : 12,
                                               compact ? 8 : 12, compact ? 8 : 12);
 #endif
-        card->layout()->setContentsMargins(compact ? 20 : 28, compact ? 12 : 20,
-                                           compact ? 20 : 28, compact ? 16 : 24);
-        card->layout()->setSpacing(compact ? 8 : 12);
+        card->layout()->setContentsMargins(0, 0, 0, 0);
+        card->layout()->setSpacing(0);
+        if (_bodyLayout) {
+            _bodyLayout->setContentsMargins(compact ? 24 : 36, compact ? 16 : 26,
+                                            compact ? 24 : 36, compact ? 16 : 22);
+            _bodyLayout->setSpacing(compact ? 12 : 18);
+        }
+        if (_footerLayout) {
+            _footerLayout->setContentsMargins(compact ? 24 : 28, compact ? 10 : 12,
+                                              compact ? 24 : 28, compact ? 10 : 12);
+            _footerLayout->setSpacing(compact ? 8 : 10);
+        }
         for (int i = 0; i < _tabWidget->count(); ++i) {
             auto *pageLayout = _tabWidget->widget(i)->layout();
-            pageLayout->setContentsMargins(0, compact ? 8 : 12, 0, 0);
-            pageLayout->setSpacing(compact ? (i == 1 ? 6 : 8) : (i == 1 ? 10 : i == 2 ? 14 : 12));
+            pageLayout->setContentsMargins(0, 2, 0, 0);
+            pageLayout->setSpacing(compact ? (i == 1 ? 8 : 10) : (i == 1 ? 12 : i == 2 ? 16 : 14));
         }
         const auto layouts = content->findChildren<QLayout *>();
         for (auto *childLayout : layouts) childLayout->invalidate();
@@ -623,7 +1001,7 @@ void LoginDialog::fitFormToScreen() {
     const auto measuredSize = [&](int scrollBarWidth) {
         auto *formLayout = content->layout();
         const auto minimum = formLayout->totalMinimumSize();
-        const int width = qMin(available.width(), qMax(460, minimum.width()) + scrollBarWidth);
+        const int width = qMin(available.width(), qMax(512, minimum.width()) + scrollBarWidth);
         const int formWidth = qMax(1, width - scrollBarWidth);
         // QLabel wrapping depends on the final viewport width; sizeHint alone
         // can still describe the old, wider form after adding an error message.
@@ -643,7 +1021,7 @@ void LoginDialog::fitFormToScreen() {
         // overflow just because the vertical scroll bar occupies some width.
         desired = measuredSize(scroll->verticalScrollBar()->sizeHint().width());
     }
-    desired.setHeight(qMin(available.height(), qMax(600, desired.height())));
+    desired.setHeight(qMin(available.height(), qMax(440, desired.height())));
     const auto scrollPolicy = scroll->verticalScrollBarPolicy();
     if (contentFits) {
         // Qt can retain a scroll bar by measuring wrapping at the old, narrower
@@ -666,11 +1044,10 @@ void LoginDialog::fitFormToScreen() {
 void LoginDialog::togglePasswordVisibility() {
     if (_passwordInput->echoMode() == QLineEdit::Password) {
         _passwordInput->setEchoMode(QLineEdit::Normal);
-        _togglePwdBtn->setText(QString::fromUtf8("🔒"));
     } else {
         _passwordInput->setEchoMode(QLineEdit::Password);
-        _togglePwdBtn->setText(QString::fromUtf8("👁"));
     }
+    refreshThemeVisuals();
 }
 
 void LoginDialog::setLoading(bool loading, const QString &text) {
@@ -686,12 +1063,16 @@ void LoginDialog::setLoading(bool loading, const QString &text) {
     _guestBtn->setEnabled(!loading);
     _accountInput->setEnabled(!loading);
     _passwordInput->setEnabled(!loading);
+    if (_togglePwdBtn) _togglePwdBtn->setEnabled(!loading);
     if (_registerBtn) _registerBtn->setEnabled(!loading);
     if (_regAccountInput) _regAccountInput->setEnabled(!loading);
     if (_regNicknameInput) _regNicknameInput->setEnabled(!loading);
     if (_regPasswordInput) _regPasswordInput->setEnabled(!loading);
     if (_regConfirmPwdInput) _regConfirmPwdInput->setEnabled(!loading);
     if (_toggleRegPwdBtn) _toggleRegPwdBtn->setEnabled(!loading);
+    for (auto *btn : _segmentButtons) {
+        if (btn) btn->setEnabled(!loading);
+    }
 
     if (loading) {
         if (!text.isEmpty()) {
@@ -733,12 +1114,11 @@ void LoginDialog::toggleRegPasswordVisibility() {
     if (_regPasswordInput->echoMode() == QLineEdit::Password) {
         _regPasswordInput->setEchoMode(QLineEdit::Normal);
         if (_regConfirmPwdInput) _regConfirmPwdInput->setEchoMode(QLineEdit::Normal);
-        _toggleRegPwdBtn->setText(QString::fromUtf8("🔒"));
     } else {
         _regPasswordInput->setEchoMode(QLineEdit::Password);
         if (_regConfirmPwdInput) _regConfirmPwdInput->setEchoMode(QLineEdit::Password);
-        _toggleRegPwdBtn->setText(QString::fromUtf8("👁"));
     }
+    refreshThemeVisuals();
 }
 
 void LoginDialog::onRegisterClicked() {

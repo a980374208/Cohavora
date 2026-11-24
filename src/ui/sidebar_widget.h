@@ -16,7 +16,8 @@ enum class NavItemType {
 
 enum class BottomItemType {
 	Settings,
-	User
+	User,
+	Copilot
 };
 
 class SidebarWidget : public Ui::RpWidget {
@@ -28,6 +29,10 @@ public:
 		return _activeNav;
 	}
 	void setActiveNav(NavItemType type);
+	void setCopilotActive(bool active);
+	[[nodiscard]] bool copilotActive() const {
+		return _copilotActive;
+	}
 	void setCornerRadius(int radius);
 
 	rpl::producer<NavItemType> navChanged() const {
@@ -41,6 +46,7 @@ public:
 	}
 
 protected:
+	void resizeEvent(QResizeEvent *e) override;
 	void paintEvent(QPaintEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
@@ -61,6 +67,7 @@ private:
 	};
 
 	void updateLayout();
+	[[nodiscard]] QRect avatarHitRect() const;
 	void drawAvatar(QPainter &p, const QRect &r);
 	void drawNavIcon(QPainter &p, NavItemType type, const QRect &iconRect, bool active, bool hovered);
 	void drawBottomIcon(QPainter &p, BottomItemType type, const QRect &iconRect, bool hovered);
@@ -69,10 +76,13 @@ private:
 	std::optional<NavItemType> _hoveredNav;
 	std::optional<BottomItemType> _hoveredBottom;
 	bool _avatarHovered = false;
+	bool _avatarPressed = false;
 
 	QRect _avatarRect;
 	QPushButton *_accessibleAvatar = nullptr;
 	QPushButton *_accessibleSettings = nullptr;
+	QPushButton *_accessibleCopilot = nullptr;
+	bool _copilotActive = false;
 	QVector<NavItem> _navItems;
 	QVector<BottomItem> _bottomItems;
 	int _cornerRadius = 14;

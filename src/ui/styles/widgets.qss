@@ -178,10 +178,11 @@ QLabel[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-
 QLineEdit[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
 [uiStyle="login-dialog-this"] QLineEdit {
     border: 1px solid @border@;
-    border-radius: 8px;
-    padding: 10px 14px;
-    font-size: 13px;
-    background: @surface-alt@;
+    border-radius: 10px;
+    padding: 9px 14px;
+    font-size: 14px;
+    color: @text@;
+    background: @window@;
 }
 
 QLineEdit[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]:focus,
@@ -190,92 +191,170 @@ QLineEdit[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="log
     background: @surface@;
 }
 
+[uiStyle="login-dialog-this"] QFrame#loginInputBox {
+    background: @window@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginInputBox[focused="true"] {
+    background: @surface@;
+    border: 1px solid @accent@;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginInputBox QLineEdit,
+[uiStyle="login-dialog-this"] QFrame#loginInputBox QLineEdit:focus {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    padding: 0 4px 0 14px;
+}
+
+[uiStyle="login-dialog-this"] QLabel#loginFieldLabel {
+    color: @text-secondary@;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#loginEyeBtn {
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 0;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#loginEyeBtn:hover {
+    background: @hover@;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginSegmentBar {
+    background: @window@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#loginSegmentBtn {
+    background: transparent;
+    color: @text-secondary@;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 0 8px;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#loginSegmentBtn:hover:!checked {
+    background: @hover@;
+    color: @text@;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#loginSegmentBtn:checked {
+    background: @surface@;
+    color: @accent@;
+    border: 1px solid @border@;
+    font-weight: 600;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginSavedSessionCard {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+    border-radius: 12px;
+}
+
+[uiStyle="login-dialog-this"] QLabel#loginSavedAvatar {
+    background: @accent@;
+    color: @on-accent@;
+    border-radius: 18px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+[uiStyle="login-dialog-this"] QLabel#loginSavedAccount {
+    color: @text@;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+[uiStyle="login-dialog-this"] QLabel#loginSavedHint {
+    color: @text-secondary@;
+    font-size: 11px;
+}
+
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"],
-[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"] {
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"],
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"],
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"] {
     background-color: @accent@;
     color: @on-accent@;
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 10px 24px;
-    font-size: 14px;
-    font-weight: bold;
+    font-size: 15px;
+    font-weight: 600;
     border: none;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:hover,
-[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:hover {
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:hover,
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"]:hover,
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"]:hover {
     background-color: @accent-hover@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:pressed,
-[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:pressed {
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:pressed,
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"]:pressed,
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"]:pressed {
     background-color: @accent-pressed@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:disabled,
-[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:disabled {
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:disabled,
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"]:disabled,
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"]:disabled {
     background-color: @accent-soft@;
     color: @text-muted@;
 }
 
-QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"],
-[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"],
 [uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"] {
-    background-color: @surface-alt@;
-    color: @text@;
+    background-color: @accent@;
+    color: @on-accent@;
     border-radius: 8px;
-    padding: 10px 24px;
-    font-size: 14px;
-    border: 1px solid @border@;
+    padding: 5px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    border: none;
 }
 
-QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"]:hover,
-[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"]:hover,
 [uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:hover {
-    background-color: @hover@;
+    background-color: @accent-hover@;
 }
 
 [uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:focus {
-    border-color: @accent@;
+    border: 1px solid @on-accent@;
 }
 
 [uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:pressed {
-    background-color: @pressed@;
+    background-color: @accent-pressed@;
 }
 
 [uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:disabled {
     background-color: @surface-alt@;
     color: @text-muted@;
-    border-color: @border@;
-}
-
-QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="linkBtn"],
-[uiStyle="login-dialog-this"] QPushButton[objectName="linkBtn"] {
-    background: transparent;
-    color: @accent@;
-    font-size: 12px;
-    border: none;
-    padding: 0;
-    text-align: left;
-}
-
-QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="linkBtn"]:hover,
-[uiStyle="login-dialog-this"] QPushButton[objectName="linkBtn"]:hover {
-    color: @accent-hover@;
-    text-decoration: underline;
+    border: 1px solid @border@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="closeBtn"],
 [uiStyle="login-dialog-this"] QPushButton[objectName="closeBtn"] {
     background: transparent;
     border: none;
-    font-size: 16px;
     color: @text-muted@;
-    border-radius: 4px;
+    border-radius: 8px;
+    padding: 0;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="closeBtn"]:hover,
 [uiStyle="login-dialog-this"] QPushButton[objectName="closeBtn"]:hover {
-    background: @surface-alt@;
+    background: @danger-soft@;
     color: @danger@;
 }
 
@@ -291,42 +370,10 @@ QTabWidget[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="lo
     background: transparent;
 }
 
-QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::tab,
-[uiStyle="login-dialog-this"] QTabBar::tab {
-    background: transparent;
-    color: @text-muted@;
-    font-size: 13px;
-    font-weight: 500;
-    padding: 8px 14px;
-    min-width: 80px;
-    border-bottom: 2px solid transparent;
-}
-
-QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::tab:selected,
-[uiStyle="login-dialog-this"] QTabBar::tab:selected {
-    color: @accent@;
-    border-bottom: 2px solid @accent@;
-    font-weight: bold;
-}
-
 [uiStyle="login-dialog-subtitle"][uiStyle="login-dialog-subtitle"][uiStyle="login-dialog-subtitle"],
 [uiStyle="login-dialog-subtitle"] * {
     color: @text-muted@;
-    font-size: 12px;
-}
-
-[uiStyle="login-dialog-togglepwdbtn"][uiStyle="login-dialog-togglepwdbtn"][uiStyle="login-dialog-togglepwdbtn"],
-[uiStyle="login-dialog-togglepwdbtn"] * {
-    border: 1px solid @border@;
-    border-radius: 8px;
-    background: @surface-alt@;
-}
-
-[uiStyle="login-dialog-toggleregpwdbtn"][uiStyle="login-dialog-toggleregpwdbtn"][uiStyle="login-dialog-toggleregpwdbtn"],
-[uiStyle="login-dialog-toggleregpwdbtn"] * {
-    border: 1px solid @border@;
-    border-radius: 8px;
-    background: @surface-alt@;
+    font-size: 13px;
 }
 
 [uiStyle="login-dialog-guestdesc"][uiStyle="login-dialog-guestdesc"][uiStyle="login-dialog-guestdesc"],
@@ -335,10 +382,93 @@ QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login
     font-size: 12px;
 }
 
-[uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"],
-[uiStyle="login-dialog-advancedtogglebtn"] * {
+[uiStyle="login-dialog-this"] QLabel#loginGuestNotice {
+    background: @window@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+    padding: 12px 14px;
+    color: @text-secondary@;
+    font-size: 12px;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginFooterBar {
+    background: @surface-alt@;
+    border-top: 1px solid @border@;
+    border-left: none;
+    border-right: none;
+    border-bottom: none;
+    border-bottom-left-radius: 15px;
+    border-bottom-right-radius: 15px;
+}
+
+[uiStyle="login-dialog-this"] [objectName="loginCard"][linuxWindowFrameSurface="true"] QFrame#loginFooterBar {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginTransportBadge {
+    background: transparent;
+    border: none;
+    border-radius: 11px;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginTransportBadge[mode="warning"] {
+    background: @warning-soft@;
+}
+
+[uiStyle="login-dialog-this"] QLabel#loginTransportBadgeLabel {
+    background: transparent;
     color: @text-muted@;
     font-size: 11px;
+    font-weight: 500;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginTransportBadge[mode="warning"] QLabel#loginTransportBadgeLabel {
+    color: @warning@;
+    font-weight: 600;
+}
+
+[uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"],
+[uiStyle="login-dialog-advancedtogglebtn"] * {
+    color: @text-secondary@;
+    font-size: 12px;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#serverSettingsToggle {
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 5px 10px;
+    color: @text-secondary@;
+    font-size: 12px;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#serverSettingsToggle:hover {
+    background: @hover@;
+    color: @text@;
+}
+
+[uiStyle="login-dialog-this"] QPushButton#serverSettingsToggle[expanded="true"] {
+    background: @accent-soft@;
+    color: @accent@;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginAdvancedCard {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 11px;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginAdvancedCard QLineEdit {
+    background: @window@;
+    border-radius: 7px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+
+[uiStyle="login-dialog-this"] QFrame#loginAdvancedCard QLineEdit:focus {
+    background: @surface@;
+    border: 1px solid @accent@;
 }
 
 [uiStyle="login-dialog-advlabel"][uiStyle="login-dialog-advlabel"][uiStyle="login-dialog-advlabel"],
@@ -351,21 +481,26 @@ QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login
 [uiStyle="login-dialog-errorlabel"] * {
     color: @danger@;
     font-size: 12px;
-    padding: 2px 4px;
+    padding: 6px 10px;
+    border-radius: 8px;
 }
 
 [uiStyle="login-dialog-errorlabel-2"][uiStyle="login-dialog-errorlabel-2"][uiStyle="login-dialog-errorlabel-2"],
 [uiStyle="login-dialog-errorlabel-2"] * {
     color: @danger@;
+    background: @danger-soft@;
     font-size: 12px;
-    padding: 2px 0;
+    padding: 6px 10px;
+    border-radius: 8px;
 }
 
 [uiStyle="login-dialog-errorlabel-3"][uiStyle="login-dialog-errorlabel-3"][uiStyle="login-dialog-errorlabel-3"],
 [uiStyle="login-dialog-errorlabel-3"] * {
     color: @success@;
+    background: @success-soft@;
     font-size: 12px;
-    padding: 2px 0;
+    padding: 6px 10px;
+    border-radius: 8px;
     font-weight: bold;
 }
 
@@ -1735,6 +1870,16 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-win
     padding: 6px 16px;
 }
 
+QLabel[uiStyle="meeting-room-window-captionbanner"][uiStyle="meeting-room-window-captionbanner"][uiStyle="meeting-room-window-captionbanner"],
+[uiStyle="meeting-room-window-captionbanner"] QLabel {
+    background-color: @surface@;
+    color: @text@;
+    border-top: 1px solid @border@;
+    font-size: 13px;
+    font-family: "Segoe UI", "Microsoft YaHei";
+    padding: 4px 16px;
+}
+
 [uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"],
 [uiStyle="meeting-room-window-screensharebanner"] QLabel {
     background: @accent-soft@;
@@ -2025,49 +2170,148 @@ QWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle=
 
 QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="dialogTitle"],
 [uiStyle="settings-dialog-this"] QLabel[objectName="dialogTitle"] {
-    font-size: 15px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 600;
     color: @text@;
+    background: transparent;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="closeButton"],
 [uiStyle="settings-dialog-this"] QPushButton[objectName="closeButton"] {
     border: none;
     background: transparent;
-    border-radius: 4px;
+    border-radius: 7px;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="closeButton"]:hover,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="closeButton"]:hover {
-    background: @surface-alt@;
+    background: @hover@;
+}
+
+[uiStyle="settings-dialog-this"] QFrame[objectName="settingsSidebar"] {
+    background: @surface@;
+    border: none;
+    border-right: 1px solid @border@;
+}
+[uiStyle="settings-dialog-this"] QWidget[objectName="sidebarTitleBar"],
+[uiStyle="settings-dialog-this"] QWidget[objectName="settingsSearchWrap"] {
+    background: transparent;
+}
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsSidebarTitle"] {
+    font-size: 15px;
+    font-weight: 700;
+    color: @text@;
+    background: transparent;
+}
+[uiStyle="settings-dialog-this"] QLineEdit[objectName="settingsSearchInput"] {
+    background: @window@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+    padding: 0 10px;
+    font-size: 12px;
+}
+[uiStyle="settings-dialog-this"] QLineEdit[objectName="settingsSearchInput"]:focus {
+    border-color: @accent@;
+    background: @surface@;
 }
 
 QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"],
 [uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"] {
-    background: @surface@;
+    background: transparent;
     border: none;
-    border-right: 1px solid @border@;
     outline: none;
-    padding: 8px 7px;
+    padding: 2px 10px;
 }
 
 QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item,
-[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item {
-    min-height: 40px;
-    padding-left: 12px;
-    border-radius: 6px;
-    color: @text@;
-}
-
+[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item,
 QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item:hover,
-[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item:hover {
-    background: @window@;
-}
-
+[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item:hover,
 QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item:selected,
 [uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item:selected {
-    background: @accent@;
-    color: @on-accent@;
+    background: transparent;
+    border: none;
+    outline: none;
+}
+
+[uiStyle="settings-dialog-this"] QWidget[objectName="settingsMainPane"],
+[uiStyle="settings-dialog-this"] QStackedWidget[objectName="settingsPages"],
+[uiStyle="settings-dialog-this"] QScrollArea[objectName="settingsScrollArea"],
+[uiStyle="settings-dialog-this"] QScrollArea[objectName="settingsScrollArea"] > QWidget,
+[uiStyle="settings-dialog-this"] QWidget[objectName="settingsScrollContent"] {
+    background: @window@;
+    border: none;
+}
+
+[uiStyle="settings-dialog-this"] QFrame[objectName="settingsCard"] {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 12px;
+}
+[uiStyle="settings-dialog-this"] QWidget[objectName="settingsCardHeader"] {
+    background: transparent;
+    border-bottom: 1px solid @border@;
+}
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsCardTitle"] {
+    font-size: 13px;
+    font-weight: 600;
+    color: @text-secondary@;
+    background: transparent;
+}
+[uiStyle="settings-dialog-this"] QWidget[objectName="settingsCardBody"] {
+    background: transparent;
+}
+[uiStyle="settings-dialog-this"] QFrame[objectName="settingsRowDivider"] {
+    background: @border@;
+    border: none;
+}
+
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsThemeSwatch"] {
+    background: @window@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 500;
+    text-align: left;
+}
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsThemeSwatch"]:hover {
+    background: @hover@;
+    border-color: @accent@;
+}
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsThemeSwatch"]:checked {
+    background: @accent-soft@;
+    color: @accent@;
+    border-color: @accent@;
+    font-weight: 600;
+}
+
+[uiStyle="settings-dialog-this"] QLineEdit {
+    min-height: 34px;
+    background: @window@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 7px;
+    padding: 0 10px;
+}
+[uiStyle="settings-dialog-this"] QLineEdit:focus {
+    border-color: @accent@;
+    background: @surface@;
+}
+[uiStyle="settings-dialog-this"] QComboBox QLineEdit,
+[uiStyle="settings-dialog-this"] QComboBox QLineEdit:focus {
+    min-height: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+[uiStyle="settings-dialog-this"] QLineEdit[objectName="settingsSearchInput"] {
+    min-height: 30px;
+    max-height: 32px;
+    font-size: 12px;
+    border-radius: 8px;
 }
 
 QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="pageTitle"],
@@ -2236,3 +2480,1114 @@ QPushButton#openSharedScreen:hover {
     color: @accent@;
 }
 QPushButton#openSharedScreen:disabled { color: @text-muted@; }
+
+/* AI Copilot sidebar widget (used in both dark MeetingRoomWindow and adaptive MeetingMainWindow) */
+QWidget[uiStyle="copilot-sidebar-widget"][objectName="CopilotSidebar"] {
+    background: @window@;
+    border-left: 1px solid @border@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotHeader"] {
+    background: @surface@;
+    border-bottom: 1px solid @border@;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotChatTabLabel"] {
+    color: @text@;
+    font-size: 12px;
+    font-weight: bold;
+    padding: 5px 4px;
+    border-bottom: 2px solid @accent@;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotSessionHeader"] {
+    background: @surface@;
+    border-bottom: 1px solid @border@;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotSessionTitle"] {
+    color: @text@;
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotMoreBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotNewChatBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotSettingsBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotExpandBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotCloseBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotBackBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotSessionsBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotDictationCloseBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotStatusIndicatorBtn"] {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotMoreBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotNewChatBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotSettingsBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotExpandBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotCloseBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotBackBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotSessionsBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotDictationCloseBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotStatusIndicatorBtn"]:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotBackBtn"][active="true"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotDictationBtn"][active="true"] {
+    background: @accent-soft@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotEditingBanner"] {
+    background: @accent-soft@;
+    border: 1px solid @accent@;
+    border-radius: 6px;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotEditingLabel"] {
+    color: @accent@;
+    font-size: 11px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotEditingCancelBtn"] {
+    background: @surface@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotEditingCancelBtn"]:hover {
+    border-color: @accent@;
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotContextBar"] {
+    background: @surface-alt@;
+    border-bottom: 1px solid @border@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotE2eeBanner"] {
+    background: @warning-soft@;
+    border: 1px solid @warning@;
+    border-radius: 6px;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotE2eeLabel"] {
+    color: @text@;
+    font-size: 11px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotAllowE2eeBtn"] {
+    background: @warning@;
+    color: @on-accent@;
+    border: none;
+    border-radius: 5px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: bold;
+}
+[uiStyle="copilot-sidebar-widget"] QStackedWidget[objectName="CopilotBodyStack"],
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotHistoryPage"],
+[uiStyle="copilot-sidebar-widget"] QScrollArea[objectName="CopilotMessageScroll"],
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotScrollContent"] {
+    background: @window@;
+    border: none;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotHistoryHeaderLabel"] {
+    color: @text-secondary@;
+    font-size: 12px;
+    font-weight: bold;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotHistoryNewBtn"] {
+    background: @accent-soft@;
+    color: @accent@;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: bold;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotHistoryNewBtn"]:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotHistoryList"] {
+    background: transparent;
+    border: none;
+    outline: none;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotHistoryList"]::item {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    color: @text@;
+    font-size: 12px;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotHistoryList"]::item:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotHistoryList"]::item:selected {
+    background: @accent-soft@;
+    border-color: @accent@;
+    color: @accent@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotHistoryActionBtn"] {
+    background: @surface@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotHistoryActionBtn"]:hover {
+    background: @hover@;
+    border-color: @accent@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotHistoryActionBtn"]:disabled {
+    color: @text-muted@;
+    background: @surface-alt@;
+}
+[uiStyle="copilot-sidebar-widget"] QScrollBar:vertical {
+    background: transparent;
+    width: 6px;
+    margin: 2px;
+}
+[uiStyle="copilot-sidebar-widget"] QScrollBar::handle:vertical {
+    background: @border@;
+    border-radius: 3px;
+    min-height: 24px;
+}
+[uiStyle="copilot-sidebar-widget"] QScrollBar::add-line:vertical,
+[uiStyle="copilot-sidebar-widget"] QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotUnconfiguredCard"],
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotEmptyCard"] {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotCardTitle"] {
+    color: @text@;
+    font-size: 14px;
+    font-weight: bold;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotCardBody"] {
+    color: @text-secondary@;
+    font-size: 12px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotConfigureBtn"] {
+    background: @accent@;
+    color: @on-accent@;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 14px;
+    font-size: 12px;
+    font-weight: bold;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotConfigureBtn"]:hover {
+    background: @accent-hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotActionCard"] {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotActionTitle"] {
+    color: @text@;
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotActionSummary"] {
+    color: @text-muted@;
+    font-size: 12px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionConfirmBtn"] {
+    background: @accent@;
+    color: @on-accent@;
+    border: none;
+    border-radius: 7px;
+    padding: 5px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionConfirmBtn"]:hover {
+    background: @accent-hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionRejectBtn"] {
+    background: transparent;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 7px;
+    padding: 5px 12px;
+    font-size: 12px;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionRejectBtn"]:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotActionStatus"] {
+    color: @text-muted@;
+    font-size: 11px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotInputPanel"] {
+    background: @window@;
+    border-top: 1px solid @border@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotErrorBanner"] {
+    background: @danger-soft@;
+    border: 1px solid @danger@;
+    border-radius: 8px;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotErrorLabel"] {
+    color: @danger@;
+    font-size: 11px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotErrorSettingsBtn"] {
+    background: @surface@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotErrorSettingsBtn"]:hover {
+    border-color: @accent@;
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotErrorDismissBtn"] {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    padding: 0;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotErrorDismissBtn"]:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QFrame[objectName="CopilotDictationCard"] {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotDictationTitle"] {
+    color: @text@;
+    font-size: 13px;
+    font-weight: bold;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotDictationSubtitle"] {
+    color: @text-secondary@;
+    font-size: 12px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotDictationHint"] {
+    color: @text-muted@;
+    font-size: 11px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotDictationHint"][error="true"] {
+    color: @danger@;
+}
+[uiStyle="copilot-sidebar-widget"] QComboBox[objectName="CopilotDictationMicCombo"] {
+    min-height: 30px;
+    border: 1px solid @border@;
+    border-radius: 7px;
+    background: @surface-alt@;
+    color: @text@;
+    padding: 0 34px 0 10px;
+    font-size: 12px;
+}
+[uiStyle="copilot-sidebar-widget"] QComboBox[objectName="CopilotDictationMicCombo"]:hover,
+[uiStyle="copilot-sidebar-widget"] QComboBox[objectName="CopilotDictationMicCombo"]:focus {
+    border-color: @accent@;
+}
+[uiStyle="copilot-sidebar-widget"] QFrame[objectName="CopilotComposerCard"] {
+    background: @surface-alt@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+[uiStyle="copilot-sidebar-widget"] QFrame[objectName="CopilotComposerCard"][focused="true"] {
+    border-color: @accent@;
+}
+[uiStyle="copilot-sidebar-widget"] QPlainTextEdit[objectName="CopilotInputEdit"] {
+    background: transparent;
+    color: @text@;
+    border: none;
+    padding: 2px 2px;
+    font-size: 13px;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotAddContextBtn"],
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotDictationBtn"] {
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotAddContextBtn"]:hover,
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotDictationBtn"]:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotModelSwitchBtn"] {
+    background: transparent;
+    color: @text@;
+    border: none;
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-size: 12px;
+    font-weight: 500;
+    text-align: left;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotModelSwitchBtn"]:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotModelSwitchBtn"]:disabled {
+    color: @text-muted@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionBtn"] {
+    background: @accent@;
+    color: @on-accent@;
+    border: none;
+    border-radius: 7px;
+    padding: 0;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionBtn"]:hover {
+    background: @accent-hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionBtn"]:disabled {
+    background: @surface@;
+    border: 1px solid @border@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotActionBtn"][stopMode="true"] {
+    background: @danger@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotFooterBar"] {
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotModePermBtn"] {
+    background: transparent;
+    color: @text-secondary@;
+    border: none;
+    border-radius: 5px;
+    padding: 2px 6px;
+    font-size: 11px;
+    text-align: left;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotModePermBtn"]:hover {
+    background: @hover@;
+    color: @text@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotModePermBtn"]:disabled {
+    color: @text-muted@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotContextChipsStrip"] {
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotContextChipBtn"] {
+    background: @accent-soft@;
+    color: @accent@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+    padding: 3px 9px;
+    font-size: 11px;
+    font-weight: bold;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotContextChipBtn"]:hover {
+    border-color: @accent@;
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotScrollBottomBtn"] {
+    background: @surface@;
+    color: @accent@;
+    border: 1px solid @border@;
+    border-radius: 15px;
+    padding: 0;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotScrollBottomBtn"]:hover {
+    background: @accent-soft@;
+    border-color: @accent@;
+}
+[uiStyle="copilot-sidebar-widget"] QFrame[objectName="CopilotCompletionPopup"] {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotCompletionList"] {
+    background: transparent;
+    color: @text@;
+    border: none;
+    outline: none;
+    font-size: 12px;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotCompletionList"]::item {
+    border-radius: 6px;
+    padding: 5px 8px;
+    color: @text@;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotCompletionList"]::item:hover {
+    background: @hover@;
+}
+[uiStyle="copilot-sidebar-widget"] QListWidget[objectName="CopilotCompletionList"]::item:selected {
+    background: @accent-soft@;
+    color: @accent@;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotAttachmentStrip"] {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+}
+[uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotAttachmentCard"] {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 6px;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotAttachmentThumbBtn"] {
+    background: transparent;
+    border: none;
+    padding: 0;
+    border-radius: 6px;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotAttachmentRemoveBtn"] {
+    background: rgba(15, 23, 42, 180);
+    color: #ffffff;
+    border: none;
+    border-radius: 9px;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 0;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotAttachmentRemoveBtn"]:hover {
+    background: @danger@;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotAttachmentSummary"] {
+    color: @text-muted@;
+    font-size: 11px;
+    background: transparent;
+}
+[uiStyle="copilot-sidebar-widget"] QLabel[objectName="CopilotAttachmentWarning"] {
+    color: @warning@;
+    font-size: 11px;
+    background: transparent;
+}
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsCopilotStatus"][statusTone="ok"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsCopilotSttStatus"][statusTone="ok"] {
+    color: @success@;
+}
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsCopilotStatus"][statusTone="error"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsCopilotSttStatus"][statusTone="error"] {
+    color: @danger@;
+}
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsCopilotStatus"][statusTone="pending"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="settingsCopilotSttStatus"][statusTone="pending"] {
+    color: @accent@;
+}
+[uiStyle="settings-dialog-this"] QPlainTextEdit#settingsCopilotSystemPrompt,
+[uiStyle="settings-dialog-this"] QPlainTextEdit#settingsCopilotHeaders,
+[uiStyle="settings-dialog-this"] QPlainTextEdit#settingsTranslationPrompt {
+    background: @window@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 7px;
+    padding: 6px 8px;
+}
+[uiStyle="settings-dialog-this"] QPlainTextEdit#settingsCopilotSystemPrompt:focus,
+[uiStyle="settings-dialog-this"] QPlainTextEdit#settingsCopilotHeaders:focus,
+[uiStyle="settings-dialog-this"] QPlainTextEdit#settingsTranslationPrompt:focus {
+    border-color: @accent@;
+    background: @surface@;
+}
+[uiStyle="settings-dialog-this"] QSpinBox,
+[uiStyle="settings-dialog-this"] QDoubleSpinBox {
+    min-height: 34px;
+    background: @window@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 7px;
+    padding: 0 36px 0 10px;
+}
+[uiStyle="settings-dialog-this"] QSpinBox:focus,
+[uiStyle="settings-dialog-this"] QDoubleSpinBox:focus {
+    border-color: @accent@;
+    background: @surface@;
+}
+[uiStyle="settings-dialog-this"] QWidget#settingsCopilotRoot,
+[uiStyle="settings-dialog-this"] QWidget#settingsCopilotTabBarWrap,
+[uiStyle="settings-dialog-this"] QStackedWidget#settingsCopilotSubPages {
+    background: @window@;
+    border: none;
+}
+[uiStyle="settings-dialog-this"] QFrame#settingsSegmentedControl {
+    background: @surface-alt@;
+    border: 1px solid @border@;
+    border-radius: 9px;
+}
+[uiStyle="settings-dialog-this"] QPushButton[segmentedTab="true"] {
+    background: transparent;
+    color: @text-secondary@;
+    border: none;
+    border-radius: 7px;
+    min-height: 28px;
+    padding: 4px 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="settings-dialog-this"] QPushButton[segmentedTab="true"]:hover {
+    color: @text@;
+    background: @hover@;
+}
+[uiStyle="settings-dialog-this"] QPushButton[segmentedTab="true"]:checked {
+    background: @surface@;
+    color: @accent@;
+    font-weight: 600;
+    border: 1px solid @border@;
+}
+[uiStyle="settings-dialog-this"] QFrame#settingsSpeechModeControl {
+    background: @surface-alt@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+}
+[uiStyle="settings-dialog-this"] QPushButton[segmentedSubTab="true"] {
+    background: transparent;
+    color: @text-secondary@;
+    border: none;
+    border-radius: 6px;
+    min-height: 24px;
+    padding: 3px 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="settings-dialog-this"] QPushButton[segmentedSubTab="true"]:hover {
+    color: @text@;
+    background: @hover@;
+}
+[uiStyle="settings-dialog-this"] QPushButton[segmentedSubTab="true"]:checked {
+    background: @surface@;
+    color: @accent@;
+    font-weight: 600;
+    border: 1px solid @border@;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsScopeBadge {
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 5px;
+    padding: 2px 7px;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsScopeBadge[badgeTone="accent"] {
+    background: @accent-soft@;
+    color: @accent@;
+    border: 1px solid @border@;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsScopeBadge[badgeTone="muted"] {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border: 1px solid @border@;
+}
+[uiStyle="settings-dialog-this"] QPushButton[headerAction="true"] {
+    background: @accent-soft@;
+    color: @accent@;
+    border: 1px solid @border@;
+    border-radius: 6px;
+    min-height: 26px;
+    padding: 2px 11px;
+    font-size: 12px;
+    font-weight: 600;
+}
+[uiStyle="settings-dialog-this"] QPushButton[headerAction="true"]:hover {
+    border-color: @accent@;
+    background: @hover@;
+}
+[uiStyle="settings-dialog-this"] QPushButton[headerAction="true"]:disabled {
+    color: @text-muted@;
+    background: @surface-alt@;
+    border-color: @border@;
+}
+[uiStyle="settings-dialog-this"] QFrame#settingsInlineBanner,
+[uiStyle="settings-dialog-this"] QFrame#settingsSubPanel {
+    background: @window@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsInlineWarning {
+    background: @warning-soft@;
+    color: @warning@;
+    border: 1px solid @warning@;
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsSubGroupTitle {
+    color: @text-secondary@;
+    font-size: 12px;
+    font-weight: 600;
+    background: transparent;
+}
+[uiStyle="settings-dialog-this"] QFrame#settingsCollapsibleBar {
+    background: @surface-alt@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+}
+[uiStyle="settings-dialog-this"] QFrame#settingsCollapsibleBar:hover {
+    border-color: @accent@;
+}
+[uiStyle="settings-dialog-this"] QPushButton[collapsibleToggle="true"] {
+    background: transparent;
+    border: none;
+    color: @text@;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 2px 4px;
+    text-align: left;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsCollapsibleSummary {
+    font-size: 12px;
+    background: transparent;
+    padding: 1px 6px;
+    border-radius: 5px;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsCollapsibleSummary[customState="default"] {
+    color: @text-muted@;
+}
+[uiStyle="settings-dialog-this"] QLabel#settingsCollapsibleSummary[customState="custom"] {
+    background: @warning-soft@;
+    color: @warning@;
+    border: 1px solid @warning@;
+    font-weight: 600;
+}
+[uiStyle="settings-dialog-this"] QPushButton#settingsCollapsibleResetBtn {
+    background: @surface@;
+    color: @text-secondary@;
+    border: 1px solid @border@;
+    border-radius: 5px;
+    min-height: 22px;
+    padding: 1px 8px;
+    font-size: 11px;
+}
+[uiStyle="settings-dialog-this"] QPushButton#settingsCollapsibleResetBtn:hover {
+    border-color: @accent@;
+    color: @accent@;
+}
+[uiStyle="settings-dialog-this"] QFrame#settingsCollapsibleBody {
+    background: transparent;
+    border: none;
+    border-left: 2px solid @border@;
+}
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotNewProfile,
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotProfileMore,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSttNewProfile,
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotSttProfileMore,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveKey,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearKey,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotRefreshModels,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveSttKey,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearSttKey,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveSttAppKey,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearSttAppKey,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearHistory {
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid @border@;
+    border-radius: 6px;
+    background: @surface@;
+    color: @text@;
+    font-size: 12px;
+}
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotProfileMore,
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotSttProfileMore {
+    min-width: 34px;
+    padding: 0 6px;
+}
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotNewProfile:hover,
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotProfileMore:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSttNewProfile:hover,
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotSttProfileMore:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveKey:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearKey:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotRefreshModels:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveSttKey:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearSttKey:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveSttAppKey:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearSttAppKey:hover,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearHistory:hover {
+    border-color: @accent@;
+    color: @accent@;
+    background: @hover@;
+}
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotNewProfile:pressed,
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotProfileMore:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSttNewProfile:pressed,
+[uiStyle="settings-dialog-this"] QToolButton#settingsCopilotSttProfileMore:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveKey:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearKey:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotRefreshModels:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveSttKey:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearSttKey:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveSttAppKey:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearSttAppKey:pressed,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearHistory:pressed {
+    background: @accent-soft@;
+}
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotRefreshModels:disabled,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveKey:disabled,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearKey:disabled,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotSaveSttKey:disabled,
+[uiStyle="settings-dialog-this"] QPushButton#settingsCopilotClearSttKey:disabled {
+    color: @text-muted@;
+    background: @surface-alt@;
+}
+[uiStyle="settings-dialog-this"] QToolButton[copilotHintIcon="true"] {
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    padding: 0px;
+}
+[uiStyle="settings-dialog-this"] QToolButton[copilotHintIcon="true"]:hover {
+    background: @accent-soft@;
+}
+[uiStyle="settings-dialog-this"] QToolButton[copilotHintIcon="true"][hintTone="warning"]:hover {
+    background: @warning-soft@;
+}
+[uiStyle="settings-dialog-this"] QToolButton[copilotHintIcon="true"][hintTone="error"]:hover {
+    background: @danger-soft@;
+}
+
+/* Main window unified header, centered workspace, and bottom join-preset bar */
+QWidget#mainHeaderBar[uiStyle="main-home-window"],
+QWidget#mainCenterColumn[uiStyle="main-home-window"] {
+    background: transparent;
+}
+[uiStyle="main-home-window"] QLabel#mainBrandTitle {
+    color: @text@;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+}
+[uiStyle="main-home-window"] QLabel#mainDateBadge {
+    color: @text-muted@;
+    background: transparent;
+    border: none;
+    padding: 0 2px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 400;
+}
+[uiStyle="main-home-window"] QPushButton#mainCopilot {
+    background: @accent-soft@;
+    color: @accent@;
+    border: 1px solid transparent;
+    border-radius: 15px;
+    padding: 0 12px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+}
+[uiStyle="main-home-window"] QPushButton#mainCopilot:hover {
+    border-color: @accent@;
+}
+[uiStyle="main-home-window"] QPushButton#mainCopilot:checked {
+    background: @accent@;
+    color: @on-accent@;
+    border-color: @accent@;
+}
+[uiStyle="main-home-window"] QPushButton#mainCopilot:checked:hover {
+    background: @accent-hover@;
+    border-color: @accent-hover@;
+}
+[uiStyle="main-home-window"] QPushButton#mainSettings {
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+}
+[uiStyle="main-home-window"] QPushButton#mainSettings:hover {
+    background: @hover@;
+}
+[uiStyle="main-home-window"] QPushButton#mainSettings:pressed {
+    background: @pressed@;
+}
+[uiStyle="main-home-window"] QPushButton#mainAccountMenu {
+    background: @surface-alt@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 15px;
+    padding: 0 10px 0 4px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="main-home-window"] QPushButton#mainAccountMenu:hover {
+    background: @hover@;
+    border-color: @accent@;
+}
+[uiStyle="main-home-window"] QPushButton#mainAccountMenu:pressed {
+    background: @pressed@;
+}
+[uiStyle="main-home-window"] QFrame#mainHeaderDivider {
+    background: @border@;
+    border: none;
+}
+
+[uiStyle="main-home-window"] QPushButton#mainQuickMeeting {
+    background: @accent@;
+    color: @on-accent@;
+    border: none;
+    border-radius: 10px;
+    padding: 0 18px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+}
+[uiStyle="main-home-window"] QPushButton#mainQuickMeeting:hover {
+    background: @accent-hover@;
+}
+[uiStyle="main-home-window"] QPushButton#mainQuickMeeting:pressed {
+    background: @accent-pressed@;
+}
+[uiStyle="main-home-window"] QFrame#mainJoinInputBox {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+[uiStyle="main-home-window"] QFrame#mainJoinInputBox[focused="true"] {
+    border-color: @accent@;
+}
+[uiStyle="main-home-window"] QLineEdit#mainMeetingIdInput {
+    background: transparent;
+    color: @text@;
+    border: none;
+    padding: 0;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+[uiStyle="main-home-window"] QPushButton#mainJoinMeeting {
+    background: @accent-soft@;
+    color: @accent@;
+    border: none;
+    border-radius: 7px;
+    padding: 0 16px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+}
+[uiStyle="main-home-window"] QPushButton#mainJoinMeeting:hover {
+    background: @accent@;
+    color: @on-accent@;
+}
+[uiStyle="main-home-window"] QPushButton#mainJoinMeeting:pressed {
+    background: @accent-pressed@;
+    color: @on-accent@;
+}
+[uiStyle="main-home-window"] QPushButton#mainScheduleMeeting,
+[uiStyle="main-home-window"] QPushButton#mainShareScreen {
+    background: @surface@;
+    color: @text-secondary@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+    padding: 0 12px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="main-home-window"] QPushButton#mainScheduleMeeting:hover,
+[uiStyle="main-home-window"] QPushButton#mainShareScreen:hover {
+    background: @hover@;
+    color: @text@;
+    border-color: @border@;
+}
+[uiStyle="main-home-window"] QPushButton#mainScheduleMeeting:pressed,
+[uiStyle="main-home-window"] QPushButton#mainShareScreen:pressed {
+    background: @pressed@;
+    color: @text@;
+}
+[uiStyle="main-home-window"] QPushButton#mainShareScreen:disabled {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border-color: @border@;
+}
+[uiStyle="main-home-window"] QPushButton#mainAllMeetings {
+    background: transparent;
+    color: @accent@;
+    border: none;
+    border-radius: 6px;
+    padding: 0 8px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+}
+[uiStyle="main-home-window"] QPushButton#mainAllMeetings:hover {
+    background: @accent-soft@;
+}
+
+[uiStyle="main-home-window"] QFrame#mainPresetStrip {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 10px;
+}
+[uiStyle="main-home-window"] QLabel#mainPresetLabel {
+    color: @text-muted@;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="main-home-window"] QPushButton#mainPresetMic,
+[uiStyle="main-home-window"] QPushButton#mainPresetCamera,
+[uiStyle="main-home-window"] QPushButton#mainPresetE2ee {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border: 1px solid @border@;
+    border-radius: 7px;
+    padding: 0 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="main-home-window"] QPushButton#mainPresetMic:hover,
+[uiStyle="main-home-window"] QPushButton#mainPresetCamera:hover,
+[uiStyle="main-home-window"] QPushButton#mainPresetE2ee:hover {
+    background: @hover@;
+    color: @text@;
+}
+[uiStyle="main-home-window"] QPushButton#mainPresetMic:checked,
+[uiStyle="main-home-window"] QPushButton#mainPresetCamera:checked,
+[uiStyle="main-home-window"] QPushButton#mainPresetE2ee[presetTone="active"] {
+    background: @accent-soft@;
+    color: @accent@;
+    border-color: transparent;
+}
+[uiStyle="main-home-window"] QPushButton#mainPresetMic:checked:hover,
+[uiStyle="main-home-window"] QPushButton#mainPresetCamera:checked:hover,
+[uiStyle="main-home-window"] QPushButton#mainPresetE2ee[presetTone="active"]:hover {
+    border-color: @accent@;
+}
+[uiStyle="main-home-window"] QPushButton#mainPresetE2ee[presetTone="neutral"] {
+    color: @text-secondary@;
+}
+[uiStyle="main-home-window"] QPushButton#mainPresetE2ee[presetTone="warning"] {
+    background: @warning-soft@;
+    color: @warning@;
+    border-color: transparent;
+}
+[uiStyle="main-home-window"] QPushButton#mainPresetE2ee[presetTone="warning"]:hover {
+    border-color: @warning@;
+}
+[uiStyle="main-home-window"] QPushButton#mainMoreSettings {
+    background: transparent;
+    color: @text-secondary@;
+    border: none;
+    border-radius: 6px;
+    padding: 0 8px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="main-home-window"] QPushButton#mainMoreSettings:hover {
+    background: @hover@;
+    color: @text@;
+}
+
+/* Main window schedule card */
+[uiStyle="schedule-card-widget"] QFrame#scheduleCardFrame {
+    background: @surface@;
+    border: 1px solid @border@;
+    border-radius: 12px;
+}
+[uiStyle="schedule-card-widget"] QWidget#scheduleCardHeader {
+    background: transparent;
+    border-bottom: 1px solid @border@;
+}
+[uiStyle="schedule-card-widget"] QLabel#scheduleCardTitle {
+    color: @text@;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+}
+[uiStyle="schedule-card-widget"] QLabel#scheduleCountBadge {
+    color: @text-secondary@;
+    background: @surface-alt@;
+    border-radius: 9px;
+    min-width: 20px;
+    padding: 1px 7px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+}
+[uiStyle="schedule-card-widget"] QPushButton#scheduleRefreshBtn {
+    background: transparent;
+    color: @text-secondary@;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="schedule-card-widget"] QPushButton#scheduleRefreshBtn:hover {
+    background: @hover@;
+    color: @text@;
+}
+[uiStyle="schedule-card-widget"] QPushButton#scheduleRefreshBtn:disabled {
+    color: @text-muted@;
+}
+[uiStyle="schedule-card-widget"] QPushButton#scheduleAllMeetingsBtn {
+    background: transparent;
+    color: @accent@;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+}
+[uiStyle="schedule-card-widget"] QPushButton#scheduleAllMeetingsBtn:hover {
+    background: @accent-soft@;
+}
+[uiStyle="schedule-card-widget"] QLabel#scheduleBannerLabel {
+    background: @surface-alt@;
+    color: @text-secondary@;
+    border-bottom: 1px solid @border@;
+    padding: 6px 16px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="schedule-card-widget"] QWidget#scheduleCardBody,
+[uiStyle="schedule-card-widget"] QWidget#scheduleEmptyPanel,
+[uiStyle="schedule-card-widget"] QWidget#scheduleStatePanel {
+    background: transparent;
+}
+[uiStyle="schedule-card-widget"] QLabel#scheduleEmptyIcon {
+    background: @surface-alt@;
+    border-radius: 12px;
+}
+[uiStyle="schedule-card-widget"] QLabel#scheduleEmptyTitle {
+    color: @text@;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+}
+[uiStyle="schedule-card-widget"] QLabel#scheduleEmptySubtitle,
+[uiStyle="schedule-card-widget"] QLabel#scheduleStateMessage {
+    color: @text-muted@;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="schedule-card-widget"] QPushButton#scheduleEmptyActionBtn,
+[uiStyle="schedule-card-widget"] QPushButton#scheduleStateRetryBtn {
+    background: @surface-alt@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="schedule-card-widget"] QPushButton#scheduleEmptyActionBtn:hover,
+[uiStyle="schedule-card-widget"] QPushButton#scheduleStateRetryBtn:hover {
+    background: @hover@;
+    border-color: @accent@;
+}

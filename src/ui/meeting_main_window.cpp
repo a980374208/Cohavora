@@ -3,6 +3,8 @@
 #include "src/ui/app_branding.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_translation.h"
+#include "src/update/update_service.h"
 #include "src/ui/app_icons.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/meeting_room_window.h"
@@ -16,12 +18,16 @@
 #include "src/ui/telemetry_dialogs.h"
 #include "src/core/meeting_catalog_controller.h"
 #include "src/core/meeting_coordinator.h"
+#include "src/media/desktop_capture.h"
 #include "src/net/session_manager.h"
 #include "src/telemetry/telemetry_report.h"
 #include "styles/style_widgets.h"
+#include <QtCore/QDate>
+#include <QtCore/QLocale>
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include <QtCore/qscopeguard.h>
+#include <QtWidgets/QAbstractButton>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QCheckBox>
@@ -36,8 +42,12 @@
 #include <QtWidgets/QScrollBar>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QPainterPath>
+#include <QtGui/QPixmap>
+#include <QtGui/QResizeEvent>
 #include <QtGui/QFont>
 #include <QtGui/QScreen>
+#include <algorithm>
 
 #ifdef Q_OS_LINUX
 #include "src/ui/linux_window_frame.h"
@@ -52,57 +62,164 @@
 namespace MeetingUI {
 namespace Theme = MeetingUI::AppTheme;
 
+namespace {
+
+void populateCopilotConfig(
+		MeetingRoomWindow::Config &config,
+		MeetingMainWindow *mainWin,
+		const std::shared_ptr<OpenMeeting::AgentCoordinator> &agentCoordinator) {
+	config.agentCoordinator = agentCoordinator;
+	QPointer<MeetingMainWindow> owner(mainWin);
+	config.openCopilotSettings = [owner](QWidget *dialogParent) {
+		if (owner) {
+			owner->openCopilotSettings(dialogParent);
+		}
+	};
+	config.openSettingsPage = [owner](int pageIndex, int subTabIndex, QWidget *dialogParent) {
+		if (owner) {
+			owner->openSettingsAtPage(pageIndex, dialogParent, subTabIndex);
+		}
+	};
+}
+
+class BrandBadgeWidget final : public QWidget {
+public:
+	explicit BrandBadgeWidget(QWidget *parent = nullptr)
+		: QWidget(parent) {
+		setFixedSize(26, 26);
+		setAttribute(Qt::WA_TransparentForMouseEvents);
+	}
+
+protected:
+	void paintEvent(QPaintEvent *) override {
+		QPainter p(this);
+		p.setRenderHint(QPainter::Antialiasing);
+		p.setPen(Qt::NoPen);
+		p.setBrush(Theme::color(Theme::ColorRole::Accent));
+		p.drawRoundedRect(rect(), 7, 7);
+		const QIcon ic = Theme::icon(Theme::Icon::Video, Theme::ColorRole::OnAccent);
+		ic.paint(&p, rect().adjusted(5, 5, -5, -5));
+	}
+};
+
+QIcon buildAccountAvatarIcon(const QString &nickname, bool loggedIn, qreal dpr) {
+	const int logical = 22;
+	const qreal scale = std::max<qreal>(1.0, dpr);
+	QPixmap pix(static_cast<int>(logical * scale), static_cast<int>(logical * scale));
+	pix.setDevicePixelRatio(scale);
+	pix.fill(Qt::transparent);
+
+	QPainter p(&pix);
+	p.setRenderHint(QPainter::Antialiasing);
+	p.setRenderHint(QPainter::TextAntialiasing);
+
+	const QRectF avatarRect(0.5, 0.5, logical - 1.0, logical - 1.0);
+	p.setPen(Qt::NoPen);
+	p.setBrush(Theme::color(loggedIn ? Theme::ColorRole::Accent : Theme::ColorRole::TextMuted));
+	p.drawEllipse(avatarRect);
+
+	const QString trimmed = nickname.trimmed();
+	const QString initial = trimmed.isEmpty()
+		? QStringLiteral("?")
+		: trimmed.left(1).toUpper();
+	QFont f(QStringLiteral("Microsoft YaHei"));
+	f.setPixelSize(11);
+	f.setBold(true);
+	p.setFont(f);
+	p.setPen(Theme::color(Theme::ColorRole::OnAccent));
+	p.drawText(avatarRect, Qt::AlignCenter, initial);
+
+	// Bottom-right online indicator dot
+	const QRectF dotRect(logical - 7.5, logical - 7.5, 7.0, 7.0);
+	p.setBrush(Theme::color(loggedIn ? Theme::ColorRole::Success : Theme::ColorRole::Border));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::SurfaceAlt), 1.4));
+	p.drawEllipse(dotRect);
+
+	return QIcon(pix);
+}
+
+void repolishWidget(QWidget *w) {
+	if (!w) return;
+	w->style()->unpolish(w);
+	w->style()->polish(w);
+	w->update();
+}
+
+} // namespace
+
 // ----------------------------------------------------
 // WindowControlsWidget 窗口右上角控制按钮
 // ----------------------------------------------------
 
 WindowControlsWidget::WindowControlsWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
-	setFixedSize(120, 32);
+	setFixedSize(114, 32);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
+}
+
+void WindowControlsWidget::setMaximized(bool maximized) {
+	if (_maximized != maximized) {
+		_maximized = maximized;
+		update();
+	}
 }
 
 void WindowControlsWidget::paintEvent(QPaintEvent *e) {
 	QPainter p(this);
 	p.setRenderHint(QPainter::Antialiasing);
 
-	const int w = width();
 	const int h = height();
-	const int btnW = 40;
+	const int btnW = 38;
 
 	_minRect = QRect(0, 0, btnW, h);
 	_maxRect = QRect(btnW, 0, btnW, h);
 	_closeRect = QRect(btnW * 2, 0, btnW, h);
 
+	const auto paintHover = [&p](const QRect &r, const QColor &fill) {
+		QPainterPath path;
+		path.addRoundedRect(r.adjusted(2, 2, -2, -2), 6, 6);
+		p.fillPath(path, fill);
+	};
+
 	// 最小化按钮
 	if (_hoverBtn == HoverBtn::Min) {
-		p.fillRect(_minRect, Theme::color(Theme::ColorRole::Hover));
+		paintHover(_minRect, Theme::color(Theme::ColorRole::Hover));
 	}
-	p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.2));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.3, Qt::SolidLine, Qt::RoundCap));
 	p.drawLine(_minRect.center().x() - 5, _minRect.center().y(), _minRect.center().x() + 5, _minRect.center().y());
 
-	// 最大化按钮
+	// 最大化/还原按钮
 	if (_hoverBtn == HoverBtn::Max) {
-		p.fillRect(_maxRect, Theme::color(Theme::ColorRole::Hover));
+		paintHover(_maxRect, Theme::color(Theme::ColorRole::Hover));
 	}
-	p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.2));
-	p.drawRect(_maxRect.center().x() - 5, _maxRect.center().y() - 5, 10, 10);
+	p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+	p.setBrush(Qt::NoBrush);
+	const QPoint mc = _maxRect.center();
+	if (_maximized) {
+		p.drawRoundedRect(QRectF(mc.x() - 5.0, mc.y() - 3.0, 8.0, 8.0), 1.2, 1.2);
+		QPainterPath back;
+		back.moveTo(mc.x() - 3.0, mc.y() - 3.0);
+		back.lineTo(mc.x() - 3.0, mc.y() - 5.0);
+		back.lineTo(mc.x() + 5.0, mc.y() - 5.0);
+		back.lineTo(mc.x() + 5.0, mc.y() + 3.0);
+		back.lineTo(mc.x() + 3.0, mc.y() + 3.0);
+		p.drawPath(back);
+	} else {
+		p.drawRoundedRect(QRectF(mc.x() - 5.0, mc.y() - 5.0, 10.0, 10.0), 1.5, 1.5);
+	}
 
 	// 关闭按钮
 	if (_hoverBtn == HoverBtn::Close) {
-		// 右上角带圆角的红色悬浮背景
-		QPainterPath closePath;
-		closePath.addRoundedRect(_closeRect, 0, 0);
-		p.fillPath(closePath, Theme::color(Theme::ColorRole::Danger));
-		p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 1.3));
+		paintHover(_closeRect, Theme::color(Theme::ColorRole::Danger));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 1.4, Qt::SolidLine, Qt::RoundCap));
 	} else {
-		p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.2));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.3, Qt::SolidLine, Qt::RoundCap));
 	}
 	const int ccx = _closeRect.center().x();
 	const int ccy = _closeRect.center().y();
-	p.drawLine(ccx - 5, ccy - 5, ccx + 5, ccy + 5);
-	p.drawLine(ccx + 5, ccy - 5, ccx - 5, ccy + 5);
+	p.drawLine(ccx - 4, ccy - 4, ccx + 4, ccy + 4);
+	p.drawLine(ccx + 4, ccy - 4, ccx - 4, ccy + 4);
 }
 
 void WindowControlsWidget::mouseMoveEvent(QMouseEvent *e) {
@@ -752,13 +869,294 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 
 	auto &session = OpenMeeting::SessionManager::instance();
 	_meetingCatalog = new OpenMeeting::MeetingCatalogController(session, this);
+	_agentCoordinator = std::make_shared<OpenMeeting::AgentCoordinator>(session);
+	_agentCoordinator->attachCatalog(_meetingCatalog);
+	OpenMeeting::AgentHostSettingsBridge hostBridge;
+	hostBridge.getTheme = []() {
+		return AppTheme::themeId(AppTheme::selectedTheme());
+	};
+	hostBridge.setTheme = [](const QString &themeId) {
+		AppTheme::setTheme(AppTheme::themeFromId(themeId));
+		return true;
+	};
+	hostBridge.getLanguage = []() {
+		return AppTranslation::languageId(AppTranslation::selectedLanguage());
+	};
+	hostBridge.setLanguage = [](const QString &langId) {
+		AppTranslation::setLanguage(AppTranslation::languageFromId(langId));
+		return true;
+	};
+	const auto ensureUpdateService = [this]() -> Cohavora::Update::UpdateService * {
+		if (!_updateService) {
+			_updateService = new Cohavora::Update::UpdateService(
+				Cohavora::Update::UpdateService::BuildConfiguration(),
+				QCoreApplication::applicationVersion(),
+				this);
+		}
+		return _updateService;
+	};
+	const auto describeUpdateState = [ensureUpdateService]() -> QJsonObject {
+		auto *svc = ensureUpdateService();
+		using State = Cohavora::Update::State;
+		using Error = Cohavora::Update::Error;
+		auto stateName = [](State s) {
+			switch (s) {
+			case State::Idle: return QStringLiteral("idle");
+			case State::Checking: return QStringLiteral("checking");
+			case State::UpToDate: return QStringLiteral("up_to_date");
+			case State::Available: return QStringLiteral("available");
+			case State::Downloading: return QStringLiteral("downloading");
+			case State::Ready: return QStringLiteral("ready");
+			case State::Verifying: return QStringLiteral("verifying");
+			case State::InstallerStarted: return QStringLiteral("installer_started");
+			case State::Failed: return QStringLiteral("failed");
+			case State::Exported: return QStringLiteral("exported");
+			}
+			return QStringLiteral("idle");
+		};
+		auto errorName = [](Error e) {
+			switch (e) {
+			case Error::None: return QStringLiteral("none");
+			case Error::NotConfigured: return QStringLiteral("not_configured");
+			case Error::InvalidConfiguration: return QStringLiteral("invalid_configuration");
+			case Error::Network: return QStringLiteral("network");
+			case Error::InvalidManifest: return QStringLiteral("invalid_manifest");
+			case Error::Disk: return QStringLiteral("disk");
+			case Error::Integrity: return QStringLiteral("integrity");
+			case Error::Launch: return QStringLiteral("launch");
+			}
+			return QStringLiteral("none");
+		};
+		QJsonObject obj;
+		obj.insert(QStringLiteral("appName"), QCoreApplication::applicationName().trimmed().isEmpty()
+			? AppBranding::name() : QCoreApplication::applicationName());
+		const QString ver = QCoreApplication::applicationVersion().trimmed();
+		obj.insert(QStringLiteral("currentVersion"), ver.isEmpty() ? QStringLiteral("Development Build") : ver);
+		obj.insert(QStringLiteral("checksConfigured"), svc->checksConfigured());
+		obj.insert(QStringLiteral("state"), stateName(svc->state()));
+		obj.insert(QStringLiteral("error"), errorName(svc->error()));
+		if (!svc->release().version.isEmpty()) {
+			obj.insert(QStringLiteral("availableVersion"), svc->release().version);
+		}
+		if (!svc->release().notes.isEmpty()) {
+			obj.insert(QStringLiteral("releaseNotes"), svc->release().notes);
+		}
+		return obj;
+	};
+	hostBridge.getAppUpdateStatus = describeUpdateState;
+	hostBridge.performAppUpdateAction = [ensureUpdateService, describeUpdateState](const QString &action) -> QJsonObject {
+		auto *svc = ensureUpdateService();
+		using State = Cohavora::Update::State;
+		if (action == QStringLiteral("check")) {
+			svc->check();
+			QJsonObject res = describeUpdateState();
+			res.insert(QStringLiteral("ok"), true);
+			return res;
+		}
+		if (action == QStringLiteral("download")) {
+			if (svc->state() != State::Available) {
+				QJsonObject err;
+				err.insert(QStringLiteral("ok"), false);
+				err.insert(QStringLiteral("error"), QStringLiteral("No downloadable update is currently available. Check for updates first."));
+				return err;
+			}
+			svc->download();
+			QJsonObject res = describeUpdateState();
+			res.insert(QStringLiteral("ok"), true);
+			return res;
+		}
+		if (action == QStringLiteral("install")) {
+			if (svc->state() != State::Ready) {
+				QJsonObject err;
+				err.insert(QStringLiteral("ok"), false);
+				err.insert(QStringLiteral("error"), QStringLiteral("Update package is not downloaded/verified yet."));
+				return err;
+			}
+			const bool started = svc->launchInstaller();
+			QJsonObject res = describeUpdateState();
+			res.insert(QStringLiteral("ok"), started);
+			if (!started) {
+				res.insert(QStringLiteral("error"), QStringLiteral("Failed to start installer."));
+			}
+			return res;
+		}
+		if (action == QStringLiteral("cancel")) {
+			svc->cancel();
+			QJsonObject res = describeUpdateState();
+			res.insert(QStringLiteral("ok"), true);
+			return res;
+		}
+		QJsonObject err;
+		err.insert(QStringLiteral("ok"), false);
+		err.insert(QStringLiteral("error"), QStringLiteral("Unsupported update action."));
+		return err;
+	};
+	const QPointer<MeetingMainWindow> mainWinOwner(this);
+	hostBridge.joinMeetingFromLobby = [mainWinOwner](
+			const QString &meetingId,
+			const QString &password,
+			const QString &displayName) -> QJsonObject {
+		QJsonObject res;
+		if (!mainWinOwner) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("Main window is no longer available."));
+			return res;
+		}
+		auto &sess = OpenMeeting::SessionManager::instance();
+		if (!sess.isLoggedIn()) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("Please sign in before joining a meeting."));
+			return res;
+		}
+		const QString cleanId = meetingId.trimmed();
+		if (cleanId.isEmpty()) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("Meeting ID is required."));
+			return res;
+		}
+		auto reservation = mainWinOwner->_meetingEntryGuard.tryAcquire();
+		if (!reservation) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("A meeting is already open or a request is in progress."));
+			return res;
+		}
+		livekit::MeetingEncryptionRequest encryption;
+		try {
+			encryption = sess.meetingEncryptionRequest(OpenMeeting::MeetingEncryptionEntry::JoinMeeting);
+		} catch (const livekit::EncryptionRequestException &) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("Set an encryption key in Settings > Security before joining."));
+			return res;
+		}
+		auto preferences = sess.mediaPreferences();
+		if (mainWinOwner->_meetingCatalog) {
+			for (const auto &m : mainWinOwner->_meetingCatalog->upcomingState().meetings) {
+				if (m.meetingId == cleanId) {
+					preferences.enableMicrophone = preferences.enableMicrophone && !m.settings.disableMicrophoneOnJoin;
+					preferences.enableVideo = preferences.enableVideo && !m.settings.disableCameraOnJoin;
+					break;
+				}
+			}
+		}
+		const QString effectiveDisplayName = displayName.trimmed().isEmpty()
+			? sess.nickname()
+			: displayName.trimmed();
+		MeetingRoomWindow::Config config;
+		config.meetingId = cleanId;
+		config.displayName = effectiveDisplayName;
+		config.audioMuted = !preferences.enableMicrophone;
+		config.videoEnabled = preferences.enableVideo;
+		config.invitationMode = InvitationMode::BusinessMeetingId;
+		populateCopilotConfig(config, mainWinOwner.data(), mainWinOwner->_agentCoordinator);
+
+		auto coordinator = OpenMeeting::MeetingCoordinator::create();
+		mainWinOwner->bindMeetingCatalog(coordinator.get());
+		if (!coordinator->pageTiming()) {
+			coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+				livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
+		}
+		auto *roomWindow = new MeetingRoomWindow(config, coordinator);
+		reservation->setParent(roomWindow);
+		reservation.release();
+		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+		roomWindow->show();
+		const auto authGeneration = sess.authGeneration();
+		roomWindow->prepareMediaAndJoin([coordinator, cleanId, password, effectiveDisplayName,
+			preferences, authGeneration, sessionManager = &sess,
+			window = QPointer<MeetingRoomWindow>(roomWindow), encryption = std::move(encryption)]() mutable {
+			if (!sessionManager->isLoggedIn() || sessionManager->authGeneration() != authGeneration) {
+				encryption.Revoke();
+				if (window) window->close();
+				return;
+			}
+			coordinator->joinMeetingAsync(cleanId, password, effectiveDisplayName,
+				preferences, std::move(encryption));
+		});
+		res.insert(QStringLiteral("ok"), true);
+		res.insert(QStringLiteral("mode"), QStringLiteral("join"));
+		res.insert(QStringLiteral("meetingId"), cleanId);
+		res.insert(QStringLiteral("joining"), true);
+		return res;
+	};
+	hostBridge.startQuickMeetingFromLobby = [mainWinOwner](
+			const QString &title,
+			int durationMinutes) -> QJsonObject {
+		QJsonObject res;
+		if (!mainWinOwner) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("Main window is no longer available."));
+			return res;
+		}
+		auto &sess = OpenMeeting::SessionManager::instance();
+		if (!sess.isLoggedIn()) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("Please sign in before starting a quick meeting."));
+			return res;
+		}
+		auto reservation = mainWinOwner->_meetingEntryGuard.tryAcquire();
+		if (!reservation) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("A meeting is already open or a request is in progress."));
+			return res;
+		}
+		livekit::MeetingEncryptionRequest encryption;
+		try {
+			encryption = sess.meetingEncryptionRequest(OpenMeeting::MeetingEncryptionEntry::QuickMeeting);
+		} catch (const livekit::EncryptionRequestException &) {
+			res.insert(QStringLiteral("ok"), false);
+			res.insert(QStringLiteral("error"), QStringLiteral("Set an encryption key in Settings > Security before joining."));
+			return res;
+		}
+		const auto preferences = sess.mediaPreferences();
+		const QString effectiveTitle = title.trimmed().isEmpty()
+			? QCoreApplication::translate("MeetingUI", "%1's Instant Meeting").arg(sess.nickname())
+			: title.trimmed().left(128);
+		const int clampedMins = qBound(15, durationMinutes, 480);
+
+		MeetingRoomWindow::Config config;
+		config.displayName = sess.nickname();
+		config.audioMuted = !preferences.enableMicrophone;
+		config.videoEnabled = preferences.enableVideo;
+		config.invitationMode = InvitationMode::BusinessMeetingId;
+		populateCopilotConfig(config, mainWinOwner.data(), mainWinOwner->_agentCoordinator);
+
+		auto coordinator = OpenMeeting::MeetingCoordinator::create();
+		mainWinOwner->bindMeetingCatalog(coordinator.get());
+		if (!coordinator->pageTiming()) {
+			coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+				livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
+		}
+		auto *roomWindow = new MeetingRoomWindow(config, coordinator);
+		reservation->setParent(roomWindow);
+		reservation.release();
+		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+		roomWindow->show();
+		const auto authGeneration = sess.authGeneration();
+		roomWindow->prepareMediaAndJoin([coordinator, effectiveTitle, clampedMins, preferences,
+			authGeneration, sessionManager = &sess,
+			window = QPointer<MeetingRoomWindow>(roomWindow), encryption = std::move(encryption)]() mutable {
+			if (!sessionManager->isLoggedIn() || sessionManager->authGeneration() != authGeneration) {
+				encryption.Revoke();
+				if (window) window->close();
+				return;
+			}
+			coordinator->createAndJoinQuickMeetingAsync(effectiveTitle, clampedMins * 60,
+				preferences, std::move(encryption));
+		});
+		res.insert(QStringLiteral("ok"), true);
+		res.insert(QStringLiteral("mode"), QStringLiteral("quick_meeting"));
+		res.insert(QStringLiteral("title"), effectiveTitle);
+		res.insert(QStringLiteral("durationMinutes"), clampedMins);
+		res.insert(QStringLiteral("starting"), true);
+		return res;
+	};
+	_agentCoordinator->setHostSettingsBridge(std::move(hostBridge));
 	initLayout();
 #ifdef Q_OS_LINUX
 	installLinuxWindowFrame(*this, {
 		.radius = kWindowCornerRadius,
 		.captionHitTest = [this](QPoint position) {
-			return position.y() >= 0 && position.y() < 36 && position.x() >= 68 &&
-				(!_windowControls || !_windowControls->geometry().contains(position));
+			return isTitleBarDragPosition(position);
 		},
 	});
 #endif
@@ -770,12 +1168,40 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	connect(_meetingCatalog, &OpenMeeting::MeetingCatalogController::detailChanged,
 		this, [this] { handlePendingMeetingEntryDetail(); });
 	connect(&session, &OpenMeeting::SessionManager::authenticationReset,
-		this, [this](quint64) { clearPendingMeetingEntry(); });
+		this, [this](quint64) {
+			clearPendingMeetingEntry();
+			syncAccountBadge();
+			syncJoinPresets();
+		});
+	connect(&session, &OpenMeeting::SessionManager::loggedIn,
+		this, [this](const OpenMeeting::UserInfo &) {
+			syncAccountBadge();
+			syncJoinPresets();
+		});
+	connect(&session, &OpenMeeting::SessionManager::loggedOut,
+		this, [this] {
+			syncAccountBadge();
+			syncJoinPresets();
+		});
+	connect(&session, &OpenMeeting::SessionManager::preferencesChanged,
+		this, [this](const OpenMeeting::MediaPreferences &) {
+			syncJoinPresets();
+		});
+	connect(&session, &OpenMeeting::SessionManager::meetingSecurityPreferencesChanged,
+		this, [this] {
+			syncJoinPresets();
+		});
+	Theme::observeChanges(*this, [this] {
+		refreshThemeVisuals();
+	});
 }
 
 void MeetingMainWindow::showEvent(QShowEvent *e) {
 	Ui::RpWidget::showEvent(e);
 	setupNativeWindow();
+	syncHeaderDate();
+	syncAccountBadge();
+	syncJoinPresets();
 }
 
 void MeetingMainWindow::closeEvent(QCloseEvent *e) {
@@ -810,10 +1236,78 @@ void MeetingMainWindow::setupNativeWindow() {
 }
 
 void MeetingMainWindow::initLayout() {
-	_sidebar = new SidebarWidget(this);
-	_actionGrid = new ActionGridContainer(this);
-	_scheduleWidget = new ScheduleWidget(this);
-	_windowControls = new WindowControlsWidget(this);
+	// 1. 顶部一体化标题栏
+	_headerBar = new QWidget(this);
+	_headerBar->setObjectName(QStringLiteral("mainHeaderBar"));
+	auto *headerLayout = new QHBoxLayout(_headerBar);
+	headerLayout->setContentsMargins(18, 0, 8, 0);
+	headerLayout->setSpacing(8);
+
+	_brandBadge = new BrandBadgeWidget(_headerBar);
+	headerLayout->addWidget(_brandBadge);
+
+	auto *brandTitle = new QLabel(AppBranding::name(), _headerBar);
+	brandTitle->setObjectName(QStringLiteral("mainBrandTitle"));
+	brandTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
+	headerLayout->addWidget(brandTitle, 0, Qt::AlignVCenter);
+
+	auto *brandDivider = new QFrame(_headerBar);
+	brandDivider->setObjectName(QStringLiteral("mainHeaderDivider"));
+	brandDivider->setFixedSize(1, 12);
+	headerLayout->addWidget(brandDivider, 0, Qt::AlignVCenter);
+
+	_dateBadge = new QLabel(_headerBar);
+	_dateBadge->setObjectName(QStringLiteral("mainDateBadge"));
+	_dateBadge->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	_dateBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
+	headerLayout->addWidget(_dateBadge, 0, Qt::AlignVCenter);
+
+	headerLayout->addStretch(1);
+
+	_copilotButton = new QPushButton(QStringLiteral("Copilot"), _headerBar);
+	_copilotButton->setObjectName(QStringLiteral("mainCopilot"));
+	_copilotButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "AI Copilot"));
+	_copilotButton->setToolTip(QCoreApplication::translate("MeetingUI", "AI Copilot"));
+	_copilotButton->setCheckable(true);
+	_copilotButton->setCursor(Qt::PointingHandCursor);
+	_copilotButton->setFixedHeight(30);
+	_copilotButton->setIconSize(QSize(14, 14));
+	connect(_copilotButton, &QPushButton::clicked, this, [this] {
+		toggleCopilotDrawer();
+	});
+	headerLayout->addWidget(_copilotButton);
+
+	_settingsButton = new QPushButton(_headerBar);
+	_settingsButton->setObjectName(QStringLiteral("mainSettings"));
+	_settingsButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Settings"));
+	_settingsButton->setToolTip(QCoreApplication::translate("MeetingUI", "Settings"));
+	_settingsButton->setCursor(Qt::PointingHandCursor);
+	_settingsButton->setFixedSize(30, 30);
+	_settingsButton->setIconSize(QSize(16, 16));
+	connect(_settingsButton, &QPushButton::clicked, this, [this] {
+		openSettingsAtPage(static_cast<int>(SettingsDialog::Page::General), this);
+	});
+	headerLayout->addWidget(_settingsButton);
+
+	_accountButton = new QPushButton(_headerBar);
+	_accountButton->setObjectName(QStringLiteral("mainAccountMenu"));
+	_accountButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Account menu"));
+	_accountButton->setCursor(Qt::PointingHandCursor);
+	_accountButton->setFixedHeight(30);
+	_accountButton->setMaximumWidth(168);
+	_accountButton->setIconSize(QSize(22, 22));
+	connect(_accountButton, &QPushButton::clicked, this, [this] {
+		showAccountMenu();
+	});
+	headerLayout->addWidget(_accountButton);
+
+	auto *headerDivider = new QFrame(_headerBar);
+	headerDivider->setObjectName(QStringLiteral("mainHeaderDivider"));
+	headerDivider->setFixedSize(1, 16);
+	headerLayout->addWidget(headerDivider);
+
+	_windowControls = new WindowControlsWidget(_headerBar);
+	headerLayout->addWidget(_windowControls);
 
 	// 窗口控制按钮事件
 	_windowControls->minimizeClicked() | rpl::on_next([this] {
@@ -832,32 +1326,222 @@ void MeetingMainWindow::initLayout() {
 		close();
 	}, lifetime());
 
-	// 卡片点击事件
-	_actionGrid->cardClicked() | rpl::on_next([this](ActionCardType t) {
-		onCardClicked(t);
-	}, lifetime());
+	// 2. 居中工作台主列（指挥条 + 次动作行 + 宽幅日程卡 + 底部独立预设状态条）
+	_centerColumn = new QWidget(this);
+	_centerColumn->setObjectName(QStringLiteral("mainCenterColumn"));
+	auto *centerLayout = new QVBoxLayout(_centerColumn);
+	centerLayout->setContentsMargins(0, 0, 0, 0);
+	centerLayout->setSpacing(12);
 
-	_sidebar->navChanged() | rpl::on_next([this](NavItemType type) {
-		if (type != NavItemType::Contacts) return;
-		_sidebar->setActiveNav(NavItemType::Meeting);
-		QMessageBox::information(
-			this,
-			QCoreApplication::translate("MeetingUI", "Notice"),
-			QCoreApplication::translate("MeetingUI", "This feature is not yet available"));
-	}, lifetime());
+	// Layer 1: 主指挥条（发起即时会议 + 内联会议号直达）
+	auto *commandRow = new QHBoxLayout();
+	commandRow->setContentsMargins(0, 0, 0, 0);
+	commandRow->setSpacing(10);
 
-	_sidebar->bottomItemClicked() | rpl::on_next([this](BottomItemType type) {
-		if (type == BottomItemType::Settings) {
-			const auto clickedAt = CameraDeviceDiscovery::Clock::now();
-			SettingsDialog dialog(OpenMeeting::SessionManager::instance(), this, clickedAt);
-			dialog.exec();
-			return;
+	_quickMeetingButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "Start Instant Meeting"), _centerColumn);
+	_quickMeetingButton->setObjectName(QStringLiteral("mainQuickMeeting"));
+	_quickMeetingButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Start Meeting"));
+	_quickMeetingButton->setCursor(Qt::PointingHandCursor);
+	_quickMeetingButton->setFixedHeight(44);
+	_quickMeetingButton->setIconSize(QSize(16, 16));
+	connect(_quickMeetingButton, &QPushButton::clicked, this, [this] {
+		onCardClicked(ActionCardType::QuickMeeting);
+	});
+	commandRow->addWidget(_quickMeetingButton);
+
+	_joinInputBox = new QFrame(_centerColumn);
+	_joinInputBox->setObjectName(QStringLiteral("mainJoinInputBox"));
+	_joinInputBox->setFixedHeight(44);
+	auto *joinBoxLayout = new QHBoxLayout(_joinInputBox);
+	joinBoxLayout->setContentsMargins(14, 5, 6, 5);
+	joinBoxLayout->setSpacing(8);
+
+	_meetingIdInput = new QLineEdit(_joinInputBox);
+	_meetingIdInput->setObjectName(QStringLiteral("mainMeetingIdInput"));
+	_meetingIdInput->setPlaceholderText(
+		QCoreApplication::translate("MeetingUI", "Enter 9-digit meeting ID to join, or click Join..."));
+	_meetingIdInput->setClearButtonEnabled(true);
+	_meetingIdInput->installEventFilter(this);
+	connect(_meetingIdInput, &QLineEdit::returnPressed, this, [this] {
+		triggerInlineJoin();
+	});
+	joinBoxLayout->addWidget(_meetingIdInput, 1);
+
+	_joinMeetingButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "Join"), _joinInputBox);
+	_joinMeetingButton->setObjectName(QStringLiteral("mainJoinMeeting"));
+	_joinMeetingButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Join Meeting"));
+	_joinMeetingButton->setCursor(Qt::PointingHandCursor);
+	_joinMeetingButton->setFixedHeight(32);
+	connect(_joinMeetingButton, &QPushButton::clicked, this, [this] {
+		triggerInlineJoin();
+	});
+	joinBoxLayout->addWidget(_joinMeetingButton);
+
+	commandRow->addWidget(_joinInputBox, 1);
+	centerLayout->addLayout(commandRow);
+
+	// Layer 2: 次级动作行（预定会议 / 共享屏幕 + 全部会议）
+	auto *secondaryRow = new QHBoxLayout();
+	secondaryRow->setContentsMargins(0, 0, 0, 0);
+	secondaryRow->setSpacing(8);
+
+	_scheduleMeetingButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "Schedule Meeting"), _centerColumn);
+	_scheduleMeetingButton->setObjectName(QStringLiteral("mainScheduleMeeting"));
+	_scheduleMeetingButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Schedule Meeting"));
+	_scheduleMeetingButton->setCursor(Qt::PointingHandCursor);
+	_scheduleMeetingButton->setFixedHeight(34);
+	_scheduleMeetingButton->setIconSize(QSize(14, 14));
+	connect(_scheduleMeetingButton, &QPushButton::clicked, this, [this] {
+		onCardClicked(ActionCardType::ScheduleMeeting);
+	});
+	secondaryRow->addWidget(_scheduleMeetingButton);
+
+	_shareScreenButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "Share Screen"), _centerColumn);
+	_shareScreenButton->setObjectName(QStringLiteral("mainShareScreen"));
+	_shareScreenButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Share Screen"));
+	_shareScreenButton->setCursor(Qt::PointingHandCursor);
+	_shareScreenButton->setFixedHeight(34);
+	_shareScreenButton->setIconSize(QSize(14, 14));
+#if defined(Q_OS_LINUX)
+	if (!livekit::DesktopCaptureSupported()) {
+		const auto reason = QCoreApplication::translate("MeetingUI", "Screen sharing is not available on this platform yet.");
+		_shareScreenButton->setToolTip(reason);
+		_shareScreenButton->setAccessibleDescription(reason);
+		_shareScreenButton->setEnabled(false);
+	}
+#endif
+	connect(_shareScreenButton, &QPushButton::clicked, this, [this] {
+		onCardClicked(ActionCardType::ShareScreen);
+	});
+	secondaryRow->addWidget(_shareScreenButton);
+
+	secondaryRow->addStretch(1);
+
+	_allMeetingsButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "All Meetings"), _centerColumn);
+	_allMeetingsButton->setObjectName(QStringLiteral("mainAllMeetings"));
+	_allMeetingsButton->setCursor(Qt::PointingHandCursor);
+	_allMeetingsButton->setLayoutDirection(Qt::RightToLeft);
+	_allMeetingsButton->setFixedHeight(32);
+	_allMeetingsButton->setIconSize(QSize(13, 13));
+	connect(_allMeetingsButton, &QPushButton::clicked, this, [this] {
+		showMeetingListDialog();
+	});
+	secondaryRow->addWidget(_allMeetingsButton);
+
+	centerLayout->addLayout(secondaryRow);
+
+	// Layer 3: 宽幅日程卡片
+	_scheduleWidget = new ScheduleWidget(_centerColumn);
+	_scheduleWidget->setShowAllMeetingsAction(false);
+	centerLayout->addWidget(_scheduleWidget, 1);
+
+	// Layer 4: 底部独立入会预设状态条（宽屏单行 / 窄屏自动切换双行，避免文字被裁断）
+	_presetStrip = new QFrame(_centerColumn);
+	_presetStrip->setObjectName(QStringLiteral("mainPresetStrip"));
+	_presetStrip->setFixedHeight(44);
+	_presetOuterLayout = new QVBoxLayout(_presetStrip);
+	_presetOuterLayout->setContentsMargins(14, 7, 10, 7);
+	_presetOuterLayout->setSpacing(0);
+
+	_presetTopRow = new QHBoxLayout();
+	_presetTopRow->setContentsMargins(0, 0, 0, 0);
+	_presetTopRow->setSpacing(8);
+	_presetOuterLayout->addLayout(_presetTopRow);
+
+	_presetBottomRow = new QHBoxLayout();
+	_presetBottomRow->setContentsMargins(0, 0, 0, 0);
+	_presetBottomRow->setSpacing(8);
+	_presetOuterLayout->addLayout(_presetBottomRow);
+
+	_presetLabel = new QLabel(
+		QCoreApplication::translate("MeetingUI", "Join Presets"), _presetStrip);
+	_presetLabel->setObjectName(QStringLiteral("mainPresetLabel"));
+	_presetLabel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	_presetTopRow->addWidget(_presetLabel, 0, Qt::AlignVCenter);
+
+	_presetMicButton = new QPushButton(_presetStrip);
+	_presetMicButton->setObjectName(QStringLiteral("mainPresetMic"));
+	_presetMicButton->setCheckable(true);
+	_presetMicButton->setCursor(Qt::PointingHandCursor);
+	_presetMicButton->setFixedHeight(28);
+	_presetMicButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	_presetMicButton->setIconSize(QSize(13, 13));
+	connect(_presetMicButton, &QPushButton::clicked, this, [this] {
+		auto &session = OpenMeeting::SessionManager::instance();
+		session.setEnableMicrophone(!session.mediaPreferences().enableMicrophone);
+	});
+	_presetTopRow->addWidget(_presetMicButton, 0, Qt::AlignVCenter);
+
+	_presetCameraButton = new QPushButton(_presetStrip);
+	_presetCameraButton->setObjectName(QStringLiteral("mainPresetCamera"));
+	_presetCameraButton->setCheckable(true);
+	_presetCameraButton->setCursor(Qt::PointingHandCursor);
+	_presetCameraButton->setFixedHeight(28);
+	_presetCameraButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	_presetCameraButton->setIconSize(QSize(13, 13));
+	connect(_presetCameraButton, &QPushButton::clicked, this, [this] {
+		auto &session = OpenMeeting::SessionManager::instance();
+		session.setEnableVideo(!session.mediaPreferences().enableVideo);
+	});
+	_presetTopRow->addWidget(_presetCameraButton, 0, Qt::AlignVCenter);
+
+	_presetE2eeButton = new QPushButton(_presetStrip);
+	_presetE2eeButton->setObjectName(QStringLiteral("mainPresetE2ee"));
+	_presetE2eeButton->setCursor(Qt::PointingHandCursor);
+	_presetE2eeButton->setFixedHeight(28);
+	_presetE2eeButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	_presetE2eeButton->setIconSize(QSize(13, 13));
+	connect(_presetE2eeButton, &QPushButton::clicked, this, [this] {
+		openSettingsAtPage(static_cast<int>(SettingsDialog::Page::Security), this);
+	});
+	_presetTopRow->addWidget(_presetE2eeButton, 0, Qt::AlignVCenter);
+
+	_presetTopRow->addStretch(1);
+
+	_moreSettingsButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "More Settings"), _presetStrip);
+	_moreSettingsButton->setObjectName(QStringLiteral("mainMoreSettings"));
+	_moreSettingsButton->setCursor(Qt::PointingHandCursor);
+	_moreSettingsButton->setLayoutDirection(Qt::RightToLeft);
+	_moreSettingsButton->setFixedHeight(28);
+	_moreSettingsButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	_moreSettingsButton->setIconSize(QSize(13, 13));
+	connect(_moreSettingsButton, &QPushButton::clicked, this, [this] {
+		openSettingsAtPage(static_cast<int>(SettingsDialog::Page::General), this);
+	});
+	_presetTopRow->addWidget(_moreSettingsButton, 0, Qt::AlignVCenter);
+
+	centerLayout->addWidget(_presetStrip);
+
+	// 3. 右侧可选 AI Copilot 抽屉
+	_copilotSidebar = new OpenMeeting::CopilotSidebarWidget(_agentCoordinator.get(), this);
+	_copilotSidebar->setLeftEdgeShadowEnabled(true);
+	_copilotSidebar->hide();
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::closeRequested, this, [this] {
+		toggleCopilotDrawer(false);
+	});
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::expandToggleRequested, this, [this] {
+		_copilotExpanded = !_copilotExpanded;
+		if (_copilotSidebar) {
+			_copilotSidebar->setExpanded(_copilotExpanded);
 		}
-		QMessageBox::information(
-			this,
-			QCoreApplication::translate("MeetingUI", "Notice"),
-			QCoreApplication::translate("MeetingUI", "This feature is not yet available"));
-	}, lifetime());
+		if (_copilotVisible) {
+			QResizeEvent ev(size(), size());
+			resizeEvent(&ev);
+			update();
+		}
+	});
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::openSettingsRequested, this, [this] {
+		openCopilotSettings(this);
+	});
+	connect(_copilotSidebar, &OpenMeeting::CopilotSidebarWidget::openSettingsPageRequested, this, [this](int pageIndex, int subTabIndex) {
+		openSettingsAtPage(pageIndex, this, subTabIndex);
+	});
 
 	// 会议目录入口
 	_scheduleWidget->allMeetingsClicked() | rpl::on_next([this] {
@@ -880,43 +1564,259 @@ void MeetingMainWindow::initLayout() {
 
 	connect(_meetingCatalog, &OpenMeeting::MeetingCatalogController::upcomingChanged,
 		this, [this] { syncSchedule(); });
+
+	syncHeaderDate();
+	syncAccountBadge();
+	syncJoinPresets();
+	refreshThemeVisuals();
+	Theme::setStyleVariant(*_headerBar, "main-home-window");
+	Theme::setStyleVariant(*_centerColumn, "main-home-window");
 	syncSchedule();
 	if (OpenMeeting::SessionManager::instance().isLoggedIn()) {
 		_meetingCatalog->refreshUpcoming();
 	}
+}
 
-	// 侧边栏用户头像点击菜单
-	_sidebar->avatarClicked() | rpl::on_next([this] {
-		auto &session = OpenMeeting::SessionManager::instance();
-		auto *menu = new QMenu(this);
-		menu->setAttribute(Qt::WA_DeleteOnClose);
-		AppTheme::styleMenu(*menu, AppTheme::Tone::Light);
-		QString statusStr = session.isLoggedIn()
-			? QCoreApplication::translate("MeetingUI", "Current User: %1 (%2)").arg(session.nickname(), session.userId())
-			: QCoreApplication::translate("MeetingUI", "Not Signed In");
-		menu->addAction(statusStr)->setEnabled(false);
-		menu->addSeparator();
+bool MeetingMainWindow::eventFilter(QObject *watched, QEvent *event) {
+	if (watched == _meetingIdInput && _joinInputBox) {
+		if (event->type() == QEvent::FocusIn) {
+			_joinInputBox->setProperty("focused", true);
+			repolishWidget(_joinInputBox);
+		} else if (event->type() == QEvent::FocusOut) {
+			_joinInputBox->setProperty("focused", false);
+			repolishWidget(_joinInputBox);
+		}
+	}
+	return Ui::RpWidget::eventFilter(watched, event);
+}
 
-		auto *switchAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Switch Account / Sign In"));
-		auto *logoutAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Sign Out"));
-		const auto reportCount = livekit::telemetry::InstalledTelemetryHistoryStore()
-			? livekit::telemetry::InstalledTelemetryHistoryStore()->Status()->reports.size()
-			: 0;
-		auto *telemetryAction = menu->addAction(
-			AppTheme::icon(AppTheme::Icon::Details),
-			QCoreApplication::translate("MeetingUI", "Telemetry reports on this device (%1)")
-				.arg(reportCount));
-		telemetryAction->setObjectName(QStringLiteral("mainPostMeetingTelemetry"));
+void MeetingMainWindow::syncHeaderDate() {
+	if (!_dateBadge) return;
+	const QDate today = QDate::currentDate();
+	const QString monthDay = QCoreApplication::translate("MeetingUI", "%1/%2")
+		.arg(today.month()).arg(today.day());
+	const QString weekday = QLocale().dayName(today.dayOfWeek(), QLocale::ShortFormat);
+	_dateBadge->setText(QStringLiteral("%1 · %2").arg(monthDay, weekday));
+}
 
-		connect(telemetryAction, &QAction::triggered, this, [this] {
-			OpenPostMeetingTelemetryDialog(this);
-		}, Qt::QueuedConnection);
-		connect(switchAction, &QAction::triggered, this,
-			[this] { handleUserLogout(); }, Qt::QueuedConnection);
-		connect(logoutAction, &QAction::triggered, this,
-			[this] { handleUserLogout(); }, Qt::QueuedConnection);
-		menu->popup(_sidebar->mapToGlobal(QPoint(_sidebar->width(), 24)));
-	}, lifetime());
+void MeetingMainWindow::syncAccountBadge() {
+	if (!_accountButton) return;
+	const auto &session = OpenMeeting::SessionManager::instance();
+	const bool loggedIn = session.isLoggedIn();
+	const QString displayName = loggedIn
+		? (session.nickname().trimmed().isEmpty() ? session.userId() : session.nickname().trimmed())
+		: QCoreApplication::translate("MeetingUI", "Not Signed In");
+	const QFontMetrics fm(_accountButton->font());
+	_accountButton->setText(fm.elidedText(displayName, Qt::ElideRight, 112));
+	_accountButton->setToolTip(loggedIn
+		? QCoreApplication::translate("MeetingUI", "Current User: %1 (%2)").arg(session.nickname(), session.userId())
+		: QCoreApplication::translate("MeetingUI", "Not Signed In"));
+	_accountButton->setIcon(buildAccountAvatarIcon(displayName, loggedIn, devicePixelRatioF()));
+}
+
+void MeetingMainWindow::syncJoinPresets() {
+	const auto &session = OpenMeeting::SessionManager::instance();
+	const auto &media = session.mediaPreferences();
+	const auto &sec = session.meetingSecurityPreferences();
+	const bool hasKey = session.hasMeetingEncryptionKey();
+
+	if (_presetMicButton) {
+		_presetMicButton->setChecked(media.enableMicrophone);
+		_presetMicButton->setText(media.enableMicrophone
+			? QCoreApplication::translate("MeetingUI", "Mic: On")
+			: QCoreApplication::translate("MeetingUI", "Mic: Off"));
+		_presetMicButton->setToolTip(QCoreApplication::translate("MeetingUI", "Click to toggle default microphone state on joining"));
+		_presetMicButton->setIcon(Theme::icon(
+			media.enableMicrophone ? Theme::Icon::Microphone : Theme::Icon::MicrophoneOff,
+			media.enableMicrophone ? Theme::ColorRole::Accent : Theme::ColorRole::TextMuted));
+	}
+
+	if (_presetCameraButton) {
+		_presetCameraButton->setChecked(media.enableVideo);
+		_presetCameraButton->setText(media.enableVideo
+			? QCoreApplication::translate("MeetingUI", "Camera: On")
+			: QCoreApplication::translate("MeetingUI", "Camera: Off"));
+		_presetCameraButton->setToolTip(QCoreApplication::translate("MeetingUI", "Click to toggle default camera state on joining"));
+		_presetCameraButton->setIcon(Theme::icon(
+			media.enableVideo ? Theme::Icon::Video : Theme::Icon::VideoOff,
+			media.enableVideo ? Theme::ColorRole::Accent : Theme::ColorRole::TextMuted));
+	}
+
+	if (_presetE2eeButton) {
+		const bool anyEnabled = sec.allMeetingsE2ee || sec.quickMeetingsE2ee ||
+			sec.screenShareE2ee || sec.meetingDetailsE2ee;
+		QString tone = QStringLiteral("neutral");
+		Theme::ColorRole iconRole = Theme::ColorRole::TextSecondary;
+		if (anyEnabled && !hasKey) {
+			tone = QStringLiteral("warning");
+			iconRole = Theme::ColorRole::Warning;
+			_presetE2eeButton->setText(QCoreApplication::translate("MeetingUI", "Encryption: Key Needed"));
+		} else if (sec.allMeetingsE2ee) {
+			tone = QStringLiteral("active");
+			iconRole = Theme::ColorRole::Accent;
+			_presetE2eeButton->setText(QCoreApplication::translate("MeetingUI", "Encryption: On"));
+		} else if (anyEnabled) {
+			tone = QStringLiteral("active");
+			iconRole = Theme::ColorRole::Accent;
+			_presetE2eeButton->setText(QCoreApplication::translate("MeetingUI", "Encryption: Custom"));
+		} else {
+			_presetE2eeButton->setText(QCoreApplication::translate("MeetingUI", "Encryption: On Demand"));
+		}
+		_presetE2eeButton->setToolTip(QCoreApplication::translate("MeetingUI", "Open security and end-to-end encryption settings"));
+		_presetE2eeButton->setProperty("presetTone", tone);
+		_presetE2eeButton->setIcon(Theme::icon(Theme::Icon::Shield, iconRole));
+		repolishWidget(_presetE2eeButton);
+	}
+
+	if (_centerColumn && _centerColumn->width() > 0) {
+		updatePresetStripLayout(_centerColumn->width());
+	}
+}
+
+void MeetingMainWindow::updatePresetStripLayout(int availableWidth) {
+	if (!_presetStrip || !_presetOuterLayout || !_presetTopRow || !_presetBottomRow ||
+		!_presetLabel || !_presetMicButton || !_presetCameraButton ||
+		!_presetE2eeButton || !_moreSettingsButton) {
+		return;
+	}
+	const int singleRowNeeded = 24
+		+ _presetLabel->sizeHint().width()
+		+ _presetMicButton->sizeHint().width()
+		+ _presetCameraButton->sizeHint().width()
+		+ _presetE2eeButton->sizeHint().width()
+		+ _moreSettingsButton->sizeHint().width()
+		+ 8 * 5
+		+ 12;
+	const bool wantTwoRow = availableWidth > 0 && availableWidth < singleRowNeeded;
+	if (wantTwoRow == _presetCompactTwoRow) {
+		return;
+	}
+	_presetCompactTwoRow = wantTwoRow;
+
+	auto clearRow = [](QHBoxLayout *row) {
+		while (QLayoutItem *item = row->takeAt(0)) {
+			delete item;
+		}
+	};
+	clearRow(_presetTopRow);
+	clearRow(_presetBottomRow);
+
+	if (_presetCompactTwoRow) {
+		_presetOuterLayout->setContentsMargins(14, 8, 10, 10);
+		_presetOuterLayout->setSpacing(6);
+		_presetTopRow->addWidget(_presetLabel, 0, Qt::AlignVCenter);
+		_presetTopRow->addStretch(1);
+		_presetTopRow->addWidget(_moreSettingsButton, 0, Qt::AlignVCenter);
+
+		_presetBottomRow->addWidget(_presetMicButton, 0, Qt::AlignVCenter);
+		_presetBottomRow->addWidget(_presetCameraButton, 0, Qt::AlignVCenter);
+		_presetBottomRow->addWidget(_presetE2eeButton, 0, Qt::AlignVCenter);
+		_presetBottomRow->addStretch(1);
+		_presetStrip->setFixedHeight(78);
+	} else {
+		_presetOuterLayout->setContentsMargins(14, 7, 10, 7);
+		_presetOuterLayout->setSpacing(0);
+		_presetTopRow->addWidget(_presetLabel, 0, Qt::AlignVCenter);
+		_presetTopRow->addWidget(_presetMicButton, 0, Qt::AlignVCenter);
+		_presetTopRow->addWidget(_presetCameraButton, 0, Qt::AlignVCenter);
+		_presetTopRow->addWidget(_presetE2eeButton, 0, Qt::AlignVCenter);
+		_presetTopRow->addStretch(1);
+		_presetTopRow->addWidget(_moreSettingsButton, 0, Qt::AlignVCenter);
+		_presetStrip->setFixedHeight(44);
+	}
+}
+
+void MeetingMainWindow::refreshThemeVisuals() {
+	if (_copilotButton) {
+		_copilotButton->setChecked(_copilotVisible);
+		_copilotButton->setIcon(Theme::icon(
+			Theme::Icon::Sparkle,
+			_copilotVisible ? Theme::ColorRole::OnAccent : Theme::ColorRole::Accent));
+	}
+	if (_settingsButton) {
+		_settingsButton->setIcon(Theme::icon(Theme::Icon::Settings, Theme::ColorRole::TextSecondary));
+	}
+	if (_quickMeetingButton) {
+		_quickMeetingButton->setIcon(Theme::icon(Theme::Icon::Video, Theme::ColorRole::OnAccent));
+	}
+	if (_scheduleMeetingButton) {
+		_scheduleMeetingButton->setIcon(Theme::icon(Theme::Icon::Calendar, Theme::ColorRole::TextSecondary));
+	}
+	if (_shareScreenButton) {
+		_shareScreenButton->setIcon(Theme::icon(Theme::Icon::ScreenShare, Theme::ColorRole::TextSecondary));
+	}
+	if (_allMeetingsButton) {
+		_allMeetingsButton->setIcon(Theme::icon(Theme::Icon::ChevronRight, Theme::ColorRole::Accent));
+	}
+	if (_moreSettingsButton) {
+		_moreSettingsButton->setIcon(Theme::icon(Theme::Icon::ChevronRight, Theme::ColorRole::TextSecondary));
+	}
+	if (_brandBadge) _brandBadge->update();
+	if (_windowControls) _windowControls->update();
+	syncAccountBadge();
+	syncJoinPresets();
+	update();
+}
+
+void MeetingMainWindow::showAccountMenu() {
+	auto &session = OpenMeeting::SessionManager::instance();
+	auto *menu = new QMenu(this);
+	menu->setAttribute(Qt::WA_DeleteOnClose);
+	AppTheme::styleMenu(
+		*menu,
+		AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+			? AppTheme::Tone::Dark
+			: AppTheme::Tone::Light);
+	QString statusStr = session.isLoggedIn()
+		? QCoreApplication::translate("MeetingUI", "Current User: %1 (%2)").arg(session.nickname(), session.userId())
+		: QCoreApplication::translate("MeetingUI", "Not Signed In");
+	menu->addAction(statusStr)->setEnabled(false);
+	menu->addSeparator();
+
+	auto *switchAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Switch Account / Sign In"));
+	auto *logoutAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Sign Out"));
+	const auto reportCount = livekit::telemetry::InstalledTelemetryHistoryStore()
+		? livekit::telemetry::InstalledTelemetryHistoryStore()->Status()->reports.size()
+		: 0;
+	auto *telemetryAction = menu->addAction(
+		AppTheme::icon(AppTheme::Icon::Details),
+		QCoreApplication::translate("MeetingUI", "Telemetry reports on this device (%1)")
+			.arg(reportCount));
+	telemetryAction->setObjectName(QStringLiteral("mainPostMeetingTelemetry"));
+
+	connect(telemetryAction, &QAction::triggered, this, [this] {
+		OpenPostMeetingTelemetryDialog(this);
+	}, Qt::QueuedConnection);
+	connect(switchAction, &QAction::triggered, this,
+		[this] { handleUserLogout(); }, Qt::QueuedConnection);
+	connect(logoutAction, &QAction::triggered, this,
+		[this] { handleUserLogout(); }, Qt::QueuedConnection);
+
+	const QPoint anchor = _accountButton
+		? _accountButton->mapToGlobal(QPoint(0, _accountButton->height() + 6))
+		: mapToGlobal(QPoint(width() - 220, kHeaderHeight + 4));
+	menu->popup(anchor);
+}
+
+void MeetingMainWindow::triggerInlineJoin() {
+	const QString rawId = _meetingIdInput ? _meetingIdInput->text().trimmed() : QString();
+	beginMeetingEntry(rawId);
+}
+
+bool MeetingMainWindow::isTitleBarDragPosition(const QPoint &pos) const {
+	if (pos.y() < 0 || pos.y() >= kHeaderHeight) {
+		return false;
+	}
+	QWidget *hit = childAt(pos);
+	while (hit && hit != this) {
+		if (hit == _windowControls ||
+			qobject_cast<QAbstractButton *>(hit) ||
+			qobject_cast<QLineEdit *>(hit)) {
+			return false;
+		}
+		hit = hit->parentWidget();
+	}
+	return true;
 }
 
 void MeetingMainWindow::handleUserLogout() {
@@ -936,7 +1836,8 @@ void MeetingMainWindow::showLoginDialog() {
 	LoginDialog loginDlg;
 	if (loginDlg.exec() == QDialog::Accepted &&
 		OpenMeeting::SessionManager::instance().isLoggedIn()) {
-		if (_sidebar) _sidebar->update();
+		syncAccountBadge();
+		syncJoinPresets();
 		if (_meetingCatalog) _meetingCatalog->refreshUpcoming();
 		show();
 		raise();
@@ -1057,6 +1958,7 @@ void MeetingMainWindow::openQuickMeeting(
 	config.audioMuted = !prefs.enableMicrophone;
 	config.videoEnabled = prefs.enableVideo;
 	config.invitationMode = InvitationMode::BusinessMeetingId;
+	populateCopilotConfig(config, this, _agentCoordinator);
 
 	if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
 		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
@@ -1156,6 +2058,7 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	config.invitationMode = dialog.isManualConnection()
 		? InvitationMode::Disabled
 		: InvitationMode::BusinessMeetingId;
+	populateCopilotConfig(config, this, _agentCoordinator);
 
 	if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
 		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
@@ -1290,6 +2193,7 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		config.audioMuted = !preferences.enableMicrophone;
 		config.videoEnabled = preferences.enableVideo;
 		config.invitationMode = InvitationMode::BusinessMeetingId;
+	populateCopilotConfig(config, this, _agentCoordinator);
 
 		auto coordinator = OpenMeeting::MeetingCoordinator::create();
 		bindMeetingCatalog(coordinator.get());
@@ -1383,11 +2287,134 @@ void MeetingMainWindow::syncSchedule() {
 	}
 }
 
+int MeetingMainWindow::copilotDrawerWidth(int totalWidth) const {
+	const int maxAllowed = std::max(280, totalWidth - 480);
+	if (_copilotExpanded) {
+		return std::min(maxAllowed, std::min(560, std::max(380, totalWidth / 2)));
+	}
+	return std::min(maxAllowed, std::min(360, std::max(300, totalWidth / 3)));
+}
+
+void MeetingMainWindow::toggleCopilotDrawer(std::optional<bool> visible) {
+	const bool nextVisible = visible.value_or(!_copilotVisible);
+	if (_copilotVisible == nextVisible) {
+		return;
+	}
+	_copilotVisible = nextVisible;
+	if (_copilotButton) {
+		_copilotButton->setChecked(_copilotVisible);
+		_copilotButton->setIcon(Theme::icon(
+			Theme::Icon::Sparkle,
+			_copilotVisible ? Theme::ColorRole::OnAccent : Theme::ColorRole::Accent));
+	}
+	QResizeEvent ev(size(), size());
+	resizeEvent(&ev);
+	update();
+	if (_copilotVisible && _meetingCatalog && OpenMeeting::SessionManager::instance().isLoggedIn() &&
+		!_meetingCatalog->upcomingState().hasSnapshot && !_meetingCatalog->upcomingState().refreshing) {
+		_meetingCatalog->refreshUpcoming();
+	}
+	if (_copilotVisible && _copilotSidebar) {
+		_copilotSidebar->focusInput();
+	}
+}
+
+void MeetingMainWindow::openSettingsAtPage(int pageIndex, QWidget *dialogParent, int copilotSubTab) {
+	auto currentPage = static_cast<SettingsDialog::Page>(pageIndex);
+	int currentSubTab = copilotSubTab;
+	QPoint savedPos;
+	bool hasSavedPos = false;
+	for (;;) {
+		const auto clickedAt = CameraDeviceDiscovery::Clock::now();
+		QWidget *host = dialogParent ? dialogParent : this;
+		SettingsDialog dialog(OpenMeeting::SessionManager::instance(), host, clickedAt);
+		dialog.setAgentCoordinator(_agentCoordinator.get());
+		dialog.showPage(currentPage);
+		if (currentPage == SettingsDialog::Page::Copilot && currentSubTab >= 0) {
+			dialog.setCopilotSubTab(currentSubTab);
+		}
+		if (hasSavedPos) {
+			dialog.move(savedPos);
+		}
+		bool reopenForLanguage = false;
+		connect(&dialog, &SettingsDialog::languageChanged, &dialog, [&] {
+			currentPage = dialog.currentPage();
+			currentSubTab = dialog.currentCopilotSubTab();
+			savedPos = dialog.pos();
+			hasSavedPos = true;
+			reopenForLanguage = true;
+			dialog.accept();
+		});
+		dialog.exec();
+		if (!reopenForLanguage) {
+			break;
+		}
+	}
+	syncJoinPresets();
+	syncAccountBadge();
+}
+
+void MeetingMainWindow::openCopilotSettings(QWidget *dialogParent) {
+	openSettingsAtPage(static_cast<int>(SettingsDialog::Page::Copilot), dialogParent);
+}
+
+void MeetingMainWindow::retranslateUi() {
+	if (_copilotButton) {
+		_copilotButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "AI Copilot"));
+		_copilotButton->setToolTip(QCoreApplication::translate("MeetingUI", "AI Copilot"));
+	}
+	if (_settingsButton) {
+		_settingsButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Settings"));
+		_settingsButton->setToolTip(QCoreApplication::translate("MeetingUI", "Settings"));
+	}
+	if (_accountButton) {
+		_accountButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Account menu"));
+	}
+	if (_quickMeetingButton) {
+		_quickMeetingButton->setText(QCoreApplication::translate("MeetingUI", "Start Instant Meeting"));
+		_quickMeetingButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Start Meeting"));
+	}
+	if (_meetingIdInput) {
+		_meetingIdInput->setPlaceholderText(
+			QCoreApplication::translate("MeetingUI", "Enter 9-digit meeting ID to join, or click Join..."));
+	}
+	if (_joinMeetingButton) {
+		_joinMeetingButton->setText(QCoreApplication::translate("MeetingUI", "Join"));
+		_joinMeetingButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Join Meeting"));
+	}
+	if (_scheduleMeetingButton) {
+		_scheduleMeetingButton->setText(QCoreApplication::translate("MeetingUI", "Schedule Meeting"));
+		_scheduleMeetingButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Schedule Meeting"));
+	}
+	if (_shareScreenButton) {
+		_shareScreenButton->setText(QCoreApplication::translate("MeetingUI", "Share Screen"));
+		_shareScreenButton->setAccessibleName(QCoreApplication::translate("MeetingUI", "Share Screen"));
+	}
+	if (_allMeetingsButton) {
+		_allMeetingsButton->setText(QCoreApplication::translate("MeetingUI", "All Meetings"));
+	}
+	if (_presetLabel) {
+		_presetLabel->setText(QCoreApplication::translate("MeetingUI", "Join Presets"));
+	}
+	if (_moreSettingsButton) {
+		_moreSettingsButton->setText(QCoreApplication::translate("MeetingUI", "More Settings"));
+	}
+	syncHeaderDate();
+	syncAccountBadge();
+	syncJoinPresets();
+	syncSchedule();
+	update();
+}
+
 void MeetingMainWindow::changeEvent(QEvent *e) {
 	Ui::RpWidget::changeEvent(e);
 	if (e->type() == QEvent::WindowStateChange) {
-		if (_sidebar) _sidebar->setCornerRadius(isMaximized() || isFullScreen() ? 0 : kWindowCornerRadius);
+		if (_windowControls) {
+			_windowControls->setMaximized(isMaximized() || isFullScreen());
+		}
 		update();
+	} else if (e->type() == QEvent::LanguageChange) {
+		retranslateUi();
 	}
 }
 
@@ -1395,21 +2422,37 @@ void MeetingMainWindow::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
-	// 左侧导航栏 (宽 68)
-	const int sidebarW = 68;
-	_sidebar->setGeometry(0, 0, sidebarW, h);
-	_sidebar->setCornerRadius(isMaximized() || isFullScreen() ? 0 : kWindowCornerRadius);
+	// 顶部一体化标题栏
+	if (_headerBar) {
+		_headerBar->setGeometry(0, 0, w, kHeaderHeight);
+	}
 
-	// 右上角窗口控制按钮
-	_windowControls->move(w - _windowControls->width() - 4, 4);
+	// 右侧可选 Copilot 抽屉 + 左侧居中主工作台
+	const int bodyTop = kHeaderHeight;
+	const int bodyH = std::max(0, h - bodyTop);
+	const int copilotW = (_copilotVisible && _copilotSidebar) ? copilotDrawerWidth(w) : 0;
+	const int mainAreaW = std::max(0, w - copilotW);
 
-	// 中间操作区与右侧日程区
-	const int remainW = w - sidebarW;
-	const int gridW = remainW * 46 / 100;
-	const int scheduleW = remainW - gridW;
+	if (_centerColumn) {
+		const int sidePad = mainAreaW >= 620 ? 32 : 16;
+		const int topPad = 24;
+		const int bottomPad = 24;
+		const int colW = std::min(kMaxColumnWidth, std::max(0, mainAreaW - sidePad * 2));
+		const int colX = (mainAreaW - colW) / 2;
+		const int colH = std::max(0, bodyH - topPad - bottomPad);
+		_centerColumn->setGeometry(colX, bodyTop + topPad, colW, colH);
+		updatePresetStripLayout(colW);
+	}
 
-	_actionGrid->setGeometry(sidebarW, 36, gridW, h - 36);
-	_scheduleWidget->setGeometry(sidebarW + gridW, 36, scheduleW, h - 36);
+	if (_copilotSidebar) {
+		if (_copilotVisible) {
+			_copilotSidebar->setGeometry(w - copilotW, bodyTop, copilotW, bodyH);
+			_copilotSidebar->show();
+			_copilotSidebar->raise();
+		} else {
+			_copilotSidebar->hide();
+		}
+	}
 }
 
 void MeetingMainWindow::paintEvent(QPaintEvent *e) {
@@ -1420,23 +2463,31 @@ void MeetingMainWindow::paintEvent(QPaintEvent *e) {
 	const int h = height();
 	const int radius = isMaximized() || isFullScreen() ? 0 : kWindowCornerRadius;
 
-	// 1. 绘制主体圆角容器背景
+	// 1. 主体圆角窗口底色
+	QPainterPath windowPath;
 	if (radius > 0) {
-		QPainterPath path;
-		path.addRoundedRect(QRectF(0, 0, w, h), radius, radius);
-		p.fillPath(path, Theme::color(Theme::ColorRole::Window));
+		windowPath.addRoundedRect(QRectF(0, 0, w, h), radius, radius);
+		p.fillPath(windowPath, Theme::color(Theme::ColorRole::Window));
 	} else {
 		p.fillRect(rect(), Theme::color(Theme::ColorRole::Window));
 	}
 
-	// 2. 绘制中间与右侧之间的浅灰纵向分割线
-	const int sidebarW = 68;
-	const int remainW = w - sidebarW;
-	const int gridW = remainW * 46 / 100;
-	const int splitX = sidebarW + gridW;
-
+	// 2. 顶部一体化标题栏 Surface 顶盖与底部细分割线
+	p.save();
+	if (radius > 0) {
+		p.setClipPath(windowPath);
+	}
+	p.fillRect(QRect(0, 0, w, kHeaderHeight), Theme::color(Theme::ColorRole::Surface));
 	p.setPen(Theme::color(Theme::ColorRole::Border));
-	p.drawLine(splitX, 36, splitX, h - 36);
+	p.drawLine(0, kHeaderHeight - 1, w, kHeaderHeight - 1);
+	p.restore();
+
+	// 3. 非最大化时的柔和 1px 窗口轮廓描边
+	if (radius > 0) {
+		p.setPen(QPen(Theme::color(Theme::ColorRole::Border), 1.0));
+		p.setBrush(Qt::NoBrush);
+		p.drawRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), radius, radius);
+	}
 }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
@@ -1492,8 +2543,7 @@ bool MeetingMainWindow::nativeEvent(const QByteArray &eventType, void *message, 
 			if (bottom) { *result = HTBOTTOM; return true; }
 		}
 
-		// 标题栏拖拽区域（排除右上角 130px 窗口控制按钮）
-		if (y < 42 && x < w - 130) {
+		if (isTitleBarDragPosition(QPoint(x, y))) {
 			*result = HTCAPTION;
 			return true;
 		}

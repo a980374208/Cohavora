@@ -549,7 +549,6 @@ QMessageBox[meetingUiTone="light"] QLabel {
 }
 
 QMessageBox[meetingUiTone="light"] QLabel[objectName="qt_msgbox_label"] {
-    min-width: 340px;
     max-width: 520px;
     padding: 8px 4px 10px 4px;
 }
@@ -905,7 +904,6 @@ QMessageBox[meetingUiTone="dark"] QLabel {
 }
 
 QMessageBox[meetingUiTone="dark"] QLabel[objectName="qt_msgbox_label"] {
-    min-width: 340px;
     max-width: 520px;
     padding: 8px 4px 10px 4px;
 }

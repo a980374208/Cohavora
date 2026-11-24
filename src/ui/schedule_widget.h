@@ -3,42 +3,16 @@
 #include "base/basic_types.h"
 #include "src/core/meeting_catalog_controller.h"
 #include "ui/rp_widget.h"
-#include "ui/widgets/shadow.h"
-#include <QtGui/QPainter>
-#include <QtGui/QPainterPath>
-#include <QtCore/QDate>
-#include <memory>
 
+class QFrame;
+class QLabel;
 class QListView;
+class QPushButton;
+class QWidget;
 
 namespace MeetingUI {
 
 class MeetingListModel;
-
-class FloatingActionButton : public Ui::RpWidget {
-public:
-	explicit FloatingActionButton(QWidget *parent = nullptr);
-	~FloatingActionButton() override = default;
-
-	rpl::producer<> clicked() const {
-		return _clicks.events();
-	}
-
-protected:
-	void paintEvent(QPaintEvent *e) override;
-	void mouseMoveEvent(QMouseEvent *e) override;
-	void mousePressEvent(QMouseEvent *e) override;
-	void mouseReleaseEvent(QMouseEvent *e) override;
-	void enterEventHook(QEnterEvent *e) override;
-	void leaveEventHook(QEvent *e) override;
-
-private:
-	bool _hovered = false;
-	bool _pressed = false;
-	std::unique_ptr<Ui::BoxShadow> _shadow;
-	std::unique_ptr<Ui::BoxShadow> _hoverShadow;
-	rpl::event_stream<> _clicks;
-};
 
 class ScheduleWidget : public Ui::RpWidget {
 public:
@@ -49,7 +23,7 @@ public:
 		return _allMeetingsClicks.events();
 	}
 	rpl::producer<> addScheduleClicked() const {
-		return _fabButton->clicked();
+		return _addScheduleClicks.events();
 	}
 	rpl::producer<> refreshClicked() const {
 		return _refreshClicks.events();
@@ -59,39 +33,36 @@ public:
 	}
 
 	void setMeetingState(const OpenMeeting::MeetingListViewState &state);
+	void setShowAllMeetingsAction(bool show);
 
 protected:
-	void paintEvent(QPaintEvent *e) override;
-	void resizeEvent(QResizeEvent *e) override;
-	void mouseMoveEvent(QMouseEvent *e) override;
-	void mousePressEvent(QMouseEvent *e) override;
-	void leaveEventHook(QEvent *e) override;
+	void changeEvent(QEvent *event) override;
 
 private:
-	void drawHeader(QPainter &p);
-	void drawEmptyCoffeeIllustration(QPainter &p, const QRect &area);
-	void drawCoffeeSteam(QPainter &p, int cx, int cy);
-	void drawStateMessage(QPainter &p, const QRect &area);
-	void layoutChildren();
+	void refreshThemeIcons();
+	void retranslateUi();
 
-	QString getFormattedDate() const;
-	QString getFormattedSubDate() const;
-
-	FloatingActionButton *_fabButton = nullptr;
+	QFrame *_cardFrame = nullptr;
+	QLabel *_titleLabel = nullptr;
+	QLabel *_countBadge = nullptr;
+	QPushButton *_refreshButton = nullptr;
+	QPushButton *_allMeetingsButton = nullptr;
+	QLabel *_bannerLabel = nullptr;
 	QListView *_listView = nullptr;
 	MeetingListModel *_model = nullptr;
-	QRect _dateRect;
-	QRect _subDateRect;
-	int _headerBottom = 144;
-	int _stateHeight = 0;
-	QRect _allMeetingsRect;
-	QRect _refreshRect;
-	bool _allMeetingsHovered = false;
-	bool _refreshHovered = false;
-	QString _stateMessage;
-	bool _showEmptyIllustration = true;
+
+	QWidget *_emptyPanel = nullptr;
+	QLabel *_emptyIconLabel = nullptr;
+	QLabel *_emptyTitleLabel = nullptr;
+	QLabel *_emptySubtitleLabel = nullptr;
+	QPushButton *_emptyScheduleButton = nullptr;
+
+	QWidget *_statePanel = nullptr;
+	QLabel *_stateMessageLabel = nullptr;
+	QPushButton *_stateRetryButton = nullptr;
 
 	rpl::event_stream<> _allMeetingsClicks;
+	rpl::event_stream<> _addScheduleClicks;
 	rpl::event_stream<> _refreshClicks;
 	rpl::event_stream<QString> _meetingClicks;
 };

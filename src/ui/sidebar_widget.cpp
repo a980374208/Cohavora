@@ -3,6 +3,7 @@
 #include "src/ui/sidebar_widget.h"
 #include "src/net/session_manager.h"
 #include <QtGui/QMouseEvent>
+#include <QtGui/QResizeEvent>
 #include <QtGui/QFont>
 
 namespace MeetingUI {
@@ -29,12 +30,29 @@ SidebarWidget::SidebarWidget(QWidget *parent)
 	connect(_accessibleSettings, &QPushButton::clicked, this, [this] {
 		_bottomItemClicks.fire_copy(BottomItemType::Settings);
 	});
+	_accessibleCopilot = new QPushButton(this);
+	_accessibleCopilot->setObjectName(QStringLiteral("mainCopilot"));
+	_accessibleCopilot->setAccessibleName(QCoreApplication::translate("MeetingUI", "AI Copilot"));
+	_accessibleCopilot->setToolTip(QCoreApplication::translate("MeetingUI", "AI Copilot"));
+	_accessibleCopilot->setFlat(true);
+	_accessibleCopilot->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_accessibleCopilot->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
+	connect(_accessibleCopilot, &QPushButton::clicked, this, [this] {
+		_bottomItemClicks.fire_copy(BottomItemType::Copilot);
+	});
 }
 
 void SidebarWidget::setActiveNav(NavItemType type) {
 	if (_activeNav != type) {
 		_activeNav = type;
 		_navChanges.fire_copy(_activeNav);
+		update();
+	}
+}
+
+void SidebarWidget::setCopilotActive(bool active) {
+	if (_copilotActive != active) {
+		_copilotActive = active;
 		update();
 	}
 }
@@ -93,6 +111,27 @@ void SidebarWidget::updateLayout() {
 	settingsItem.rect = QRect((w - bottomItemSize) / 2, bottomY, bottomItemSize, bottomItemSize);
 	_bottomItems.push_back(settingsItem);
 	_accessibleSettings->setGeometry(settingsItem.rect);
+
+	bottomY -= (bottomItemSize + bottomSpacing);
+	BottomItem copilotItem;
+	copilotItem.type = BottomItemType::Copilot;
+	copilotItem.tooltip = QCoreApplication::translate("MeetingUI", "AI Copilot");
+	copilotItem.rect = QRect((w - bottomItemSize) / 2, bottomY, bottomItemSize, bottomItemSize);
+	_bottomItems.push_back(copilotItem);
+	_accessibleCopilot->setGeometry(copilotItem.rect);
+}
+
+QRect SidebarWidget::avatarHitRect() const {
+	if (_avatarRect.isEmpty()) {
+		return {};
+	}
+	// 包含右下角在线状态徽标外圈（中心 avRect.right()-3, bottom()-3，半径 6px）
+	return _avatarRect.adjusted(0, 0, 3, 3);
+}
+
+void SidebarWidget::resizeEvent(QResizeEvent *e) {
+	Ui::RpWidget::resizeEvent(e);
+	updateLayout();
 }
 
 void SidebarWidget::paintEvent(QPaintEvent *e) {
@@ -162,12 +201,17 @@ void SidebarWidget::paintEvent(QPaintEvent *e) {
 	// 绘制底部项
 	for (const auto &bItem : _bottomItems) {
 		const bool isHovered = (_hoveredBottom && *_hoveredBottom == bItem.type);
-		if (isHovered) {
+		const bool isActive = (bItem.type == BottomItemType::Copilot && _copilotActive);
+		if (isActive) {
+			p.setPen(Qt::NoPen);
+			p.setBrush(Theme::color(Theme::ColorRole::AccentSoft));
+			p.drawRoundedRect(bItem.rect, 6, 6);
+		} else if (isHovered) {
 			p.setPen(Qt::NoPen);
 			p.setBrush(Theme::color(Theme::ColorRole::Hover));
 			p.drawRoundedRect(bItem.rect, 6, 6);
 		}
-		drawBottomIcon(p, bItem.type, bItem.rect, isHovered);
+		drawBottomIcon(p, bItem.type, bItem.rect, isHovered || isActive);
 	}
 }
 
@@ -287,7 +331,9 @@ void SidebarWidget::drawBottomIcon(QPainter &p, BottomItemType type, const QRect
 	p.save();
 	p.setRenderHint(QPainter::Antialiasing);
 
-	const QColor color = hovered ? Theme::color(Theme::ColorRole::Text) : Theme::color(Theme::ColorRole::TextMuted);
+	const QColor color = hovered
+		? (type == BottomItemType::Copilot ? Theme::color(Theme::ColorRole::Accent) : Theme::color(Theme::ColorRole::Text))
+		: Theme::color(Theme::ColorRole::TextMuted);
 	p.setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.setBrush(Qt::NoBrush);
 
@@ -315,15 +361,28 @@ void SidebarWidget::drawBottomIcon(QPainter &p, BottomItemType type, const QRect
 		// 加号
 		p.drawLine(cx + 4, cy - 1, cx + 8, cy - 1);
 		p.drawLine(cx + 6, cy - 3, cx + 6, cy + 1);
+	} else if (type == BottomItemType::Copilot) {
+		// AI Copilot 四角星辉图标
+		QPainterPath spark;
+		spark.moveTo(cx - 1, cy - 8);
+		spark.quadTo(cx - 1, cy - 1, cx + 6, cy - 1);
+		spark.quadTo(cx - 1, cy - 1, cx - 1, cy + 6);
+		spark.quadTo(cx - 1, cy - 1, cx - 8, cy - 1);
+		spark.quadTo(cx - 1, cy - 1, cx - 1, cy - 8);
+		p.drawPath(spark);
+		p.drawEllipse(QPoint(cx + 5, cy - 6), 2, 2);
 	}
 
 	p.restore();
 }
 
 void SidebarWidget::mouseMoveEvent(QMouseEvent *e) {
+	if (!(e->buttons() & Qt::LeftButton)) {
+		_avatarPressed = false;
+	}
 	const QPoint pos = e->pos();
 
-	const bool avHover = _avatarRect.contains(pos);
+	const bool avHover = avatarHitRect().contains(pos);
 	if (avHover != _avatarHovered) {
 		_avatarHovered = avHover;
 		update();
@@ -355,26 +414,43 @@ void SidebarWidget::mouseMoveEvent(QMouseEvent *e) {
 }
 
 void SidebarWidget::mousePressEvent(QMouseEvent *e) {
+	_avatarPressed = false;
+	if (e->button() != Qt::LeftButton) {
+		Ui::RpWidget::mousePressEvent(e);
+		return;
+	}
 	const QPoint pos = e->pos();
-	if (_avatarRect.contains(pos)) {
-		_avatarClicks.fire({});
+	if (avatarHitRect().contains(pos)) {
+		_avatarPressed = true;
+		e->accept();
 		return;
 	}
 	for (const auto &item : _navItems) {
 		if (item.rect.contains(pos)) {
 			setActiveNav(item.type);
+			e->accept();
 			return;
 		}
 	}
 	for (const auto &item : _bottomItems) {
 		if (item.rect.contains(pos)) {
 			_bottomItemClicks.fire_copy(item.type);
+			e->accept();
 			return;
 		}
 	}
+	Ui::RpWidget::mousePressEvent(e);
 }
 
 void SidebarWidget::mouseReleaseEvent(QMouseEvent *e) {
+	const bool wasAvatarPressed = _avatarPressed;
+	_avatarPressed = false;
+	if (e->button() == Qt::LeftButton && wasAvatarPressed && avatarHitRect().contains(e->pos())) {
+		_avatarClicks.fire({});
+		e->accept();
+		return;
+	}
+	Ui::RpWidget::mouseReleaseEvent(e);
 }
 
 void SidebarWidget::leaveEventHook(QEvent *e) {

@@ -33,8 +33,6 @@ add_executable(cohavora_app
     main_meeting_app.cpp
     debug_login_options.cpp
     debug_login_options.h
-    ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.h
-    ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/login_dialog.h
     ${PROJECT_SOURCE_DIR}/src/ui/login_dialog.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/sidebar_widget.cpp
@@ -82,6 +80,7 @@ target_link_libraries(cohavora_app PRIVATE
     cohavora_device_discovery
     cohavora_meeting_network
     cohavora_meeting_runtime
+    cohavora_agent
     cohavora_qt_video_render
     cohavora_whiteboard_ui
     cohavora_ui_theme

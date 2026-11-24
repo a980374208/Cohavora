@@ -26,6 +26,7 @@
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
+#include <QtWidgets/QLayout>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QProgressDialog>
@@ -260,19 +261,68 @@ void styleDialogButtons(QDialogButtonBox &buttonBox) {
 	}
 }
 
+void prepareMessageBoxLabels(QMessageBox &box) {
+	const auto configureLabel = [&](const char *name, bool mainLabel) {
+		if (auto *label = box.findChild<QLabel *>(QString::fromLatin1(name))) {
+			label->setWordWrap(true);
+			if (mainLabel) {
+				label->setTextFormat(Qt::PlainText);
+			}
+			label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+			label->setMinimumWidth(0);
+			label->setMaximumWidth(520);
+		}
+	};
+	configureLabel("qt_msgbox_label", true);
+	configureLabel("qt_msgbox_informativelabel", false);
+}
+
+void syncMessageBoxLayout(QMessageBox &box, const QSize &requestedMinimum) {
+	prepareMessageBoxLabels(box);
+	// QMessageBoxPrivate::updateSize() sets a fixed size and resets wordWrap to
+	// false when layoutMinimumWidth() falls under its soft limit. Unlock the
+	// size constraint and re-activate with wordWrap enabled so long or CJK text
+	// wraps cleanly without right-edge or bottom-edge clipping.
+	box.setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+	if (auto *layout = box.layout()) {
+		layout->invalidate();
+		layout->activate();
+	}
+	QSize target = box.sizeHint()
+	                   .expandedTo(box.minimumSizeHint())
+	                   .expandedTo(requestedMinimum);
+	if (auto *layout = box.layout(); layout && layout->hasHeightForWidth()) {
+		target.setHeight(std::max(target.height(),
+		                          layout->totalHeightForWidth(target.width())));
+	}
+	if (const auto *screen = box.screen() ? box.screen() : QGuiApplication::primaryScreen()) {
+		const QSize limit = screen->availableGeometry().size() - QSize(32, 32);
+		if (limit.width() > 0 && limit.height() > 0) {
+			target = target.boundedTo(limit);
+		}
+	}
+	// Keep maximumSize >= target >= minimumSize; sending min > max disconnects Wayland.
+	const QSize minSize(std::min(requestedMinimum.width(), target.width()),
+	                    std::min(requestedMinimum.height(), target.height()));
+	box.setMaximumSize(QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+	box.setMinimumSize(minSize);
+	box.resize(target);
+	if (auto *layout = box.layout()) {
+		layout->activate();
+	}
+	// Discard the LayoutRequest posted by label->setWordWrap(true) / minimumSize
+	// updates we just satisfied, preventing QMessageBox::event() from re-running
+	// updateSize() and resetting wordWrap back to false.
+	QCoreApplication::removePostedEvents(&box, QEvent::LayoutRequest);
+}
+
 void configureMessageBox(QMessageBox &box, Tone tone) {
 	box.setProperty(kToneProperty, toneName(tone));
 	// QMessageBox may already have fixed its size. Keep each intermediate
 	// constraint valid, including when restyling an exposed Wayland window.
 	box.setMaximumWidth(std::max(box.maximumWidth(), 460));
 	box.setMinimumWidth(460);
-	if (auto *label = box.findChild<QLabel *>(QStringLiteral("qt_msgbox_label"))) {
-		label->setWordWrap(true);
-		label->setTextFormat(Qt::PlainText);
-		label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-		label->setMinimumWidth(340);
-		label->setMaximumWidth(520);
-	}
+	prepareMessageBoxLabels(box);
 	for (auto *button : box.buttons()) {
 		setButtonRole(button, messageButtonRole(box.buttonRole(button)));
 	}
@@ -415,17 +465,14 @@ protected:
 			}
 			if (box && event->type() == QEvent::Show) {
 				// QMessageBox::showEvent recalculates and can replace a minimum
-				// requested by the caller. Restore it after Qt finishes that layout.
+				// requested by the caller and reset wordWrap. Restore it after Qt finishes that layout.
 				const auto requestedMinimum = box->minimumSize().expandedTo(QSize(460, 0));
+				prepareMessageBoxLabels(*box);
 				box->adjustSize();
 				QPointer<QMessageBox> guard(box);
 				QTimer::singleShot(0, box, [guard, requestedMinimum] {
 					if (!guard) return;
-					// Qt's showEvent can set a smaller fixed maximum. Sending
-					// min > max disconnects the client from a Wayland compositor.
-					guard->setMaximumSize(guard->maximumSize().expandedTo(requestedMinimum));
-					guard->setMinimumSize(requestedMinimum);
-					guard->resize(guard->size().expandedTo(requestedMinimum));
+					syncMessageBoxLayout(*guard, requestedMinimum);
 					centerOnParentOrScreen(*guard);
 				});
 			}

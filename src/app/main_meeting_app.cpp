@@ -17,6 +17,7 @@
 #include <QtPlugin>
 #include "crl/crl.h"
 #include <rpl/rpl.h>
+#include "ui/emoji_config.h"
 #include "ui/style/style_core.h"
 #include "src/ui/meeting_ui_integration.h"
 #include "src/ui/app_theme.h"
@@ -325,8 +326,15 @@ int main(int argc, char *argv[]) {
 		? cohavora::platform::QStringFromPath(debugStorage.emojiCache) : QString());
 	Ui::Integration::Set(&integration);
 
-	// 初始化 Telegram Desktop lib_ui 样式系统
+	// 初始化 Telegram Desktop lib_ui 样式与 Emoji 查表系统
 	style::StartManager(100);
+	Ui::Emoji::Init();
+	struct DesktopUiLifecycleGuard {
+		~DesktopUiLifecycleGuard() {
+			Ui::Emoji::Clear();
+			style::StopManager();
+		}
+	} uiLifecycleGuard;
 	MeetingUI::AppTheme::install(app);
 
 	// 初始化会话与用户认证
@@ -346,7 +354,6 @@ int main(int argc, char *argv[]) {
             // through the same async shutdown barrier as ordinary exit.
             startupExitCode = 3;
 #else
-			style::StopManager();
 			return 3;
 #endif
 		}
@@ -363,7 +370,6 @@ int main(int argc, char *argv[]) {
 		MeetingUI::LoginDialog loginDlg;
 		if (loginDlg.exec() != QDialog::Accepted) {
 			// 用户主动退出登录对话框，直接退出程序
-			style::StopManager();
 			return !pilotProbe || pilotProbe->Finish() ? 0 : 5;
 		}
 	}
@@ -505,9 +511,8 @@ int main(int argc, char *argv[]) {
 	const int result = app.exec();
 	const bool probeEvidenceComplete = !pilotProbe || pilotProbe->Finish();
 
-	// 退出时显式释放 WebRTC 资源与样式系统
+	// 退出时显式释放 WebRTC 资源；Ui::Emoji 与 style 由 uiLifecycleGuard 析构统一清理
 	livekit::WebRTCManager::Instance().Deinitialize();
-	style::StopManager();
 
 #if defined(__linux__)
     if (result == 0 && startupExitCode != 0) return startupExitCode;

@@ -17,6 +17,10 @@
 #include "src/render/video_render_session.h"
 #include "src/ui/participants_sidebar_widget.h"
 #include "src/ui/meeting_chat_sidebar_widget.h"
+#include "src/agent/agent_coordinator.h"
+#include "src/agent/meeting_translator_service.h"
+#include "src/agent/room_agent_publisher.h"
+#include "src/ui/copilot_sidebar_widget.h"
 #include "src/ui/render/video_canvas.h"
 #include "src/ui/camera_switch_completion_owner.h"
 #include "src/ui/camera_device_discovery.h"
@@ -74,7 +78,8 @@ enum class VideoViewMode {
 enum class ActiveSidebar {
 	None,          // 侧边栏折叠，视频舞台全宽
 	Participants,  // 仅显示参会人列表
-	Chat           // 仅显示会议聊天记录
+	Chat,          // 仅显示会议聊天记录
+	Copilot        // AI Copilot 侧边栏
 };
 
 enum class InvitationMode {
@@ -95,6 +100,7 @@ public:
 	void setDisplayName(const QString &name);
 	QString displayName() const { return _displayName; }
 	void setNameDisplayMode(OpenMeeting::ParticipantNameDisplayMode mode);
+	void resetForReuse(const QString &displayName, float remoteVolume = 1.0f, bool locallyMuted = false);
 
 	bool isLocal() const { return _isLocal; }
 	bool isVideoActive() const { return _isVideoActive; }
@@ -186,6 +192,8 @@ private:
 	void paintCard(QPainter &p, bool decorationOnly, bool hasFrame, bool hovered);
 	void invalidatePresentation();
 	void setupVolumeControls();
+	void ensureVolumePopup();
+	void ensureVisualizer();
 	void updateRenderExpectation();
 
 	QString _identity;
@@ -247,6 +255,15 @@ public:
 	void setMeetingId(const QString &meetingId);
 	void setTelemetrySnapshot(const QVariantMap &snapshot);
 	void setLayoutSelection(VideoViewMode mode, livekit::SpeakerLayout speakerLayout);
+	void setEncrypted(bool encrypted);
+	void setAgentStatus(
+		bool online,
+		const QString &state = QString(),
+		const QString &agentName = QString(),
+		int agentCount = 0,
+		bool localTranslatorActive = false,
+		bool localAgentRoleActive = false);
+	void setMaximized(bool maximized);
 	QToolButton *layoutButton() const { return _layoutButton; }
 
 	rpl::producer<VideoViewMode> viewModeChanged() const { return _viewModeStream.events(); }
@@ -261,6 +278,7 @@ public:
 signals:
 	void telemetryDetailsRequested();
 	void layoutMenuRequested();
+	void agentMenuRequested(const QPoint &globalPos);
 	// Native child HWNDs (such as Dx11VideoCanvas) may prevent the top-level
 	// WM_NCHITTEST path from reaching this QWidget. Blank title-bar presses
 	// therefore request a system drag explicitly as a reliable fallback.
@@ -277,7 +295,7 @@ protected:
 private:
 	friend class ::ParticipantWindowInspectionAccess;
 	enum class HoverBtn {
-		None, Quality, Layout, Console, Simulate, Min, Max, Close
+		None, Quality, Agent, Layout, Console, Simulate, Min, Max, Close
 	};
 
 	HoverBtn _hoverBtn = HoverBtn::None;
@@ -286,10 +304,23 @@ private:
 	QString _meetingId;
 	QVariantMap _telemetrySnapshot;
 	bool _copiedAnim = false;
+	bool _encrypted = false;
+	bool _agentOnline = false;
+	bool _localTranslatorActive = false;
+	bool _localAgentRoleActive = false;
+	QString _agentState;
+	QString _agentName;
+	int _agentCount = 0;
+	bool _maximized = false;
 	VideoViewMode _currentViewMode = VideoViewMode::Grid;
+
+	QString agentBadgeText() const;
+	QString agentTooltipText() const;
 
 	QRect _layoutRect;
 	QToolButton *_layoutButton = nullptr;
+	QRect _infoPillRect;
+	QRect _agentPillRect;
 	QRect _qualityRect;
 	QPushButton *_uiaTelemetry = nullptr;
 	QRect _consoleRect;
@@ -336,6 +367,7 @@ public:
 	void setParticipantCount(int count);
 	void setChatUnreadCount(int count);
 	int chatUnreadCount() const { return _chatUnreadCount; }
+	void setActiveSidebar(int sidebarId);
 
 	// 事件流
 	rpl::producer<bool> toggleAudioRequested() const { return _toggleAudioStream.events(); }
@@ -346,6 +378,7 @@ public:
 	rpl::producer<> participantsClicked() const { return _participantsStream.events(); }
 	rpl::producer<> chatClicked() const { return _chatStream.events(); }
 	rpl::producer<> whiteboardClicked() const { return _whiteboardStream.events(); }
+	rpl::producer<> copilotClicked() const { return _copilotStream.events(); }
 	rpl::producer<> endMeetingClicked() const { return _endMeetingStream.events(); }
 	rpl::producer<QString> sendChatRequested() const { return _sendChatStream.events(); }
 	rpl::producer<QString> microphoneDeviceChanged() const { return _micDeviceStream.events(); }
@@ -416,12 +449,16 @@ private:
 	int _participantCount = 1;
 	int _chatUnreadCount = 0;
 	bool _whiteboardHasContent = false;
+	int _activeSidebarId = 0;
+	bool _compactDockLabels = false;
+	std::array<QRect, 3> _dockGroupRects{};
 
 	QLineEdit *_chatInput = nullptr;
 	QPushButton *_handBtn = nullptr;
 	QPushButton *_uiaParticipants = nullptr;
 	QPushButton *_uiaChat = nullptr;
 	QPushButton *_uiaWhiteboard = nullptr;
+	QPushButton *_uiaCopilot = nullptr;
 	QPushButton *_uiaAudio = nullptr;
 	QPushButton *_uiaVideo = nullptr;
 	QPushButton *_uiaShare = nullptr;
@@ -442,6 +479,7 @@ private:
 	rpl::event_stream<> _participantsStream;
 	rpl::event_stream<> _chatStream;
 	rpl::event_stream<> _whiteboardStream;
+	rpl::event_stream<> _copilotStream;
 	rpl::event_stream<> _endMeetingStream;
 	rpl::event_stream<QString> _sendChatStream;
 	rpl::event_stream<QString> _micDeviceStream;
@@ -469,6 +507,9 @@ public:
 		QString backupCodec = "vp8";
 		livekit::BackupCodecPolicy backupCodecPolicy = livekit::BackupCodecPolicy::PreferRegression;
 		InvitationMode invitationMode = InvitationMode::Disabled;
+		std::shared_ptr<OpenMeeting::AgentCoordinator> agentCoordinator;
+		std::function<void(QWidget *parent)> openCopilotSettings;
+		std::function<void(int pageIndex, int subTabIndex, QWidget *parent)> openSettingsPage;
 	};
 
 	// Constructs presentation only; no device startup waits on the Qt thread.
@@ -576,6 +617,9 @@ private:
     bool _sharedReturnPending = false;
     bool _receiveRemoteVideo = true;
 	void setupVideoPagingControls();
+	void setupLiveCaptionBanner();
+	void onMeetingTranscriptionReceived(const OpenMeeting::MeetingTranscriptItem &item);
+	void clearLiveCaption();
 	void saveVideoLayoutPreferences();
 	void updateStageGeometry();
 	void setWhiteboardVisible(bool visible);
@@ -590,6 +634,7 @@ private:
 	bool isTrackVisible(const livekit::TrackKey &key) const;
 	std::optional<livekit::TrackKey> trackKeyForRenderKey(const QString &renderKey) const;
 	VideoTileWidget *ensureRemoteCameraTile(const QString &identity, const QString &name);
+	void recycleRemoteCameraTile(std::unique_ptr<VideoTileWidget> tile);
 	VideoTileWidget *ensureRemoteScreenTile(const livekit::VideoSeat &seat, const QString &name);
 	VideoTileWidget *remoteVideoTile(const livekit::TrackKey &key) const;
 	void openAnnotationOverlay();
@@ -611,13 +656,14 @@ private:
 	void setupCoordinatorBindings();
 	void showDepartureNotice(const QString &title, const QString &message,
 		QMessageBox::Icon icon = QMessageBox::Warning);
+	void dismissDepartureNotice();
 	void setupInvitationBinding();
 	void handleInviteClicked();
 	void showInvitationNotice(bool success, const QString &title, const QString &message);
 	void restoreParticipantPresentations();
 	void applyParticipantPresentation(const OpenMeeting::ParticipantPresentation &presentation);
-	void attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
-		const OpenMeeting::RemoteVideoTrackPresentation &track, bool reconcile = true);
+	bool attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
+		const OpenMeeting::RemoteVideoTrackPresentation &track, bool reconcile = true, bool relayout = true);
 	void removeRemoteVideo(const QString &trackSid, bool reconcile = true);
 	VideoTileWidget *remoteVideoTile(const QString &trackSid) const;
 	bool canRenderRemoteVideo(const QString &trackSid) const;
@@ -630,7 +676,7 @@ private:
 	void handleScreenShareSources(const std::vector<livekit::DesktopSource> &sources);
     void openScreenShareAudioPicker(uint64_t run, uint64_t audioEpoch);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
-		const OpenMeeting::ParticipantPresentation *presentation);
+		const OpenMeeting::ParticipantPresentation *presentation, bool relayout = true);
 	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
 	void applyParticipantNameDisplayPreferences(const OpenMeeting::MediaPreferences &preferences);
 	void setupAudioPreferencesBinding(OpenMeeting::SessionManager &sessionManager);
@@ -646,6 +692,7 @@ private:
 	void applyMicrophoneAvailability(bool available);
 	void bindMicrophoneCaptureState();
 	void setSpeakerOutputMuted(bool muted);
+	void applyEffectiveSpeakerMute();
 	void bindCameraDeviceChanges();
 	void requestCameraSwitch(const QString &devicePath);
 	void handleCameraSwitchResult(
@@ -737,6 +784,7 @@ private:
 	livekit::render::VideoCanvas *_videoCanvas = nullptr;
 	VideoTileWidget *_localTile = nullptr;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
+	std::vector<std::unique_ptr<VideoTileWidget>> _remoteTilePool;
 	std::map<QString, QString> _remoteParticipantNames;
 	struct RemoteVideoBinding {
 		QString identity;
@@ -751,6 +799,7 @@ private:
 	};
 	std::map<QString, RemoteVideoBinding> _remoteVideoBindings;
 	std::map<QString, livekit::MediaBindingKey> _activeRemoteRenderLeases;
+	uint64_t _lastSyncedVideoTracksRevision = ~uint64_t{0};
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteScreenTiles;
 	std::unique_ptr<VideoTileWidget> _localScreenTile;
 	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
@@ -775,15 +824,40 @@ private:
 	QLabel *_inviteHintBanner = nullptr;
 	QLabel *_recoveryBanner = nullptr;
 	QTimer *_recoveryBannerFadeTimer = nullptr;
+	QLabel *_liveCaptionBanner = nullptr;
+	QTimer *_liveCaptionFadeTimer = nullptr;
+	QString _liveCaptionFullText;
 	bool _wasReconnecting = false;
 	RoomBottomBarWidget *_bottomBar = nullptr;
 	WhiteboardPanel *_whiteboardPanel = nullptr;
 	bool _whiteboardVisible = false;
 	OpenMeeting::ParticipantsSidebarWidget *_participantsSidebar = nullptr;
 	OpenMeeting::MeetingChatSidebarWidget *_chatSidebar = nullptr;
+	std::shared_ptr<OpenMeeting::AgentCoordinator> _agentCoordinator;
+	OpenMeeting::CopilotSidebarWidget *_copilotSidebar = nullptr;
+	OpenMeeting::MeetingTranslatorService *_meetingTranslator = nullptr;
+	OpenMeeting::RoomAgentPublisher *_roomAgentPublisher = nullptr;
+	bool _hasRemoteRoomAgent = false;
+	QString _remoteRoomAgentName;
+	QString _remoteRoomAgentState;
+	int _remoteRoomAgentCount = 0;
+	bool _autoTranslationEvaluated = false;
+	bool _e2eeAgentBroadcastAuthorized = false;
+	QString _liveCaptionSecondaryText;
 	ActiveSidebar _activeSidebar = ActiveSidebar::None;
+	bool _copilotExpanded = false;
 
 	void switchSidebar(ActiveSidebar target);
+	void openCopilotSettingsDialog();
+	void setupMeetingTranslationServices();
+	void refreshTopBarAgentStatus();
+	void showAgentControlMenu(const QPoint &globalPos);
+	void maybeAutoStartMeetingTranslation();
+	bool startLocalMeetingTranslation(bool interactive);
+	void stopLocalMeetingTranslation();
+	void enableRoomAgentRoleInteractive(bool forceTakeover = false);
+	void disableRoomAgentRole();
+	bool isCurrentUserMeetingHost() const;
 	void updateRecoveryStateUi(OpenMeeting::MeetingState state, const QString &detail = QString());
 
 	// 本地摄像头采集与模拟流
@@ -799,6 +873,9 @@ private:
 	DeviceSwitchTelemetry _microphoneSwitchTelemetry;
 	DeviceSwitchTelemetry _speakerSwitchTelemetry;
 	std::uint64_t _pendingMicrophoneDeviceGeneration = 0;
+	std::weak_ptr<livekit::Room> _speakerConfiguredRoom;
+	bool _speakerStateInitialized = false;
+	bool _speakerRequestedMuted = true;
 #ifdef Q_OS_LINUX
 	std::shared_ptr<std::atomic<std::uint64_t>> _microphoneMuteIntent =
 		std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -808,9 +885,7 @@ private:
 		std::make_shared<std::atomic<std::uint64_t>>(0);
 	std::shared_ptr<std::atomic<std::uint64_t>> _speakerMuteIntent =
 		std::make_shared<std::atomic<std::uint64_t>>(0);
-	std::weak_ptr<livekit::Room> _speakerConfiguredRoom;
 	bool _speakerDevicePending = false;
-	bool _speakerRequestedMuted = true;
 	bool _microphoneMutePending = false;
 	bool _microphoneSwitchPending = false;
 	bool _microphoneStateCommit = false;
