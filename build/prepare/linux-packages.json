@@ -20,22 +20,26 @@
     }
   },
   "webrtc": {
-    "archive": "cohavora-webrtc-ubuntu-x64-aaeeee8-cohavora-bssl-v1.tar.gz",
-    "url": "https://github.com/a980374208/Cohavora/releases/download/webrtc-51ef663-cohavora-bssl-dual-v3/cohavora-webrtc-ubuntu-x64-aaeeee8-cohavora-bssl-v1.tar.gz",
-    "size": 242824939,
-    "sha256": "c46245878a8bb913406c950df72f96977b935c3d21fd3a5b1a2541aeb0741f98",
-    "archive_prefix": "cohavora-webrtc-ubuntu-x64-aaeeee8-cohavora-bssl-v1",
-    "file_count": 36239,
+    "archive": "cohavora-webrtc-ubuntu-x64-7f7e8b6-cohavora-bssl-v5.tar.gz",
+    "url": "https://github.com/a980374208/Cohavora/releases/download/webrtc-m144-cohavora-bssl-dual-v5/cohavora-webrtc-ubuntu-x64-7f7e8b6-cohavora-bssl-v5.tar.gz",
+    "size": 289288159,
+    "sha256": "c65ea6e202a1fcafb363048690a10ec1ee87b072865f6f81c8642a174555f5a1",
+    "archive_prefix": "cohavora-webrtc-ubuntu-x64-7f7e8b6-cohavora-bssl-v5",
+    "file_count": 36216,
     "required_files": {
-      "lib/Release/libwebrtc.a": "afe1fd8c22848e039bc447f67c279f7643ca36782c7c7b21a11f799fafd3f324",
-      "lib/Debug/libwebrtc.a": "35728d4bf2a8fd75b3bd4d68bd99caa567112e99181f092fdd1cad77b1bd05cf",
-      "include/api/peer_connection_interface.h": "2ff2178b2a81bf743f6009591b85ee9524eda850d0a9a0c6b6f07cf62d420c47",
+      "lib/Release/libwebrtc.a": "ed2603a8f1b150f4445120046884a1671098f8bc20a45e1dbdd75a0f04f30a64",
+      "lib/Debug/libwebrtc.a": "d698cebf1ae60dfed92c624d7f10dbae27e1862adfa8d59ac428e43f686b48f0",
+      "lib/Release/libx265.a": "74dc703439633490b5fdb6a2ff0212cb1bff1da31d88dc5b2e27c77461b2deb2",
+      "lib/Debug/libx265.a": "c13006281cf6ebe598b3644e517393b0169b7113b0e27e2bcee2cb5f664ce687",
+      "runtime/linux-x86_64/libcohavora_vaapi_runtime.so.1": "b9e9b6bafbac4f9bb891978e1bf8c52a408240b1b00a4c6edfa1fde0a52e9ae3",
+      "include/api/peer_connection_interface.h": "378ffe945ff4c8dfdd0d387ed5144e56631a2ff0ee56fcb9a7bf52747ad2a4ff",
       "include/third_party/libyuv/include/libyuv.h": "7c203717f4d26f9bbd125f15e01b389f59c20b7b4210f5fb6aff0af4b8ed1c36",
       "generated/Release/build/chromeos_buildflags.h": "0f1341e9b76a160aa991c70969d3686fa1ad2170c8e64cb2f5815683dab62c4a",
       "generated/Debug/build/chromeos_buildflags.h": "0f1341e9b76a160aa991c70969d3686fa1ad2170c8e64cb2f5815683dab62c4a",
       "prefix/Release/boringssl_prefix_symbols.h": "964387db9989c2ff1f35472acac18ed63a5dcab6423428d72cd3c9bdb09a0c3a",
       "prefix/Debug/boringssl_prefix_symbols.h": "7cc32c840d4b110fd5fec4b5a59d8fc70a5119d313209a3f1c15ba453d0fa342",
-      "metadata/checksums.sha256": "b27fe1149d56b25a0f9f7a4fa665b642935e6205c78b552d923c156c2207ac49"
+      "metadata/package.json": "e7a3737f5bf57615231527dc0ea5b0727a823fb67496e1d23ac48e1ad90a3a15",
+      "metadata/checksums.sha256": "2e8149f0a5d5a4464d5739426ada65540826bec105223d8b8ef82758d6ea5d56"
     }
   }
 }

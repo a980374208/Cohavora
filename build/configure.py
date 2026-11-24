@@ -505,6 +505,10 @@ def main():
         cmd.append(f"-DWEBRTC_ROOT={webrtc_root}")
     if is_linux:
         cmd.append(f"-DQT_ROOT={qt_root}")
+        webrtc_profile = webrtc_root / "metadata" / "package.json"
+        if ("COHAVORA_WEBRTC_PACKAGE_PROFILE" not in effective_definitions
+                and webrtc_profile.is_file()):
+            cmd.append(f"-DCOHAVORA_WEBRTC_PACKAGE_PROFILE={webrtc_profile}")
     if args.tdesktop_libs:
         cmd.append(f"-DTDESKTOP_LIBS_DIR={tdesktop_libs_dir}")
 

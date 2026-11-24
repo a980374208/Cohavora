@@ -591,7 +591,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED)
        AND NOT retained_vp8_sdk_hash STREQUAL
             "f4c5ebfbf50a609b8f4f3e22e246b911cec9eecea66606a27a94836f0f25e202"
        AND NOT retained_vp8_sdk_hash STREQUAL
-            "35c7a45caf749d1825ee3b4019e6a2ab1afb4d16fe5b96bb029b7a230280d8a2")
+            "35c7a45caf749d1825ee3b4019e6a2ab1afb4d16fe5b96bb029b7a230280d8a2"
+       AND NOT retained_vp8_sdk_hash STREQUAL
+            "ed2603a8f1b150f4445120046884a1671098f8bc20a45e1dbdd75a0f04f30a64")
         message(FATAL_ERROR
             "Linux system audio requires a validated audio-isolation Release SDK. "
             "Use that SDK or set COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED=OFF.")
