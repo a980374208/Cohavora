@@ -891,9 +891,9 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Build the Cohavora dual-config prefixed WebRTC package")
     parser.add_argument("--sdk-root", type=Path,
-                        help="package an existing codec SDK as v4; no compilation or legacy evidence reuse")
-    parser.add_argument("--package-id", default="webrtc-b417823-cohavora-bssl-dual-v4")
-    parser.add_argument("--release-tag", default="webrtc-m144-cohavora-bssl-dual-v4")
+                        help="package an existing codec SDK as a fork-backed M144 release; no compilation or legacy evidence reuse")
+    parser.add_argument("--package-id", default="webrtc-7f7e8b6-cohavora-bssl-dual-v5")
+    parser.add_argument("--release-tag", default="webrtc-m144-cohavora-bssl-dual-v5")
     parser.add_argument("--source-url", default="https://github.com/a980374208/webrtc_hardEncoder")
     parser.add_argument("--source-branch", default="m_144_hard_encoder")
     parser.add_argument("--source-equivalence", type=Path,

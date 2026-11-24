@@ -101,11 +101,15 @@ if(WIN32)
     set_target_properties(cohavora_app PROPERTIES WIN32_EXECUTABLE TRUE)
     enable_language(RC)
     configure_file(cohavora.rc.in "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc" @ONLY)
-    target_sources(cohavora_app PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc")
+    target_sources(cohavora_app PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cohavora.manifest")
     set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc" PROPERTIES
         OBJECT_DEPENDS "${PROJECT_SOURCE_DIR}/src/ui/icons/cohavora.ico")
 
-    set(cohavora_resource_files "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc")
+    set(cohavora_resource_files
+        "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cohavora.manifest")
     get_target_property(nlohmann_json_interface_sources
         nlohmann_json::nlohmann_json INTERFACE_SOURCES)
     foreach(interface_source IN LISTS nlohmann_json_interface_sources)

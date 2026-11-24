@@ -1159,8 +1159,16 @@ std::string RemoteMediaRecoveryIdentity(
         std::to_string(target.name.size()) + ":" + target.name;
 }
 
-bool IsRemoteMediaExpected(const TrackPublication::StateSnapshot& snapshot) {
-    if (!snapshot.track || snapshot.muted ||
+bool IsRemotePublicationSubscribed(
+    const std::shared_ptr<TrackPublication>& publication) {
+    const auto remote =
+        std::dynamic_pointer_cast<RemoteTrackPublication>(publication);
+    return !remote || remote->is_subscribed();
+}
+
+bool IsRemoteMediaExpected(const TrackPublication::StateSnapshot& snapshot,
+                           bool subscribed = true) {
+    if (!subscribed || !snapshot.track || snapshot.muted ||
         snapshot.stream_state != TrackPublication::StreamState::Active ||
         !snapshot.subscription_allowed ||
         snapshot.subscription_error != TrackPublication::SubscriptionError::None) {
@@ -1672,6 +1680,20 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
                 if (subscription_changed && selected) {
                     ClearTrackSubscriptionErrorLocked(
                         remote_participants_.at(key.participant_sid), publication);
+                    if (publication->has_media_binding() && publication->track()) {
+                        SetRemoteMediaExpected(
+                            session_telemetry_.lock(), publication->track()->kind(),
+                            key.participant_sid, publication->sid(),
+                            IsRemoteMediaExpected(publication->SnapshotState(), true),
+                            telemetry::MediaExpectationReason::Subscribed);
+                    }
+                } else if (subscription_changed && !selected) {
+                    if (publication->track()) {
+                        SetRemoteMediaExpected(
+                            session_telemetry_.lock(), publication->track()->kind(),
+                            key.participant_sid, publication->sid(), false,
+                            telemetry::MediaExpectationReason::Unsubscribed);
+                    }
                 }
 
             }
@@ -11219,7 +11241,8 @@ void Room::UpdateParticipants(
                 telemetry_owner,
                 track->kind(),
                 change.participant->sid(), change.publication->sid(),
-                IsRemoteMediaExpected(snapshot),
+                IsRemoteMediaExpected(
+                    snapshot, IsRemotePublicationSubscribed(change.publication)),
                 change.muted
                     ? telemetry::MediaExpectationReason::Muted
                     : telemetry::MediaExpectationReason::Unmuted);
@@ -11382,7 +11405,8 @@ void Room::UpdateTrackMute(
                     telemetry_owner,
                     snapshot.kind,
                     target_participant->sid(), target_pub->sid(),
-                    IsRemoteMediaExpected(snapshot),
+                    IsRemoteMediaExpected(
+                        snapshot, IsRemotePublicationSubscribed(target_pub)),
                     mute.muted()
                         ? telemetry::MediaExpectationReason::Muted
                         : telemetry::MediaExpectationReason::Unmuted);
@@ -12432,6 +12456,12 @@ asio::awaitable<void> Room::WaitForRemoteMediaRecoveryHandshake(
                             control.quality = proto::VideoQuality::OFF;
                             control.width = control.height = control.priority = 0;
                             publication->CommitControl(control);
+                            if (publication->track()) {
+                                SetRemoteMediaExpected(
+                                    session_telemetry_.lock(), publication->track()->kind(),
+                                    key.participant_sid, publication->sid(), false,
+                                    telemetry::MediaExpectationReason::Unsubscribed);
+                            }
                             const auto binding =
                                 current_remote_binding_serials_.find(publication.get());
                             if (binding != current_remote_binding_serials_.end()) {
@@ -13323,7 +13353,8 @@ void Room::UpdateTrackStreamStates(
                     telemetry_owner,
                     snapshot.kind,
                     change.participant->sid(), change.publication->sid(),
-                    IsRemoteMediaExpected(snapshot),
+                    IsRemoteMediaExpected(
+                        snapshot, IsRemotePublicationSubscribed(change.publication)),
                     change.state == TrackPublication::StreamState::Paused
                         ? telemetry::MediaExpectationReason::StreamPaused
                         : telemetry::MediaExpectationReason::StreamActive);
@@ -13534,7 +13565,8 @@ void Room::UpdateTrackSubscriptionPermission(
                 telemetry_owner,
                 snapshot.kind,
                 participant->sid(), publication->sid(),
-                IsRemoteMediaExpected(snapshot),
+                IsRemoteMediaExpected(
+                    snapshot, IsRemotePublicationSubscribed(publication)),
                 permission.allowed
                     ? telemetry::MediaExpectationReason::PermissionAllowed
                     : telemetry::MediaExpectationReason::PermissionDenied);
@@ -13901,7 +13933,8 @@ void Room::SetParticipantVolume(const std::string& identity_or_sid, double volum
             SetRemoteMediaExpected(
                 telemetry_owner, TrackKind::Audio,
                 participant->sid(), publication->sid(),
-                IsRemoteMediaExpected(snapshot),
+                IsRemoteMediaExpected(
+                    snapshot, IsRemotePublicationSubscribed(publication)),
                 volume > 0.001
                     ? telemetry::MediaExpectationReason::VolumeAudible
                     : telemetry::MediaExpectationReason::VolumeZero);
@@ -13937,7 +13970,8 @@ void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
             SetRemoteMediaExpected(
                 telemetry_owner, TrackKind::Audio,
                 participant->sid(), publication->sid(),
-                IsRemoteMediaExpected(snapshot),
+                IsRemoteMediaExpected(
+                    snapshot, IsRemotePublicationSubscribed(publication)),
                 muted ? telemetry::MediaExpectationReason::Muted
                       : telemetry::MediaExpectationReason::Unmuted);
         }
@@ -13969,7 +14003,8 @@ void Room::SetAudioOutputMuted(bool muted) {
             SetRemoteMediaExpected(
                 telemetry_owner, TrackKind::Audio,
                 participant->sid(), publication->sid(),
-                IsRemoteMediaExpected(snapshot),
+                IsRemoteMediaExpected(
+                    snapshot, IsRemotePublicationSubscribed(publication)),
                 muted ? telemetry::MediaExpectationReason::OutputMuted
                       : telemetry::MediaExpectationReason::OutputUnmuted);
         }

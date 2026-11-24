@@ -2149,6 +2149,89 @@ struct TelemetryHistoryStore::WorkerContext final {
         std::size_t charge = 0;
     };
 
+    // Reuse SafeTelemetryRecord shells and their internal Snapshot/Stability
+    // string/vector capacities across session transitions so each cycle does
+    // not re-allocate ~200 x 42 KiB of long-lived objects during peak meeting
+    // heap churn and pin scattered OS pages across default-heap segments.
+    struct RecordPool : std::enable_shared_from_this<RecordPool> {
+        explicit RecordPool(std::size_t max_slots_in) noexcept
+            : max_slots(max_slots_in) {}
+
+        ~RecordPool() { Clear(); }
+
+        std::shared_ptr<SafeTelemetryRecord> Acquire() {
+            SafeTelemetryRecord* raw = nullptr;
+            {
+                std::lock_guard lock(mutex);
+                if (!closed && enabled && !slots.empty()) {
+                    raw = slots.back();
+                    slots.pop_back();
+                }
+            }
+            if (!raw) raw = new SafeTelemetryRecord();
+            auto pool = shared_from_this();
+            return std::shared_ptr<SafeTelemetryRecord>(
+                raw, [pool = std::move(pool)](SafeTelemetryRecord* ptr) noexcept {
+                    if (!ptr) return;
+                    pool->Release(ptr);
+                });
+        }
+
+        void Release(SafeTelemetryRecord* ptr) noexcept {
+            constexpr std::size_t kMaxPooledDynamicBytes = 256 * 1024;
+            bool recycle = false;
+            try {
+                if (SnapshotDynamicRetainedBytes(ptr->snapshot) <= kMaxPooledDynamicBytes) {
+                    std::lock_guard lock(mutex);
+                    if (!closed && enabled && slots.size() < max_slots) {
+                        slots.push_back(ptr);
+                        recycle = true;
+                    }
+                }
+            } catch (...) {}
+            if (!recycle) delete ptr;
+        }
+
+        void SetEnabled(bool value) noexcept {
+            std::vector<SafeTelemetryRecord*> to_delete;
+            {
+                std::lock_guard lock(mutex);
+                enabled = value;
+                if (!enabled) to_delete.swap(slots);
+            }
+            for (auto* ptr : to_delete) delete ptr;
+        }
+
+        void Clear() noexcept {
+            std::vector<SafeTelemetryRecord*> to_delete;
+            {
+                std::lock_guard lock(mutex);
+                to_delete.swap(slots);
+            }
+            for (auto* ptr : to_delete) delete ptr;
+        }
+
+        void Close() noexcept {
+            std::vector<SafeTelemetryRecord*> to_delete;
+            {
+                std::lock_guard lock(mutex);
+                closed = true;
+                to_delete.swap(slots);
+            }
+            for (auto* ptr : to_delete) delete ptr;
+        }
+
+        std::mutex mutex;
+        std::vector<SafeTelemetryRecord*> slots;
+        std::size_t max_slots = 0;
+        bool enabled = true;
+        bool closed = false;
+    };
+
+    ~WorkerContext() {
+        if (record_pool_) record_pool_->Close();
+    }
+
     struct FlushTiming {
         WorkerContext& context;
         const std::chrono::steady_clock::time_point began = std::chrono::steady_clock::now();
@@ -2218,6 +2301,7 @@ struct TelemetryHistoryStore::WorkerContext final {
     std::size_t export_jobs_ = 0;
     std::deque<CurrentRecord> current_records_;
     std::size_t current_record_bytes_ = 0;
+    std::shared_ptr<RecordPool> record_pool_;
     // Worker-owned; previous sessions survive current_records_ replacement.
     std::deque<PendingReport> pending_reports_;
     std::map<std::string, TelemetryCheckpointVerifiedState> verified_checkpoints_;
@@ -2262,7 +2346,10 @@ TelemetryHistoryStore::WorkerContext::WorkerContext(
     , queue_byte_capacity_((std::clamp)(queue_byte_capacity,
         std::size_t{4096}, kDefaultQueueBytes))
     , maximum_bytes_((std::max)(std::uint64_t{1024 * 1024}, maximum_bytes))
-    , retention_(retention), control_(std::move(control)) {
+    , retention_(retention)
+    , record_pool_(std::make_shared<RecordPool>(
+          (std::min)(memory_buckets_, std::size_t{256})))
+    , control_(std::move(control)) {
     status_.queue_capacity = queue_capacity_;
     status_.queue_byte_capacity = queue_byte_capacity_;
     status_cache_ = std::make_shared<const TelemetryStoreStatus>(status_);
@@ -2610,6 +2697,7 @@ void TelemetryHistoryStore::WorkerContext::RunLoop() {
                 {
                     std::lock_guard lock(mutex_);
                     status_.history_enabled = job.enabled;
+                    if (record_pool_) record_pool_->SetEnabled(job.enabled);
                     if (!job.enabled) {
                         current_records_.clear();
                         current_record_bytes_ = 0;
@@ -2769,14 +2857,17 @@ void TelemetryHistoryStore::WorkerContext::FlushLossRanges(bool force) {
 void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
     if (!job.snapshot) return;
     try {
-        auto record = std::make_shared<SafeTelemetryRecord>();
+        auto record = record_pool_ ? record_pool_->Acquire()
+                                   : std::make_shared<SafeTelemetryRecord>();
+        record->schema_version = kTelemetryReportSchemaVersion;
+        record->definition_version = kTelemetryDefinitionVersion;
         record->anonymous_session_id = job.anonymous_session_id;
         record->captured_utc_ms = job.captured_utc_ms;
         record->source_utc_ms = job.checkpoint.source_utc_ms;
         record->source_monotonic_us = job.source_monotonic_us;
         record->complete = job.checkpoint.complete;
         record->snapshot = *job.snapshot;
-        record->stability = std::move(job.stability);
+        record->stability = job.stability;
         job.checkpoint = MakeTelemetryCheckpointRecord(*record);
         {
             std::lock_guard lock(mutex_);
@@ -3516,6 +3607,7 @@ void TelemetryHistoryStore::WorkerContext::Run() {
     }
     // Lease destruction belongs to this worker even after owner timeout/destruction.
     run_lease_.reset();
+    if (record_pool_) record_pool_->Close();
     {
         std::lock_guard lock(mutex_);
         // Include aggregate timings from the final forced flush before Close
