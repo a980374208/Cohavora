@@ -50,9 +50,11 @@ struct SignalSdkOptions {
 struct SignalOptions {
     bool auto_subscribe = true;
     bool adaptive_stream = false;
+    std::optional<bool> auto_subscribe_data_track;
     SignalSdkOptions sdk_options;
     bool single_peer_connection = true;
     bool create_webrtc_pc = true; // Toggle actual creation of WebRTC PC instances
+    bool eager_publish_data_channel = false; // Eagerly negotiate publisher PC for data-only sessions
     // Plaintext signaling is an explicit application policy (for example --debug).
     // The native SDK fails closed unless its owner opts in for this session.
     bool allow_insecure_transport = false;
@@ -122,6 +124,15 @@ public:
 
     // Send update subscription request to server for subscribing / unsubscribing tracks
     void SendUpdateSubscription(const std::vector<std::string>& track_sids, bool subscribe, const std::string& participant_sid = "");
+
+    // Send data track lifecycle and subscription signaling
+    void SendPublishDataTrackRequest(uint16_t pub_handle,
+                                     const std::string& name,
+                                     proto::Encryption::Type encryption = proto::Encryption::NONE);
+    void SendUnpublishDataTrackRequest(uint16_t pub_handle);
+    void SendUpdateDataSubscription(const std::string& track_sid,
+                                    bool subscribe,
+                                    std::optional<uint32_t> target_fps = std::nullopt);
 
     // Close signaling connection
     void Close();

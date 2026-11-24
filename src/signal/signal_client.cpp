@@ -125,6 +125,9 @@ static std::string CreateJoinRequestParam(const SignalOptions& options,
     auto* conn_settings = join_req.mutable_connection_settings();
     conn_settings->set_auto_subscribe(options.auto_subscribe);
     conn_settings->set_adaptive_stream(options.adaptive_stream);
+    if (options.auto_subscribe_data_track.has_value()) {
+        conn_settings->set_auto_subscribe_data_track(*options.auto_subscribe_data_track);
+    }
     
     auto* client_info = join_req.mutable_client_info();
     client_info->set_sdk(livekit::proto::ClientInfo::CPP);
@@ -478,6 +481,38 @@ void SignalClient::SendUpdateSubscription(const std::vector<std::string>& track_
         }
     }
 
+    Send(req);
+}
+
+void SignalClient::SendPublishDataTrackRequest(uint16_t pub_handle,
+                                               const std::string& name,
+                                               proto::Encryption::Type encryption) {
+    proto::SignalRequest req;
+    auto* pub = req.mutable_publish_data_track_request();
+    pub->set_pub_handle(pub_handle);
+    pub->set_name(name);
+    pub->set_encryption(encryption);
+    Send(req);
+}
+
+void SignalClient::SendUnpublishDataTrackRequest(uint16_t pub_handle) {
+    proto::SignalRequest req;
+    auto* unpub = req.mutable_unpublish_data_track_request();
+    unpub->set_pub_handle(pub_handle);
+    Send(req);
+}
+
+void SignalClient::SendUpdateDataSubscription(const std::string& track_sid,
+                                              bool subscribe,
+                                              std::optional<uint32_t> target_fps) {
+    proto::SignalRequest req;
+    auto* sub = req.mutable_update_data_subscription();
+    auto* update = sub->add_updates();
+    update->set_track_sid(track_sid);
+    update->set_subscribe(subscribe);
+    if (subscribe && target_fps.has_value()) {
+        update->mutable_options()->set_target_fps(*target_fps);
+    }
     Send(req);
 }
 

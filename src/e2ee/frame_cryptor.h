@@ -118,11 +118,15 @@ public:
     // Local packet envelope limit, including IV and GCM tag. This comfortably
     // fits the 15 KB stream chunks; it is not a total stream transfer limit.
     static constexpr size_t kMaxEncryptedPacketBytes = 64 * 1024;
+    // Whole-frame ceiling for DTP-fragmented Dedicated DataTracks.
+    static constexpr size_t kMaxDataTrackPayloadBytes = 16 * 1024 * 1024;
     std::variant<AuthenticatedDataPayload, PacketCryptoError> DecryptPacket(
-        std::string_view sender_identity, const EncryptedDataPacket& packet);
+        std::string_view sender_identity, const EncryptedDataPacket& packet,
+        size_t max_packet_bytes = kMaxEncryptedPacketBytes);
     std::variant<EncryptedDataPacket, PacketCryptoError> EncryptPacket(
         std::string_view sender_identity, int key_index,
-        const std::vector<uint8_t>& payload);
+        const std::vector<uint8_t>& payload,
+        size_t max_packet_bytes = kMaxEncryptedPacketBytes);
 
     // Legacy AES-256 helper and combined IV/ciphertext/tag format are unchanged.
     bool EncryptData(const std::vector<uint8_t>& plain_data, std::vector<uint8_t>& encrypted_data);

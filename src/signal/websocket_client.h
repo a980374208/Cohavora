@@ -15,6 +15,7 @@
 #include <system_error>
 #include <cstdint>
 #include <atomic>
+#include <utility>
 
 namespace livekit {
 namespace diagnostic { class SdpSendTrace; }
@@ -35,6 +36,7 @@ public:
     using TextMessageCallback = std::function<void(const std::string& text_payload)>;
     using CloseCallback = std::function<void(uint16_t code, const std::string& reason)>;
     using ErrorCallback = std::function<void(const std::error_code& ec)>;
+    using HeaderList = std::vector<std::pair<std::string, std::string>>;
 
     WebSocketClient(asio::io_context& io_ctx, asio::ssl::context& ssl_ctx);
     ~WebSocketClient();
@@ -44,6 +46,11 @@ public:
                                              std::string token, 
                                              std::chrono::milliseconds timeout,
                                              CredentialUrlPolicy policy = {});
+    asio::awaitable<std::error_code> Connect(std::string url_str,
+                                             std::string token,
+                                             std::chrono::milliseconds timeout,
+                                             CredentialUrlPolicy policy,
+                                             HeaderList extra_headers);
 
     // Start background read loop
     void StartRead();
@@ -52,6 +59,7 @@ public:
     asio::awaitable<void> SendBinary(std::vector<uint8_t> data,
         std::shared_ptr<diagnostic::SdpSendTrace> trace = {});
     asio::awaitable<void> SendText(std::string text);
+    asio::awaitable<void> SendPing(std::vector<uint8_t> payload = {});
 
     // Close WebSocket
     asio::awaitable<void> Close(uint16_t code, const std::string& reason);
@@ -66,6 +74,8 @@ public:
     void SetOnError(ErrorCallback cb);
 
     bool IsConnected() const { return connected_.load(std::memory_order_acquire); }
+    size_t QueuedBytes() const { return queued_bytes_.load(std::memory_order_acquire); }
+    std::string LastHandshakeErrorDetail() const;
 
 private:
     friend class RoomConnectAttemptInspectionAccess;
@@ -84,7 +94,8 @@ private:
         std::string url_str,
         std::string token,
         std::chrono::milliseconds timeout,
-        CredentialUrlPolicy policy);
+        CredentialUrlPolicy policy,
+        HeaderList extra_headers);
     asio::awaitable<void> CloseOnOwner(uint16_t code, std::string reason);
     void AbortOnOwner();
 
@@ -98,7 +109,7 @@ private:
     asio::awaitable<void> AsyncConnectSocket(std::string host, std::string port);
     asio::awaitable<void> AsyncHttpProxyConnect(std::string proxy_host, std::string proxy_port, std::string target_host, std::string target_port, std::optional<std::string> auth_header);
     asio::awaitable<void> AsyncSslHandshake(std::string host);
-    asio::awaitable<void> AsyncWsHandshake(Url url, std::string token);
+    asio::awaitable<void> AsyncWsHandshake(Url url, std::string token, HeaderList extra_headers);
 
     // Send and read Helpers
     asio::awaitable<size_t> async_read_stream(asio::mutable_buffer buf);
@@ -131,10 +142,19 @@ private:
     // Buffer to cache extra bytes read during handshake
     asio::streambuf response_buf_;
 
+    // Fragment reassembly state (strand_-confined)
+    static constexpr size_t kMaxAssembledMessageBytes = 8 * 1024 * 1024;
+    uint8_t fragment_opcode_ = 0;
+    std::vector<uint8_t> fragment_buffer_;
+
     // Writing states
     std::queue<std::shared_ptr<QueuedMessage>> write_queue_;
     bool writing_ = false;
+    std::atomic<size_t> queued_bytes_{0};
     std::mutex write_mutex_;
+
+    mutable std::mutex handshake_diag_mutex_;
+    std::string last_handshake_error_detail_;
 };
 
 } // namespace livekit

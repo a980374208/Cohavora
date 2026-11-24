@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,29 @@ namespace livekit {
 
 class TextStreamReader;
 class ByteStreamReader;
+class RemoteDataTrack;
+
+struct TranscriptionSegment {
+    std::string id;
+    std::string text;
+    std::string source_text;
+    std::string source_language;
+    bool is_translated = false;
+    uint64_t start_time_ms = 0;
+    uint64_t end_time_ms = 0;
+    bool is_final = false;
+    std::string language;
+    int64_t first_received_time_ms = 0;
+    int64_t last_received_time_ms = 0;
+};
+
+struct TranscriptionEvent {
+    std::string sender_identity;
+    std::string transcribed_participant_identity;
+    std::string track_sid;
+    std::vector<TranscriptionSegment> segments;
+    bool generated = false;
+};
 
 struct ParticipantKey {
     uint64_t native_room_generation = 0;
@@ -110,8 +134,11 @@ enum class ParticipantEventKind {
     ConnectionQuality,
     ActiveSpeakers,
     DataReceived,
+    TranscriptionReceived,
     TextStreamOpened,
     ByteStreamOpened,
+    DataTrackPublished,
+    DataTrackUnpublished,
 };
 
 struct ParticipantSnapshotEvent {
@@ -169,8 +196,11 @@ struct ParticipantEvent {
     SenderContext sender;
     std::vector<uint8_t> data;
     std::string topic;
+    std::optional<TranscriptionEvent> transcription;
     std::shared_ptr<TextStreamReader> text_reader;
     std::shared_ptr<ByteStreamReader> byte_reader;
+    std::shared_ptr<RemoteDataTrack> data_track;
+    std::string data_track_sid;
 };
 
 } // namespace livekit

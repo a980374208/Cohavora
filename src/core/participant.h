@@ -10,6 +10,7 @@
 #include <asio.hpp>
 #include "track.h"
 #include "chat_message.h"
+#include "data_track.h"
 #include "rpc_types.h"
 #include "operation.h"
 
@@ -34,6 +35,16 @@ enum class ConnectionQuality {
     Lost,
 };
 
+enum class ParticipantKind {
+    Standard = 0,
+    Ingress = 1,
+    Egress = 2,
+    Sip = 3,
+    Agent = 4,
+    Connector = 7,
+    Bridge = 8,
+};
+
 struct ParticipantPermission {
     bool can_subscribe = true;
     bool can_publish = true;
@@ -47,6 +58,7 @@ struct ParticipantStateSnapshot {
     std::string identity;
     std::string name;
     std::string metadata;
+    ParticipantKind kind = ParticipantKind::Standard;
     bool speaking = false;
     float audio_level = 0.0f;
     ConnectionQuality connection_quality = ConnectionQuality::Unknown;
@@ -55,6 +67,23 @@ struct ParticipantStateSnapshot {
     ParticipantPermission permission;
     std::vector<TrackPublication::StateSnapshot> publications;
 };
+
+inline bool IsRoomAgentParticipant(const ParticipantStateSnapshot& state) {
+    const auto publish_on_behalf = state.attributes.find("lk.publish_on_behalf");
+    if (publish_on_behalf != state.attributes.end() &&
+        !publish_on_behalf->second.empty()) {
+        return false;
+    }
+    if (state.kind == ParticipantKind::Agent) {
+        return true;
+    }
+    const auto agent_state = state.attributes.find("lk.agent.state");
+    if (agent_state != state.attributes.end() && !agent_state->second.empty()) {
+        return true;
+    }
+    const auto agent_role = state.attributes.find("cohavora.agent_role");
+    return agent_role != state.attributes.end() && !agent_role->second.empty();
+}
 
 class Participant {
 public:
@@ -68,6 +97,7 @@ public:
     std::string identity() const;
     std::string name() const;
     std::string metadata() const;
+    ParticipantKind kind() const;
     bool is_speaking() const;
     float audio_level() const;
     ConnectionQuality connection_quality() const;
@@ -75,6 +105,7 @@ public:
 
     void set_name(const std::string& name);
     void set_metadata(const std::string& metadata);
+    void set_kind(ParticipantKind kind);
     void set_sid(const std::string& sid);
     void set_speaking(bool speaking);
     void set_audio_level(float level);
@@ -104,6 +135,7 @@ protected:
     std::string identity_;
     std::string name_;
     std::string metadata_;
+    ParticipantKind kind_{ParticipantKind::Standard};
     bool speaking_{false};
     float audio_level_{0.0f};
     ConnectionQuality connection_quality_{ConnectionQuality::Unknown};
@@ -133,6 +165,12 @@ public:
     };
     using AsyncPublishTracksBatchHandler = std::function<asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>>(
         std::vector<BatchTrackItem>)>;
+    using AsyncPublishDataTrackHandler = std::function<
+        asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>(
+            DataTrackPublishOptions)>;
+    using PublishDataTrackSyncHandler = std::function<
+        DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>(
+            const DataTrackPublishOptions&)>;
     void SetPublishTrackHandler(PublishTrackHandler handler) {
         publish_track_handler_ = std::move(handler);
     }
@@ -155,6 +193,14 @@ public:
 
     void SetSendRpcHandler(SendRpcHandler handler) {
         send_rpc_handler_ = std::move(handler);
+    }
+
+    void SetAsyncPublishDataTrackHandler(AsyncPublishDataTrackHandler handler) {
+        async_publish_data_track_handler_ = std::move(handler);
+    }
+
+    void SetPublishDataTrackSyncHandler(PublishDataTrackSyncHandler handler) {
+        publish_data_track_sync_handler_ = std::move(handler);
     }
 
     // Legacy synchronous helper for isolated/offline execution. A participant
@@ -182,6 +228,16 @@ public:
     // 发布自定义 Raw Data
     void PublishData(const std::vector<uint8_t>& payload, bool reliable = true,
                      const std::vector<std::string>& destination_identities = {}, const std::string& topic = "");
+
+    // 发布 2026 标准独立 DataTrack
+    asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>
+    PublishDataTrackAsync(DataTrackPublishOptions options);
+    asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>
+    PublishDataTrackAsync(std::string name);
+    DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>
+    PublishDataTrack(const DataTrackPublishOptions& options);
+    DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>
+    PublishDataTrack(const std::string& name);
 
     // 发送结构化 Chat 消息 (对齐 client-sdk-cpp / Rust SDK)
     ChatMessage SendChatMessage(const std::string& text, const std::vector<std::string>& destination_identities = {});
@@ -211,6 +267,8 @@ private:
     AsyncUnpublishTrackHandler async_unpublish_track_handler_;
     PublishDataHandler publish_data_handler_;
     SendRpcHandler send_rpc_handler_;
+    AsyncPublishDataTrackHandler async_publish_data_track_handler_;
+    PublishDataTrackSyncHandler publish_data_track_sync_handler_;
 
     mutable std::mutex rpc_mutex_;
     std::unordered_map<std::string, RpcHandler> rpc_handlers_;
@@ -226,6 +284,15 @@ public:
     // from here instead of constructing a parallel controller by SID.
     std::shared_ptr<RemoteTrackPublication> get_remote_publication(
         const std::string& sid) const;
+
+    std::map<std::string, std::shared_ptr<RemoteDataTrack>> data_tracks() const;
+    std::shared_ptr<RemoteDataTrack> get_data_track(const std::string& sid) const;
+    void add_data_track(std::shared_ptr<RemoteDataTrack> track);
+    void remove_data_track(const std::string& sid);
+
+private:
+    mutable std::mutex data_tracks_mutex_;
+    std::map<std::string, std::shared_ptr<RemoteDataTrack>> data_tracks_;
 };
 
 } // namespace livekit

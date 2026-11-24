@@ -28,6 +28,7 @@ Participant::Participant(const Participant& other) {
     identity_ = other.identity_;
     name_ = other.name_;
     metadata_ = other.metadata_;
+    kind_ = other.kind_;
     speaking_ = other.speaking_;
     audio_level_ = other.audio_level_;
     connection_quality_ = other.connection_quality_;
@@ -44,6 +45,7 @@ Participant& Participant::operator=(const Participant& other) {
     std::string identity;
     std::string name;
     std::string metadata;
+    ParticipantKind kind = ParticipantKind::Standard;
     bool speaking = false;
     float audio_level = 0.0f;
     ConnectionQuality connection_quality = ConnectionQuality::Unknown;
@@ -57,6 +59,7 @@ Participant& Participant::operator=(const Participant& other) {
         identity = other.identity_;
         name = other.name_;
         metadata = other.metadata_;
+        kind = other.kind_;
         speaking = other.speaking_;
         audio_level = other.audio_level_;
         connection_quality = other.connection_quality_;
@@ -71,6 +74,7 @@ Participant& Participant::operator=(const Participant& other) {
         identity_ = std::move(identity);
         name_ = std::move(name);
         metadata_ = std::move(metadata);
+        kind_ = kind;
         speaking_ = speaking;
         audio_level_ = audio_level;
         connection_quality_ = connection_quality;
@@ -86,6 +90,7 @@ std::string Participant::sid() const { std::lock_guard<std::mutex> lock(state_mu
 std::string Participant::identity() const { std::lock_guard<std::mutex> lock(state_mutex_); return identity_; }
 std::string Participant::name() const { std::lock_guard<std::mutex> lock(state_mutex_); return name_; }
 std::string Participant::metadata() const { std::lock_guard<std::mutex> lock(state_mutex_); return metadata_; }
+ParticipantKind Participant::kind() const { std::lock_guard<std::mutex> lock(state_mutex_); return kind_; }
 bool Participant::is_speaking() const { std::lock_guard<std::mutex> lock(state_mutex_); return speaking_; }
 float Participant::audio_level() const { std::lock_guard<std::mutex> lock(state_mutex_); return audio_level_; }
 ConnectionQuality Participant::connection_quality() const { std::lock_guard<std::mutex> lock(state_mutex_); return connection_quality_; }
@@ -93,6 +98,7 @@ float Participant::connection_quality_score() const { std::lock_guard<std::mutex
 
 void Participant::set_name(const std::string& name) { std::lock_guard<std::mutex> lock(state_mutex_); name_ = name; }
 void Participant::set_metadata(const std::string& metadata) { std::lock_guard<std::mutex> lock(state_mutex_); metadata_ = metadata; }
+void Participant::set_kind(ParticipantKind kind) { std::lock_guard<std::mutex> lock(state_mutex_); kind_ = kind; }
 void Participant::set_sid(const std::string& sid) { std::lock_guard<std::mutex> lock(state_mutex_); sid_ = sid; }
 void Participant::set_speaking(bool speaking) { std::lock_guard<std::mutex> lock(state_mutex_); speaking_ = speaking; }
 void Participant::set_audio_level(float level) { std::lock_guard<std::mutex> lock(state_mutex_); audio_level_ = level; }
@@ -136,6 +142,7 @@ ParticipantStateSnapshot Participant::SnapshotState() const {
     snapshot.identity = identity_;
     snapshot.name = name_;
     snapshot.metadata = metadata_;
+    snapshot.kind = kind_;
     snapshot.speaking = speaking_;
     snapshot.audio_level = audio_level_;
     snapshot.connection_quality = connection_quality_;
@@ -152,6 +159,28 @@ ParticipantStateSnapshot Participant::SnapshotState() const {
 std::shared_ptr<RemoteTrackPublication> RemoteParticipant::get_remote_publication(
     const std::string& sid) const {
     return std::dynamic_pointer_cast<RemoteTrackPublication>(get_publication(sid));
+}
+
+std::map<std::string, std::shared_ptr<RemoteDataTrack>> RemoteParticipant::data_tracks() const {
+    std::lock_guard<std::mutex> lock(data_tracks_mutex_);
+    return data_tracks_;
+}
+
+std::shared_ptr<RemoteDataTrack> RemoteParticipant::get_data_track(const std::string& sid) const {
+    std::lock_guard<std::mutex> lock(data_tracks_mutex_);
+    const auto it = data_tracks_.find(sid);
+    return it != data_tracks_.end() ? it->second : nullptr;
+}
+
+void RemoteParticipant::add_data_track(std::shared_ptr<RemoteDataTrack> track) {
+    if (!track || track->sid().empty()) return;
+    std::lock_guard<std::mutex> lock(data_tracks_mutex_);
+    data_tracks_[track->sid()] = std::move(track);
+}
+
+void RemoteParticipant::remove_data_track(const std::string& sid) {
+    std::lock_guard<std::mutex> lock(data_tracks_mutex_);
+    data_tracks_.erase(sid);
 }
 
 static std::string GenerateUuid() {
@@ -549,6 +578,69 @@ void LocalParticipant::PublishData(const std::vector<uint8_t>& payload, bool rel
     } else {
         EmitParticipantIssue(diagnostic::ParticipantIssueReason::PublishDataHandlerMissing);
     }
+}
+
+asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>
+LocalParticipant::PublishDataTrackAsync(DataTrackPublishOptions options) {
+    if (options.name.empty()) {
+        co_return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+            PublishDataTrackErrorCode::InvalidName,
+            "Data track name must not be empty",
+        });
+    }
+    if (!permission().can_publish_data) {
+        EmitParticipantIssue(diagnostic::ParticipantIssueReason::PublishDataDenied);
+        co_return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+            PublishDataTrackErrorCode::NotAllowed,
+            "Participant is not allowed to publish data",
+        });
+    }
+    AsyncPublishDataTrackHandler handler = async_publish_data_track_handler_;
+    if (!handler) {
+        co_return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+            PublishDataTrackErrorCode::Disconnected,
+            "Participant is not attached to an active Room",
+        });
+    }
+    co_return co_await handler(std::move(options));
+}
+
+asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>
+LocalParticipant::PublishDataTrackAsync(std::string name) {
+    DataTrackPublishOptions options;
+    options.name = std::move(name);
+    co_return co_await PublishDataTrackAsync(std::move(options));
+}
+
+DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>
+LocalParticipant::PublishDataTrack(const DataTrackPublishOptions& options) {
+    if (options.name.empty()) {
+        return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+            PublishDataTrackErrorCode::InvalidName,
+            "Data track name must not be empty",
+        });
+    }
+    if (!permission().can_publish_data) {
+        EmitParticipantIssue(diagnostic::ParticipantIssueReason::PublishDataDenied);
+        return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+            PublishDataTrackErrorCode::NotAllowed,
+            "Participant is not allowed to publish data",
+        });
+    }
+    if (!publish_data_track_sync_handler_) {
+        return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+            PublishDataTrackErrorCode::Disconnected,
+            "Participant is not attached to an active Room",
+        });
+    }
+    return publish_data_track_sync_handler_(options);
+}
+
+DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>
+LocalParticipant::PublishDataTrack(const std::string& name) {
+    DataTrackPublishOptions options;
+    options.name = name;
+    return PublishDataTrack(options);
 }
 
 void LocalParticipant::SetAttributes(const std::map<std::string, std::string>& attributes) {

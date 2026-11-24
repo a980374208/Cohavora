@@ -82,6 +82,30 @@ inline int CompareCodecName(const char* left, const char* right) {
 #endif
 }
 
+std::optional<bool> ParseTranscriptionBoolAttr(const std::string& raw) {
+    std::string lower;
+    lower.reserve(raw.size());
+    for (unsigned char ch : raw) {
+        if (!std::isspace(ch)) {
+            lower.push_back(static_cast<char>(std::tolower(ch)));
+        }
+    }
+    if (lower == "true" || lower == "1") return true;
+    if (lower == "false" || lower == "0") return false;
+    return std::nullopt;
+}
+
+std::string MakeTranscriptionSegmentMapKey(
+    const std::string& speaker_key,
+    const std::string& segment_id) {
+    std::string out;
+    out.reserve(speaker_key.size() + segment_id.size() + 1);
+    out.append(speaker_key);
+    out.push_back('\0');
+    out.append(segment_id);
+    return out;
+}
+
 telemetry::OperationOutcome TelemetryOutcome(std::exception_ptr error) {
     if (!error) return telemetry::OperationOutcome::Failure;
     try {
@@ -245,6 +269,143 @@ std::vector<webrtc::SdpVideoFormat> LocalHardwareH264Formats() {
     return formats;
 }
 
+webrtc::H264Level SoftwareH264SendLevel() {
+    const auto factory = WebRTCManager::Instance().factory();
+    if (!factory) return webrtc::H264Level::kLevel3_1;
+    const auto capabilities = factory->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO);
+    std::optional<webrtc::H264Level> minimum;
+    for (const auto& codec : capabilities.codecs) {
+        if (!codec.IsMediaCodec() || CompareCodecName(codec.name.c_str(), "h264") != 0) continue;
+        const auto projected = detail::ProjectH264Format(codec.name, codec.parameters);
+        if (!projected || !projected->valid) continue;
+        const auto level = static_cast<webrtc::H264Level>(projected->level);
+        if (!minimum || level < *minimum) minimum = level;
+    }
+    return minimum.value_or(webrtc::H264Level::kLevel3_1);
+}
+
+std::optional<webrtc::H264Level> MaxH264FormatLevel(
+        const std::vector<webrtc::SdpVideoFormat>& formats) {
+    std::optional<webrtc::H264Level> maximum;
+    for (const auto& format : formats) {
+        if (CompareCodecName(format.name.c_str(), "h264") != 0) continue;
+        const auto projected = detail::ProjectH264Format(format.name, format.parameters);
+        if (!projected || !projected->valid) continue;
+        const auto level = static_cast<webrtc::H264Level>(projected->level);
+        if (!maximum || level > *maximum) maximum = level;
+    }
+    return maximum;
+}
+
+std::optional<webrtc::H264Level> SenderH264Level(
+        const webrtc::RtpParameters& parameters,
+        const webrtc::RtpEncodingParameters& encoding) {
+    const webrtc::RtpCodec* codec = encoding.codec ? &*encoding.codec
+        : (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
+    if (!codec || CompareCodecName(codec->name.c_str(), "h264") != 0) {
+        return std::nullopt;
+    }
+    const auto projected = detail::ProjectH264Format(codec->name, codec->parameters);
+    if (!projected || !projected->valid) {
+        return std::nullopt;
+    }
+    return static_cast<webrtc::H264Level>(projected->level);
+}
+
+bool ConstrainH264LayersList(
+        std::vector<VideoLayerSetting>& layers,
+        webrtc::H264Level level) {
+    for (auto& layer : layers) {
+        if (layer.width <= 0 || layer.height <= 0 || layer.max_fps <= 0) {
+            return false;
+        }
+        const auto constrained = detail::ConstrainH264Dimensions(
+            level, layer.width, layer.height, static_cast<std::uint32_t>(layer.max_fps));
+        if (!constrained) return false;
+        layer.width = constrained->first;
+        layer.height = constrained->second;
+    }
+    return true;
+}
+
+bool ConstrainH264PublishOptions(
+        VideoPublishOptions& options,
+        webrtc::H264Level level) {
+    if (CompareCodecName(options.video_codec.c_str(), "h264") == 0) {
+        if (!ConstrainH264LayersList(options.layers, level)) return false;
+    }
+    for (auto& spec : options.simulcast_codecs) {
+        if (CompareCodecName(spec.codec.c_str(), "h264") == 0) {
+            if (!ConstrainH264LayersList(spec.layers, level)) return false;
+        }
+    }
+    return true;
+}
+
+bool H264LayersFitLevel(
+        const std::vector<VideoLayerSetting>& layers,
+        webrtc::H264Level level) {
+    for (const auto& layer : layers) {
+        if (layer.width <= 0 || layer.height <= 0 || layer.max_fps <= 0) return false;
+        if (detail::CheckH264LevelConstraints(
+                level, layer.width, layer.height,
+                static_cast<std::uint32_t>(layer.max_fps)) !=
+            detail::H264LevelConstraintStatus::Supported) {
+            return false;
+        }
+    }
+    return true;
+}
+
+struct ResolvedEncodingGeometry {
+    int width = 0;
+    int height = 0;
+    std::uint32_t framerate = 0;
+};
+
+std::optional<ResolvedEncodingGeometry> ResolveSenderEncodingGeometry(
+        const webrtc::RtpEncodingParameters& encoding,
+        const std::vector<VideoLayerSetting>& layers,
+        std::size_t index,
+        std::size_t encoding_count,
+        std::pair<int, int> source_dimensions) {
+    auto planned = layers.end();
+    if (!encoding.rid.empty()) {
+        planned = std::find_if(layers.begin(), layers.end(),
+            [&](const auto& layer) { return layer.rid == encoding.rid; });
+    }
+    if (planned == layers.end() && encoding.rid.empty() && layers.size() == encoding_count) {
+        planned = layers.begin() + index;
+    }
+    if (planned == layers.end()) return std::nullopt;
+    int width = source_dimensions.first;
+    int height = source_dimensions.second;
+    if (width <= 0 || height <= 0) return std::nullopt;
+    if (encoding.scale_resolution_down_to) {
+        auto bound = *encoding.scale_resolution_down_to;
+        if (bound.width <= 0 || bound.height <= 0) return std::nullopt;
+        if ((width < height) != (bound.width < bound.height)) {
+            std::swap(bound.width, bound.height);
+        }
+        const auto scale = std::min({
+            1.0, double(bound.width) / width, double(bound.height) / height});
+        width = static_cast<int>(std::round(width * scale));
+        height = static_cast<int>(std::round(height * scale));
+    } else {
+        const double scale = encoding.scale_resolution_down_by.value_or(
+            planned->scale_resolution_down_by);
+        if (!std::isfinite(scale) || scale < 1.0) return std::nullopt;
+        width = static_cast<int>(std::round(width / scale));
+        height = static_cast<int>(std::round(height / scale));
+    }
+    const double fps = encoding.max_framerate.value_or(planned->max_fps);
+    if (!std::isfinite(fps) || fps <= 0 || fps > std::numeric_limits<std::uint32_t>::max()) {
+        return std::nullopt;
+    }
+    return ResolvedEncodingGeometry{
+        width, height, static_cast<std::uint32_t>(std::ceil(fps))};
+}
+
 bool ExactH264Format(const webrtc::SdpVideoFormat& left,
                      const webrtc::SdpVideoFormat& right) {
     return CompareCodecName(left.name.c_str(), right.name.c_str()) == 0 &&
@@ -364,6 +525,19 @@ TrackSource TrackSourceFromProto(proto::TrackSource source) {
     case proto::TrackSource::SCREEN_SHARE: return TrackSource::ScreenShareVideo;
     case proto::TrackSource::SCREEN_SHARE_AUDIO: return TrackSource::ScreenShareAudio;
     default: return TrackSource::Unknown;
+    }
+}
+
+ParticipantKind ParticipantKindFromProto(proto::ParticipantInfo::Kind kind) {
+    switch (kind) {
+    case proto::ParticipantInfo::INGRESS: return ParticipantKind::Ingress;
+    case proto::ParticipantInfo::EGRESS: return ParticipantKind::Egress;
+    case proto::ParticipantInfo::SIP: return ParticipantKind::Sip;
+    case proto::ParticipantInfo::AGENT: return ParticipantKind::Agent;
+    case proto::ParticipantInfo::CONNECTOR: return ParticipantKind::Connector;
+    case proto::ParticipantInfo::BRIDGE: return ParticipantKind::Bridge;
+    case proto::ParticipantInfo::STANDARD:
+    default: return ParticipantKind::Standard;
     }
 }
 
@@ -664,28 +838,42 @@ private:
 class RoomDataChannelObserver : public webrtc::DataChannelObserver {
 public:
     RoomDataChannelObserver(std::shared_ptr<Room> room,
-                            bool reliable,
+                            RoomDataChannelRole role,
                             uint64_t generation,
                             webrtc::DataChannelInterface* channel)
-        : room_(room), reliable_(reliable), generation_(generation), channel_(channel) {}
+        : room_(room), role_(role), generation_(generation), channel_(channel) {}
 
     void OnStateChange() override {
         if (!channel_) return;
         const auto state = channel_->state();
         if (auto room = room_.lock()) {
             room->callback_gate_->Post(
-                [room, reliable = reliable_, state, generation = generation_,
+                [room, role = role_, state, generation = generation_,
                  channel = channel_]() {
-                    room->OnDataChannelStateChanged(
-                        reliable, state, generation, channel);
+                    if (role == RoomDataChannelRole::DataTrack) {
+                        room->OnDataTrackChannelStateChanged(state, generation, channel);
+                    } else {
+                        room->OnDataChannelStateChanged(
+                            role == RoomDataChannelRole::Reliable, state, generation, channel);
+                    }
                 });
         }
     }
 
     void OnMessage(const webrtc::DataBuffer& buffer) override {
         if (auto room = room_.lock()) {
+            if (role_ == RoomDataChannelRole::DataTrack) {
+                if (!buffer.binary) {
+                    return;
+                }
+                std::vector<uint8_t> payload(buffer.data.data(), buffer.data.data() + buffer.data.size());
+                room->callback_gate_->Post([room, payload = std::move(payload), generation = generation_]() {
+                    room->OnIncomingDataTrackPacket(payload, generation);
+                });
+                return;
+            }
             std::vector<uint8_t> payload(buffer.data.data(), buffer.data.data() + buffer.data.size());
-            room->callback_gate_->Post([room, payload, generation = generation_]() {
+            room->callback_gate_->Post([room, payload = std::move(payload), generation = generation_]() {
                 room->OnIncomingDataPacket(payload, "", "", generation);
             });
         }
@@ -693,15 +881,20 @@ public:
 
     void OnBufferedAmountChange(uint64_t previous_amount) override {
         if (auto room = room_.lock()) {
-            room->callback_gate_->Post([room, previous_amount, reliable = reliable_, generation = generation_]() {
-                room->OnDataChannelBufferedAmountLow(previous_amount, reliable, generation);
+            room->callback_gate_->Post([room, previous_amount, role = role_, generation = generation_]() {
+                if (role == RoomDataChannelRole::DataTrack) {
+                    room->OnDataTrackChannelBufferedAmountLow(generation);
+                } else {
+                    room->OnDataChannelBufferedAmountLow(
+                        previous_amount, role == RoomDataChannelRole::Reliable, generation);
+                }
             });
         }
     }
 
 private:
     std::weak_ptr<Room> room_;
-    bool reliable_;
+    RoomDataChannelRole role_;
     const uint64_t generation_;
     webrtc::DataChannelInterface* const channel_;
 };
@@ -732,11 +925,11 @@ void Room::InitializePeerConnectionCapabilities(
 }
 
 std::shared_ptr<webrtc::DataChannelObserver> Room::CreateDataChannelObserver(
-    bool reliable,
+    RoomDataChannelRole role,
     uint64_t generation,
     webrtc::DataChannelInterface* channel) {
     return std::make_shared<RoomDataChannelObserver>(
-        shared_from_this(), reliable, generation, channel);
+        shared_from_this(), role, generation, channel);
 }
 
 void Room::PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
@@ -1267,6 +1460,7 @@ std::optional<RemoteMediaRecoveryRequest> Room::remote_media_recovery_request() 
 ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
     ControlApplyResult result;
     std::array<bool, 4> subscription_changes{};
+    std::vector<std::pair<std::shared_ptr<RemoteTrackPublication>, uint64_t>> detach;
     result.coordinator_session = plan.coordinator_session;
     result.native_room_generation = plan.native_room_generation;
     result.catalog_revision = plan.catalog_revision;
@@ -1555,8 +1749,63 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
                     intent, enabled, quality, width, height, max_fps, priority);
                 if (!subscription_changed && !settings_changed) continue;
 
+                const auto existing_pending = pending_subscription_updates_.find(key);
+                const bool subscribe_in_flight =
+                    existing_pending != pending_subscription_updates_.end() &&
+                    existing_pending->second.in_flight &&
+                    existing_pending->second.subscribed;
+                const bool server_may_be_subscribed =
+                    intent.sent_subscribed.value_or(session_auto_subscribe_) ||
+                    subscribe_in_flight;
+                const auto retire_unsubscribed_binding = [&]() {
+                    if (publication->track()) {
+                        SetRemoteMediaExpected(
+                            session_telemetry_.lock(), publication->track()->kind(),
+                            key.participant_sid, publication->sid(), false,
+                            telemetry::MediaExpectationReason::Unsubscribed);
+                    }
+                    const auto binding =
+                        current_remote_binding_serials_.find(publication.get());
+                    if (binding != current_remote_binding_serials_.end()) {
+                        if (const auto media =
+                                FindMediaBindingLocked(binding->second)) {
+                            media->active.store(false, std::memory_order_release);
+                        }
+                        detach.push_back({publication, binding->second});
+                    }
+                };
+                if (!selected && !server_may_be_subscribed) {
+                    CancelPendingSubscriptionUpdateLocked(key);
+                    intent.subscribed = false;
+                    intent.enabled = false;
+                    intent.quality = proto::VideoQuality::OFF;
+                    intent.width = 0;
+                    intent.height = 0;
+                    intent.max_fps = 0;
+                    intent.priority = 0;
+                    intent.revision = next_subscription_revision_++;
+                    intent.policy_revision = plan.policy_revision;
+                    intent.subscription_dirty = false;
+                    intent.settings_dirty = false;
+                    intent.accepted_at = {};
+
+                    RemotePublicationControlRequest control;
+                    control.sequence = 0;
+                    control.kind = RemotePublicationControlRequest::Kind::Subscription;
+                    control.subscribed = false;
+                    control.enabled = false;
+                    control.quality = proto::VideoQuality::OFF;
+                    control.width = 0;
+                    control.height = 0;
+                    control.priority = 0;
+                    publication->CommitControl(control);
+                    retire_unsubscribed_binding();
+                    continue;
+                }
+
                 const bool subscription_dirty =
                     subscription_changed || intent.subscription_dirty ||
+                    subscribe_in_flight ||
                     !intent.sent_subscribed.has_value() ||
                     *intent.sent_subscribed != selected;
                 const bool settings_dirty = is_video &&
@@ -1608,6 +1857,9 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
                     ClearTrackSubscriptionErrorLocked(
                         remote_participants_.at(key.participant_sid), publication);
                 }
+                if (!selected) {
+                    retire_unsubscribed_binding();
+                }
 
             }
         }
@@ -1618,6 +1870,11 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
             reconnect_active_;
         result.pending_send = !pending_subscription_updates_.empty();
         ScheduleSubscriptionDrainLocked();
+    }
+
+    for (const auto& [publication, binding] : detach) {
+        DetachRemotePublicationMedia(
+            publication.get(), /*notify_listener=*/true, binding);
     }
 
     if (result.accepted) {
@@ -1955,6 +2212,8 @@ void Room::RetireAllMembershipsLocked(std::deque<QueuedParticipantEvent>& retire
     }
     participant_memberships_.clear();
     track_memberships_.clear();
+    active_transcription_segments_.clear();
+    active_transcription_streams_.clear();
     // The caller supplies an empty local queue and releases its payloads after
     // the Room transaction. Keep the scheduled flag: a posted/running drainer
     // still owns dispatch, including any successor events added before it ends.
@@ -2023,6 +2282,14 @@ void Room::EnqueueRosterLocked() {
             available.media_binding_key = media_binding->key;
             available.media_binding_ticket = media_binding;
             EnqueueParticipantEventLocked(std::move(available));
+        }
+        for (const auto& [dt_sid, dt] : participant->data_tracks()) {
+            if (!dt) continue;
+            auto dt_evt = MakeParticipantEventLocked(
+                ParticipantEventKind::DataTrackPublished, participant, false);
+            dt_evt.data_track = dt;
+            dt_evt.data_track_sid = dt_sid;
+            EnqueueParticipantEventLocked(std::move(dt_evt));
         }
     }
 }
@@ -2133,6 +2400,56 @@ SenderContext Room::ResolveSenderContextLocked(
     return sender;
 }
 
+std::pair<std::shared_ptr<Participant>, std::shared_ptr<TrackPublication>>
+Room::ResolveTranscriptionTargetLocked(
+    const std::string& track_sid,
+    const std::string& participant_identity) const {
+    auto find_in_participant = [&](const std::shared_ptr<Participant>& p)
+        -> std::pair<std::shared_ptr<Participant>, std::shared_ptr<TrackPublication>> {
+        if (!p) return {nullptr, nullptr};
+        if (!track_sid.empty()) {
+            if (auto pub = p->get_publication(track_sid)) {
+                return {p, std::move(pub)};
+            }
+        }
+        return {nullptr, nullptr};
+    };
+
+    if (!track_sid.empty()) {
+        if (auto match = find_in_participant(local_participant_); match.first) {
+            return match;
+        }
+        for (const auto& [sid, candidate] : remote_participants_) {
+            (void)sid;
+            if (auto match = find_in_participant(candidate); match.first) {
+                return match;
+            }
+        }
+    }
+
+    if (!participant_identity.empty()) {
+        std::shared_ptr<Participant> matched_participant;
+        if (local_participant_ && local_participant_->identity() == participant_identity) {
+            matched_participant = local_participant_;
+        } else {
+            for (const auto& [sid, candidate] : remote_participants_) {
+                (void)sid;
+                if (candidate && candidate->identity() == participant_identity) {
+                    matched_participant = candidate;
+                    break;
+                }
+            }
+        }
+        if (matched_participant) {
+            std::shared_ptr<TrackPublication> matched_pub =
+                track_sid.empty() ? nullptr : matched_participant->get_publication(track_sid);
+            return {std::move(matched_participant), std::move(matched_pub)};
+        }
+    }
+
+    return {nullptr, nullptr};
+}
+
 asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& token, const SignalOptions& opts) {
     try {
         co_await ConnectAsync(url, token, opts);
@@ -2241,6 +2558,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             co_await instrumentation_hooks->before_join_commit(generation);
         }
 
+        DataTrackCleanupBatch cross_room_cleanup;
         {
             std::lock_guard lock(room_mutex_);
             if (generation != session_generation_.load(std::memory_order_acquire) ||
@@ -2261,11 +2579,36 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         const std::string joined_room_sid = join_res->has_room()
             ? join_res->room().sid()
             : std::string{};
-        if (restart_connect && subscription_room_sid_ != joined_room_sid) {
-            ResetSubscriptionSessionLocked(attempt_options.auto_subscribe);
-            // This Connect is still owned by the active recovery transaction.
-            // Default/new-room intents must wait for its final commit.
-            subscription_recovery_barrier_ = true;
+        if (restart_connect) {
+            const bool room_changed = (subscription_room_sid_ != joined_room_sid);
+            if (room_changed) {
+                ResetSubscriptionSessionLocked(attempt_options.auto_subscribe);
+                // This Connect is still owned by the active recovery transaction.
+                // Default/new-room intents must wait for its final commit.
+                subscription_recovery_barrier_ = true;
+                // Reconnect records belong to the previous room only; discard cleanly
+                // after releasing room_mutex_.
+                TakeDataTrackCleanupLocked(/*clear_reconnect_records=*/true, cross_room_cleanup);
+            } else {
+                session_auto_subscribe_ = attempt_options.auto_subscribe;
+                subscription_recovery_barrier_ = true;
+                for (auto& [key, intent] : subscription_intents_) {
+                    intent.sent_subscribed = session_auto_subscribe_;
+                    intent.subscription_dirty =
+                        (intent.subscribed != session_auto_subscribe_);
+                    if (!intent.subscribed) {
+                        intent.settings_dirty = false;
+                        intent.accepted_at = {};
+                    } else {
+                        intent.accepted_at = connect_accepted_at;
+                    }
+                    if (!intent.subscription_dirty && !intent.settings_dirty) {
+                        CancelPendingSubscriptionUpdateLocked(key);
+                    } else {
+                        QueueSubscriptionUpdateLocked(key);
+                    }
+                }
+            }
         }
         subscription_room_sid_ = joined_room_sid;
         if (join_res->has_room()) {
@@ -2304,6 +2647,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         local_participant_->set_permission(local_permission);
         local_participant_->set_name(join_res->participant().name());
         local_participant_->set_metadata(join_res->participant().metadata());
+        local_participant_->set_kind(ParticipantKindFromProto(join_res->participant().kind()));
         local_participant_->set_attributes(std::map<std::string, std::string>(
             join_res->participant().attributes().begin(),
             join_res->participant().attributes().end()));
@@ -2333,6 +2677,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         );
 
         BindLocalUnpublishHandler();
+        BindLocalDataTrackHandlersLocked(generation);
 
         // 绑定 LocalParticipant 发送 RPC 请求 Handler
         local_participant_->SetSendRpcHandler(
@@ -2341,6 +2686,11 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             }
         );
         }
+
+        FinalizeDataTrackCleanup(
+            std::move(cross_room_cleanup),
+            OperationErrorCode::Cancelled,
+            "reconnect switched room");
 
         if (attempt_options.create_webrtc_pc) {
             // Pin configuration while native creation runs outside room_mutex_.
@@ -2356,9 +2706,11 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
                 webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable;
                 webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy;
+                webrtc::scoped_refptr<webrtc::DataChannelInterface> data_track;
                 ~NativeAttempt() {
                     if (reliable) { reliable->UnregisterObserver(); reliable->Close(); }
                     if (lossy) { lossy->UnregisterObserver(); lossy->Close(); }
+                    if (data_track) { data_track->UnregisterObserver(); data_track->Close(); }
                     if (publisher) publisher->Close();
                     if (subscriber && subscriber != publisher) subscriber->Close();
                 }
@@ -2430,7 +2782,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                     native.reliable = native.publisher->CreateDataChannel("_reliable", &rel_init);
                     if (native.reliable) {
                         auto obs = CreateDataChannelObserver(
-                            true, generation, native.reliable.get());
+                            RoomDataChannelRole::Reliable, generation, native.reliable.get());
                         native.reliable->RegisterObserver(obs.get());
                         native.dc_observers.push_back(obs);
                     }
@@ -2441,8 +2793,19 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                     native.lossy = native.publisher->CreateDataChannel("_lossy", &lossy_init);
                     if (native.lossy) {
                         auto obs = CreateDataChannelObserver(
-                            false, generation, native.lossy.get());
+                            RoomDataChannelRole::Lossy, generation, native.lossy.get());
                         native.lossy->RegisterObserver(obs.get());
+                        native.dc_observers.push_back(obs);
+                    }
+
+                    webrtc::DataChannelInit dt_init;
+                    dt_init.ordered = false;
+                    dt_init.maxRetransmits = 0;
+                    native.data_track = native.publisher->CreateDataChannel("_data_track", &dt_init);
+                    if (native.data_track) {
+                        auto obs = CreateDataChannelObserver(
+                            RoomDataChannelRole::DataTrack, generation, native.data_track.get());
+                        native.data_track->RegisterObserver(obs.get());
                         native.dc_observers.push_back(obs);
                     }
                 } else {
@@ -2489,9 +2852,16 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             native_e2ee_policy_ = std::move(native.encryption_policy);
             reliable_dc_ = std::move(native.reliable);
             lossy_dc_ = std::move(native.lossy);
+            data_track_dc_ = std::move(native.data_track);
             data_channel_observers_.insert(data_channel_observers_.end(),
                 native.dc_observers.begin(), native.dc_observers.end());
-            primary_pc_type_ = attempt_signal->is_single_pc_mode_active()
+            const bool data_publish_only_pc =
+                join_res->participant().has_permission() &&
+                join_res->participant().permission().can_publish_data() &&
+                !join_res->participant().permission().can_subscribe();
+            primary_pc_type_ = (attempt_signal->is_single_pc_mode_active() ||
+                                data_publish_only_pc ||
+                                attempt_options.eager_publish_data_channel)
                 ? 0 : (join_res->subscriber_primary() ? 1 : 0);
         }
 
@@ -2513,11 +2883,18 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
 
         // JoinResponse determines which transport must be established eagerly.
         // subscriber-primary is lazy unless the server explicitly requests
-        // fast_publish; single-PC always needs its sole transport negotiated.
+        // fast_publish, the caller requests eager_publish_data_channel, or the
+        // grant is data-publish-only (e.g. an Agent transcription publisher).
+        const bool data_publish_only =
+            join_res->participant().has_permission() &&
+            join_res->participant().permission().can_publish_data() &&
+            !join_res->participant().permission().can_subscribe();
         if (attempt_options.create_webrtc_pc &&
             (attempt_signal->is_single_pc_mode_active() ||
              !join_res->subscriber_primary() ||
-             join_res->fast_publish())) {
+             join_res->fast_publish() ||
+             attempt_options.eager_publish_data_channel ||
+             data_publish_only)) {
             co_await NegotiatePublisherAsync(attempt_options.timeouts.negotiation, generation);
         }
     }
@@ -2550,6 +2927,35 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         delivery.required_state = ConnectionState::Connected;
         delivery.listeners = GetListenersSnapshot();
         DeliverLifecycleListenerEvent(std::move(delivery));
+    }
+
+    // Deliver initially discovered remote data tracks from JoinResponse after OnConnected.
+    {
+        std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<RemoteDataTrack>>>
+            initial_data_tracks;
+        std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (IsNativeGenerationCurrentLocked(generation) &&
+                connection_state_ == ConnectionState::Connected) {
+                listeners_snapshot = listeners_;
+                for (const auto& [sid, participant] : remote_participants_) {
+                    (void)sid;
+                    if (!participant) continue;
+                    for (const auto& [dt_sid, dt] : participant->data_tracks()) {
+                        (void)dt_sid;
+                        if (dt) initial_data_tracks.emplace_back(participant, dt);
+                    }
+                }
+            }
+        }
+        for (const auto& [p, dt] : initial_data_tracks) {
+            for (const auto& listener : listeners_snapshot) {
+                DeliverListener({generation}, listener, [&](RoomListener& target) {
+                    target.OnDataTrackPublished(p, dt);
+                }, true);
+            }
+        }
     }
 
     // The Room is externally connected before any delta accumulated during the
@@ -2609,6 +3015,10 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 if (lossy_dc_) {
                     data_channels.push_back(lossy_dc_);
                     lossy_dc_ = nullptr;
+                }
+                if (data_track_dc_) {
+                    data_channels.push_back(data_track_dc_);
+                    data_track_dc_ = nullptr;
                 }
                 for (auto& dc : remote_data_channels_) {
                     if (dc) data_channels.push_back(dc);
@@ -2717,6 +3127,10 @@ void Room::Disconnect() {
         if (lossy_dc_) {
             data_channels.push_back(lossy_dc_);
             lossy_dc_ = nullptr;
+        }
+        if (data_track_dc_) {
+            data_channels.push_back(data_track_dc_);
+            data_track_dc_ = nullptr;
         }
         for (auto& dc : remote_data_channels_) {
             if (dc) data_channels.push_back(dc);
@@ -2853,6 +3267,10 @@ asio::awaitable<void> Room::DisconnectAsync() {
         if (lossy_dc_) {
             data_channels.push_back(lossy_dc_);
             lossy_dc_ = nullptr;
+        }
+        if (data_track_dc_) {
+            data_channels.push_back(data_track_dc_);
+            data_track_dc_ = nullptr;
         }
         for (auto& dc : remote_data_channels_) {
             if (dc) data_channels.push_back(dc);
@@ -3045,6 +3463,10 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         if (lossy_dc_) {
             data_channels.push_back(lossy_dc_);
             lossy_dc_ = nullptr;
+        }
+        if (data_track_dc_) {
+            data_channels.push_back(data_track_dc_);
+            data_track_dc_ = nullptr;
         }
         for (auto& dc : remote_data_channels_) {
             if (dc) data_channels.push_back(dc);
@@ -3869,6 +4291,16 @@ void Room::RetireIncomingReaderLocked(const std::string& stream_id,
         it->second.reader->OnStreamError(reason);
         active_byte_readers_.erase(it);
     }
+    if (auto ts_it = active_transcription_streams_.find(stream_id);
+        ts_it != active_transcription_streams_.end()) {
+        const std::string seg_key = ts_it->second.segment_map_key;
+        active_transcription_streams_.erase(ts_it);
+        if (auto seg_it = active_transcription_segments_.find(seg_key);
+            seg_it != active_transcription_segments_.end() &&
+            seg_it->second.last_stream_id == stream_id) {
+            active_transcription_segments_.erase(seg_it);
+        }
+    }
     incoming_stream_deadlines_.erase(stream_id);
 }
 
@@ -3894,6 +4326,17 @@ size_t Room::RetireIncomingReadersForParticipantLocked(
     for (const auto& stream_id : stream_ids) {
         RetireIncomingReaderLocked(stream_id, reason);
         incoming_data_streams_->Discard(stream_id);
+    }
+    const std::string p_sid = participant ? participant->sid() : std::string{};
+    const std::string p_identity = participant ? participant->identity() : std::string{};
+    for (auto it = active_transcription_segments_.begin();
+         it != active_transcription_segments_.end();) {
+        if ((!p_sid.empty() && it->second.speaker_key == p_sid) ||
+            (!p_identity.empty() && it->second.speaker_identity == p_identity)) {
+            it = active_transcription_segments_.erase(it);
+        } else {
+            ++it;
+        }
     }
     return stream_ids.size();
 }
@@ -4198,6 +4641,108 @@ void Room::OnIncomingDataPacketAt(
                         !text_reader->is_closed()) {
                         active_text_readers_[header.stream_id()] = {
                             text_reader, encryption_type, sender, stream_rpc, receive_policy, receive_policy_revision};
+                        if (!reserved_rpc && header.topic() == "lk.transcription") {
+                            const auto findAttr = [&](const char* key) -> std::string {
+                                const auto it = header.attributes().find(key);
+                                return (it != header.attributes().end()) ? it->second : std::string{};
+                            };
+                            std::string seg_id = findAttr("lk.segment_id");
+                            if (seg_id.empty()) {
+                                seg_id = header.stream_id();
+                            }
+                            const std::string track_sid = findAttr("lk.transcribed_track_id");
+                            std::string lang = findAttr("lk.language");
+                            if (lang.empty()) {
+                                lang = findAttr("language");
+                            }
+                            const std::string source_text = findAttr("cohavora.source_text");
+                            const std::string source_language = findAttr("cohavora.source_language");
+                            const auto explicit_translated = ParseTranscriptionBoolAttr(findAttr("cohavora.translated"));
+                            const bool is_translated = explicit_translated.value_or(!source_text.empty());
+                            std::string fallback_identity = findAttr("lk.participant_identity");
+                            if (fallback_identity.empty()) {
+                                fallback_identity = sender_identity;
+                            }
+                            auto [tr_participant, tr_pub] = ResolveTranscriptionTargetLocked(track_sid, fallback_identity);
+                            (void)tr_pub;
+                            const std::string speaker_identity = tr_participant
+                                ? tr_participant->identity()
+                                : (!fallback_identity.empty() ? fallback_identity : sender_identity);
+                            std::string speaker_key = (tr_participant && !tr_participant->sid().empty())
+                                ? tr_participant->sid()
+                                : speaker_identity;
+                            if (speaker_key.empty()) {
+                                speaker_key = header.stream_id();
+                            }
+
+                            for (auto seg_it = active_transcription_segments_.begin();
+                                 seg_it != active_transcription_segments_.end();) {
+                                if (seg_it->second.speaker_key == speaker_key &&
+                                    seg_it->second.segment_id != seg_id) {
+                                    seg_it = active_transcription_segments_.erase(seg_it);
+                                } else {
+                                    ++seg_it;
+                                }
+                            }
+                            while (active_transcription_segments_.size() >= kMaxActiveTranscriptionSegments) {
+                                auto oldest = std::min_element(
+                                    active_transcription_segments_.begin(),
+                                    active_transcription_segments_.end(),
+                                    [](const auto& a, const auto& b) {
+                                        return a.second.first_received_time_ms < b.second.first_received_time_ms;
+                                    });
+                                if (oldest == active_transcription_segments_.end()) break;
+                                active_transcription_segments_.erase(oldest);
+                            }
+
+                            const std::string map_key = MakeTranscriptionSegmentMapKey(speaker_key, seg_id);
+                            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+                            const auto explicit_final = ParseTranscriptionBoolAttr(findAttr("lk.transcription_final"));
+                            auto& seg_entry = active_transcription_segments_[map_key];
+                            if (seg_entry.segment_id.empty()) {
+                                seg_entry.map_key = map_key;
+                                seg_entry.speaker_key = speaker_key;
+                                seg_entry.speaker_identity = speaker_identity;
+                                seg_entry.segment_id = seg_id;
+                                seg_entry.last_stream_id = header.stream_id();
+                                seg_entry.track_sid = track_sid;
+                                seg_entry.language = lang;
+                                seg_entry.source_text = source_text;
+                                seg_entry.source_language = source_language;
+                                seg_entry.is_translated = is_translated;
+                                seg_entry.generated = header.text_header().generated();
+                                seg_entry.first_received_time_ms = now_ms;
+                                seg_entry.last_received_time_ms = now_ms;
+                            } else {
+                                if (seg_entry.last_stream_id != header.stream_id()) {
+                                    if (!seg_entry.last_stream_id.empty()) {
+                                        active_transcription_streams_.erase(seg_entry.last_stream_id);
+                                    }
+                                    seg_entry.last_stream_id = header.stream_id();
+                                    seg_entry.pending_replace = true;
+                                }
+                                if (!track_sid.empty()) seg_entry.track_sid = track_sid;
+                                if (!lang.empty()) seg_entry.language = lang;
+                                if (!source_text.empty()) seg_entry.source_text = source_text;
+                                if (!source_language.empty()) seg_entry.source_language = source_language;
+                                if (is_translated) seg_entry.is_translated = true;
+                                if (header.text_header().generated()) seg_entry.generated = true;
+                                seg_entry.last_received_time_ms = now_ms;
+                            }
+                            if (explicit_final.has_value()) {
+                                seg_entry.has_explicit_final = true;
+                                seg_entry.explicit_final_value = *explicit_final;
+                            }
+                            active_transcription_streams_[header.stream_id()] = {
+                                map_key,
+                                speaker_identity,
+                                sender_identity,
+                                track_sid,
+                                sender,
+                                seg_entry.generated
+                            };
+                        }
                         if (reserved_rpc) rpc_ack_context = {receive_policy, local_participant_, receive_policy_revision};
                         incoming_stream_deadlines_[header.stream_id()] =
                             now + incoming_reader_budget_->limits()
@@ -4322,6 +4867,10 @@ void Room::OnIncomingDataPacketAt(
             const auto& content = chunk.content();
 
             std::optional<AssembledDataStream> assembled;
+            std::optional<TranscriptionEvent> chunk_transcription_ev;
+            std::shared_ptr<Participant> chunk_transcription_participant;
+            std::shared_ptr<TrackPublication> chunk_transcription_pub;
+            std::vector<std::shared_ptr<RoomListener>> chunk_transcription_listeners;
             {
                 std::lock_guard lk(room_mutex_);
                 if (!can_commit()) return;
@@ -4410,6 +4959,77 @@ void Room::OnIncomingDataPacketAt(
                     incoming_stream_deadlines_[chunk.stream_id()] =
                         now + incoming_reader_budget_->limits().stream_ttl;
                     ScheduleIncomingStreamCleanupLocked(generation);
+
+                    if (!content.empty()) {
+                        if (auto ts_it = active_transcription_streams_.find(chunk.stream_id());
+                            ts_it != active_transcription_streams_.end()) {
+                            if (auto seg_it = active_transcription_segments_.find(ts_it->second.segment_map_key);
+                                seg_it != active_transcription_segments_.end()) {
+                                auto& seg_entry = seg_it->second;
+                                if (seg_entry.pending_replace) {
+                                    seg_entry.text = content;
+                                    seg_entry.pending_replace = false;
+                                } else {
+                                    seg_entry.text.append(content);
+                                }
+                                const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count();
+                                seg_entry.last_received_time_ms = now_ms;
+
+                                TranscriptionEvent tr_ev;
+                                tr_ev.sender_identity = ts_it->second.sender_identity;
+                                tr_ev.transcribed_participant_identity = seg_entry.speaker_identity;
+                                tr_ev.track_sid = seg_entry.track_sid;
+                                tr_ev.generated = seg_entry.generated;
+                                TranscriptionSegment seg_dto;
+                                seg_dto.id = seg_entry.segment_id;
+                                seg_dto.text = seg_entry.text;
+                                seg_dto.source_text = seg_entry.source_text;
+                                seg_dto.source_language = seg_entry.source_language;
+                                seg_dto.is_translated = seg_entry.is_translated;
+                                seg_dto.is_final = seg_entry.has_explicit_final && seg_entry.explicit_final_value;
+                                seg_dto.language = seg_entry.language;
+                                seg_dto.first_received_time_ms = seg_entry.first_received_time_ms;
+                                seg_dto.last_received_time_ms = seg_entry.last_received_time_ms;
+                                tr_ev.segments.push_back(std::move(seg_dto));
+
+                                if (tr_ev.segments.front().is_final) {
+                                    seg_entry.emitted_final = true;
+                                    seg_entry.emitted_final_text = seg_entry.text;
+                                }
+
+                                std::tie(chunk_transcription_participant, chunk_transcription_pub) =
+                                    ResolveTranscriptionTargetLocked(seg_entry.track_sid, seg_entry.speaker_identity);
+                                ParticipantEvent p_ev = chunk_transcription_participant
+                                    ? MakeParticipantEventLocked(
+                                        ParticipantEventKind::TranscriptionReceived,
+                                        chunk_transcription_participant,
+                                        chunk_transcription_participant.get() == local_participant_.get())
+                                    : ParticipantEvent{};
+                                p_ev.kind = ParticipantEventKind::TranscriptionReceived;
+                                p_ev.sender = packet_sender;
+                                p_ev.transcription = tr_ev;
+                                EnqueueParticipantEventLocked(
+                                    std::move(p_ev), receive_policy, receive_policy_revision);
+                                chunk_transcription_ev = std::move(tr_ev);
+                                chunk_transcription_listeners = listeners_;
+                            }
+                        }
+                    }
+                }
+            }
+            if (chunk_transcription_ev) {
+                for (const auto& listener : chunk_transcription_listeners) {
+                    DeliverListener(
+                        {generation, {}, true, false, receive_policy, {}, receive_policy_revision},
+                        listener,
+                        [&](RoomListener& target) {
+                            target.OnTranscriptionReceived(
+                                *chunk_transcription_ev,
+                                chunk_transcription_participant,
+                                chunk_transcription_pub);
+                        },
+                        true);
                 }
             }
             if (!assembled) {
@@ -4425,6 +5045,10 @@ void Room::OnIncomingDataPacketAt(
             std::optional<RpcPacket> completed_rpc;
 
             std::optional<AssembledDataStream> assembled;
+            std::optional<TranscriptionEvent> trailer_transcription_ev;
+            std::shared_ptr<Participant> trailer_transcription_participant;
+            std::shared_ptr<TrackPublication> trailer_transcription_pub;
+            std::vector<std::shared_ptr<RoomListener>> trailer_transcription_listeners;
             {
                 std::lock_guard lk(room_mutex_);
                 if (!can_commit()) return;
@@ -4497,8 +5121,89 @@ void Room::OnIncomingDataPacketAt(
                     }
                     active_byte_readers_.erase(bytes);
                 }
+                if (auto ts_it = active_transcription_streams_.find(trailer.stream_id());
+                    ts_it != active_transcription_streams_.end()) {
+                    const std::string seg_key = ts_it->second.segment_map_key;
+                    const std::string sender_id = ts_it->second.sender_identity;
+                    active_transcription_streams_.erase(ts_it);
+
+                    if (auto seg_it = active_transcription_segments_.find(seg_key);
+                        seg_it != active_transcription_segments_.end()) {
+                        auto& seg_entry = seg_it->second;
+                        std::optional<bool> trailer_final;
+                        if (auto tf = attrs.find("lk.transcription_final"); tf != attrs.end()) {
+                            trailer_final = ParseTranscriptionBoolAttr(tf->second);
+                        }
+                        if (auto tl = attrs.find("lk.language"); tl != attrs.end() && !tl->second.empty()) {
+                            seg_entry.language = tl->second;
+                        } else if (auto tl2 = attrs.find("language"); tl2 != attrs.end() && !tl2->second.empty()) {
+                            seg_entry.language = tl2->second;
+                        }
+                        const bool is_normal_close = trailer.reason().empty() && !incomplete_normal_stream;
+                        const bool is_final = trailer_final.has_value()
+                            ? *trailer_final
+                            : (seg_entry.has_explicit_final ? seg_entry.explicit_final_value : is_normal_close);
+                        if (is_normal_close && is_final && !seg_entry.text.empty() &&
+                            (!seg_entry.emitted_final || seg_entry.emitted_final_text != seg_entry.text)) {
+                            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+                            seg_entry.last_received_time_ms = now_ms;
+                            TranscriptionEvent tr_ev;
+                            tr_ev.sender_identity = sender_id;
+                            tr_ev.transcribed_participant_identity = seg_entry.speaker_identity;
+                            tr_ev.track_sid = seg_entry.track_sid;
+                            tr_ev.generated = seg_entry.generated;
+                            TranscriptionSegment seg_dto;
+                            seg_dto.id = seg_entry.segment_id;
+                            seg_dto.text = seg_entry.text;
+                            seg_dto.source_text = seg_entry.source_text;
+                            seg_dto.source_language = seg_entry.source_language;
+                            seg_dto.is_translated = seg_entry.is_translated;
+                            seg_dto.is_final = true;
+                            seg_dto.language = seg_entry.language;
+                            seg_dto.first_received_time_ms = seg_entry.first_received_time_ms;
+                            seg_dto.last_received_time_ms = seg_entry.last_received_time_ms;
+                            tr_ev.segments.push_back(std::move(seg_dto));
+
+                            std::tie(trailer_transcription_participant, trailer_transcription_pub) =
+                                ResolveTranscriptionTargetLocked(seg_entry.track_sid, seg_entry.speaker_identity);
+                            ParticipantEvent p_ev = trailer_transcription_participant
+                                ? MakeParticipantEventLocked(
+                                    ParticipantEventKind::TranscriptionReceived,
+                                    trailer_transcription_participant,
+                                    trailer_transcription_participant.get() == local_participant_.get())
+                                : ParticipantEvent{};
+                            p_ev.kind = ParticipantEventKind::TranscriptionReceived;
+                            p_ev.sender = packet_sender;
+                            p_ev.transcription = tr_ev;
+                            EnqueueParticipantEventLocked(
+                                std::move(p_ev), receive_policy, receive_policy_revision);
+                            trailer_transcription_ev = std::move(tr_ev);
+                            trailer_transcription_listeners = listeners_;
+                        }
+                        if (!is_normal_close || is_final) {
+                            if (seg_entry.last_stream_id == trailer.stream_id()) {
+                                active_transcription_segments_.erase(seg_it);
+                            }
+                        }
+                    }
+                }
                 incoming_stream_deadlines_.erase(trailer.stream_id());
                 ScheduleIncomingStreamCleanupLocked(generation);
+            }
+            if (trailer_transcription_ev) {
+                for (const auto& listener : trailer_transcription_listeners) {
+                    DeliverListener(
+                        {generation, {}, true, false, receive_policy, {}, receive_policy_revision},
+                        listener,
+                        [&](RoomListener& target) {
+                            target.OnTranscriptionReceived(
+                                *trailer_transcription_ev,
+                                trailer_transcription_participant,
+                                trailer_transcription_pub);
+                        },
+                        true);
+                }
             }
             if (completed_rpc) {
                 if (rpc_reader->is_closed() && !rpc_reader->is_failed()) {
@@ -4525,6 +5230,67 @@ void Room::OnIncomingDataPacketAt(
             real_payload.assign(pb_chat.message().begin(), pb_chat.message().end());
             real_topic = "lk.chat";
             is_structured_chat = true;
+        } else if (data_pkt.has_transcription()) {
+            const auto& pb_tr = data_pkt.transcription();
+            TranscriptionEvent ev;
+            ev.sender_identity = sender_identity;
+            ev.transcribed_participant_identity = pb_tr.transcribed_participant_identity();
+            ev.track_sid = pb_tr.track_id();
+            ev.generated = false;
+            ev.segments.reserve(static_cast<size_t>(pb_tr.segments_size()));
+            const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            for (const auto& s : pb_tr.segments()) {
+                TranscriptionSegment seg;
+                seg.id = s.id();
+                seg.text = s.text();
+                seg.start_time_ms = s.start_time();
+                seg.end_time_ms = s.end_time();
+                seg.is_final = s.final();
+                seg.language = s.language();
+                seg.first_received_time_ms = now_ms;
+                seg.last_received_time_ms = now_ms;
+                ev.segments.push_back(std::move(seg));
+            }
+            if (!ev.segments.empty()) {
+                std::shared_ptr<Participant> target_participant;
+                std::shared_ptr<TrackPublication> target_pub;
+                std::vector<std::shared_ptr<RoomListener>> tr_listeners_snapshot;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    if (!can_commit()) return;
+                    const std::string fallback_id = ev.transcribed_participant_identity.empty()
+                        ? sender_identity
+                        : ev.transcribed_participant_identity;
+                    std::tie(target_participant, target_pub) =
+                        ResolveTranscriptionTargetLocked(ev.track_sid, fallback_id);
+                    if (ev.transcribed_participant_identity.empty() && target_participant) {
+                        ev.transcribed_participant_identity = target_participant->identity();
+                    }
+                    ParticipantEvent p_ev = target_participant
+                        ? MakeParticipantEventLocked(
+                            ParticipantEventKind::TranscriptionReceived,
+                            target_participant,
+                            target_participant.get() == local_participant_.get())
+                        : ParticipantEvent{};
+                    p_ev.kind = ParticipantEventKind::TranscriptionReceived;
+                    p_ev.sender = packet_sender;
+                    p_ev.transcription = ev;
+                    EnqueueParticipantEventLocked(
+                        std::move(p_ev), receive_policy, receive_policy_revision);
+                    tr_listeners_snapshot = listeners_;
+                }
+                for (const auto& listener : tr_listeners_snapshot) {
+                    DeliverListener(
+                        {generation, {}, true, false, receive_policy, {}, receive_policy_revision},
+                        listener,
+                        [&](RoomListener& target) {
+                            target.OnTranscriptionReceived(ev, target_participant, target_pub);
+                        },
+                        true);
+                }
+            }
+            return;
         }
     }
 
@@ -4852,6 +5618,7 @@ Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
         pending.void_states.push_back(waiter.completion);
     }
     pending_reliable_dc_waits_.clear();
+    TakeDataTrackCleanupLocked(!reconnect_active_, pending.data_tracks);
     pending.void_states.insert(pending.void_states.end(),
                                negotiation_waiters_.begin(),
                                negotiation_waiters_.end());
@@ -4890,6 +5657,7 @@ void Room::FailPendingOperations(PendingOperationCleanup pending,
         FailAwaitable(state, std::make_exception_ptr(OperationError(
             OperationKind::PublishTrack, code, stage, message, true)));
     }
+    FinalizeDataTrackCleanup(std::move(pending.data_tracks), code, message);
 }
 
 void Room::CancelPendingOperations(OperationErrorCode code,
@@ -4934,8 +5702,14 @@ void Room::OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterfac
 
 void Room::OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel, uint64_t generation) {
     if (!data_channel) return;
-    bool reliable = (data_channel->label() == "_reliable" || data_channel->label() == "reliable");
-    auto obs = CreateDataChannelObserver(reliable, generation, data_channel.get());
+    const std::string label = data_channel->label();
+    RoomDataChannelRole role = RoomDataChannelRole::Lossy;
+    if (label == "_reliable" || label == "reliable") {
+        role = RoomDataChannelRole::Reliable;
+    } else if (label == "_data_track") {
+        role = RoomDataChannelRole::DataTrack;
+    }
+    auto obs = CreateDataChannelObserver(role, generation, data_channel.get());
     // Until the commit below, registration belongs solely to this callback.
     data_channel->RegisterObserver(obs.get());
     BeforeNativeEventCommit(generation);
@@ -5402,9 +6176,21 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
     uint64_t logical_session,
     uint64_t sender_operation,
     std::shared_ptr<SignalClient> signal) {
-    for (;;) {
+    struct BatchItem {
         SubscriptionIntentKey key;
         PendingSubscriptionUpdate update;
+    };
+    const auto same_settings = [](const PendingSubscriptionUpdate& left,
+                                  const PendingSubscriptionUpdate& right) {
+        return left.enabled == right.enabled &&
+            left.quality == right.quality &&
+            left.width == right.width &&
+            left.height == right.height &&
+            left.max_fps == right.max_fps &&
+            left.priority == right.priority;
+    };
+    for (;;) {
+        std::vector<BatchItem> batch;
         int send_phase = 5;
         std::shared_ptr<ConnectAttemptInstrumentation> instrumentation_hooks;
         {
@@ -5436,37 +6222,52 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
                 if (candidate.subscribed && candidate.subscription_dirty) return 4;
                 return 5;
             };
-            auto pending = pending_subscription_updates_.end();
             int selected_phase = 6;
             for (auto candidate = pending_subscription_updates_.begin();
-                 candidate != pending_subscription_updates_.end(); ++candidate) {
-                const auto candidate_phase = phase(candidate->first, candidate->second);
+                 candidate != pending_subscription_updates_.end();) {
+                const auto* intent = FindSubscriptionIntentLocked(candidate->first);
+                const auto& pending_update = candidate->second;
+                if (!intent || intent->revision != pending_update.revision ||
+                    intent->subscribed != pending_update.subscribed ||
+                    intent->enabled != pending_update.enabled ||
+                    intent->quality != pending_update.quality ||
+                    intent->width != pending_update.width ||
+                    intent->height != pending_update.height ||
+                    intent->max_fps != pending_update.max_fps ||
+                    intent->priority != pending_update.priority) {
+                    FinishSubscriptionOperationLocked(
+                        pending_update, telemetry::OperationOutcome::Cancelled);
+                    candidate = pending_subscription_updates_.erase(candidate);
+                    continue;
+                }
+                const auto candidate_phase = phase(candidate->first, pending_update);
                 if (candidate_phase < selected_phase) {
                     selected_phase = candidate_phase;
-                    pending = candidate;
                 }
+                ++candidate;
             }
-            if (pending == pending_subscription_updates_.end() || selected_phase == 5) {
+            if (selected_phase >= 5) {
                 subscription_sender_active_ = false;
                 co_return;
             }
-            key = pending->first;
             send_phase = selected_phase;
-            pending->second.in_flight = true;
-            update = pending->second;
-            const auto* intent = FindSubscriptionIntentLocked(key);
-            if (!intent || intent->revision != update.revision ||
-                intent->subscribed != update.subscribed ||
-                intent->enabled != update.enabled ||
-                intent->quality != update.quality ||
-                intent->width != update.width ||
-                intent->height != update.height ||
-                intent->max_fps != update.max_fps ||
-                intent->priority != update.priority) {
-                FinishSubscriptionOperationLocked(
-                    update, telemetry::OperationOutcome::Cancelled);
-                pending_subscription_updates_.erase(pending);
-                continue;
+            const bool batch_settings =
+                send_phase == 0 || send_phase == 2 || send_phase == 3;
+            for (auto candidate = pending_subscription_updates_.begin();
+                 candidate != pending_subscription_updates_.end(); ++candidate) {
+                if (phase(candidate->first, candidate->second) != send_phase) {
+                    continue;
+                }
+                if (batch_settings && !batch.empty() &&
+                    !same_settings(batch.front().update, candidate->second)) {
+                    continue;
+                }
+                candidate->second.in_flight = true;
+                batch.push_back({candidate->first, candidate->second});
+            }
+            if (batch.empty()) {
+                subscription_sender_active_ = false;
+                co_return;
             }
             instrumentation_hooks = connect_attempt_instrumentation_;
         }
@@ -5476,25 +6277,38 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
         proto::SignalRequest request;
         if (send_settings) {
             auto* settings = request.mutable_track_setting();
-            settings->add_track_sids(key.track_sid);
-            settings->set_disabled(!update.enabled);
-            settings->set_quality(update.quality);
-            settings->set_width(update.width);
-            settings->set_height(update.height);
-            settings->set_fps(update.max_fps);
-            settings->set_priority(update.priority);
+            const auto& first = batch.front().update;
+            settings->set_disabled(!first.enabled);
+            settings->set_quality(first.quality);
+            settings->set_width(first.width);
+            settings->set_height(first.height);
+            settings->set_fps(first.max_fps);
+            settings->set_priority(first.priority);
+            for (const auto& item : batch) {
+                settings->add_track_sids(item.key.track_sid);
+            }
         } else {
             auto* subscription = request.mutable_subscription();
-            subscription->set_subscribe(update.subscribed);
-            subscription->add_track_sids(key.track_sid);
-            auto* participant_tracks = subscription->add_participant_tracks();
-            participant_tracks->set_participant_sid(key.participant_sid);
-            participant_tracks->add_track_sids(key.track_sid);
+            subscription->set_subscribe(batch.front().update.subscribed);
+            std::map<std::string, std::vector<std::string>> by_participant;
+            for (const auto& item : batch) {
+                by_participant[item.key.participant_sid].push_back(item.key.track_sid);
+            }
+            for (const auto& [participant_sid, track_sids] : by_participant) {
+                auto* participant_tracks = subscription->add_participant_tracks();
+                participant_tracks->set_participant_sid(participant_sid);
+                for (const auto& track_sid : track_sids) {
+                    subscription->add_track_sids(track_sid);
+                    participant_tracks->add_track_sids(track_sid);
+                }
+            }
         }
         try {
             if (!send_settings && instrumentation_hooks && instrumentation_hooks->before_subscription_send) {
-                co_await instrumentation_hooks->before_subscription_send(
-                    update.subscribed, update.revision);
+                for (const auto& item : batch) {
+                    co_await instrumentation_hooks->before_subscription_send(
+                        item.update.subscribed, item.update.revision);
+                }
             }
             {
                 std::lock_guard lock(room_mutex_);
@@ -5504,75 +6318,102 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
                     subscription_sender_operation_ != sender_operation ||
                     subscription_recovery_barrier_ || signal_client_ != signal ||
                     connection_state_ != ConnectionState::Connected) {
+                    if (logical_session == subscription_session_generation_) {
+                        for (const auto& item : batch) {
+                            const auto pending = pending_subscription_updates_.find(item.key);
+                            if (pending != pending_subscription_updates_.end() &&
+                                pending->second.revision == item.update.revision) {
+                                pending->second.in_flight = false;
+                            }
+                        }
+                    }
                     co_return;
+                }
+                if (!send_settings && batch.front().update.subscribed) {
+                    const auto send_started_at = std::chrono::steady_clock::now();
+                    for (const auto& item : batch) {
+                        auto intent = subscription_intents_.find(item.key);
+                        if (intent != subscription_intents_.end() &&
+                            intent->second.revision == item.update.revision &&
+                            intent->second.subscribed) {
+                            intent->second.accepted_at = send_started_at;
+                        }
+                    }
                 }
             }
             co_await signal->SendAsync(request);
             {
                 std::lock_guard lock(room_mutex_);
-                const auto pending = pending_subscription_updates_.find(key);
-                const bool current_pending =
-                    pending != pending_subscription_updates_.end() &&
-                    pending->second.revision == update.revision &&
-                    pending->second.telemetry_operation ==
-                        update.telemetry_operation;
-                if (!send_settings) {
-                    FinishSubscriptionOperationLocked(
-                        update, telemetry::OperationOutcome::Success);
-                } else if (!current_pending && update.telemetry_operation) {
-                    FinishSubscriptionOperationLocked(
-                        update, telemetry::OperationOutcome::Cancelled);
-                }
-                if (current_pending) {
-                    auto intent = subscription_intents_.find(key);
-                    if (send_settings) {
-                        pending->second.settings_dirty = false;
-                        if (intent != subscription_intents_.end() &&
-                            intent->second.revision == update.revision) {
-                            intent->second.settings_dirty = false;
-                        }
-                    } else {
-                        pending->second.subscription_dirty = false;
-                        pending->second.telemetry_operation.reset();
-                        if (intent != subscription_intents_.end() &&
-                            intent->second.revision == update.revision) {
-                            intent->second.subscription_dirty = false;
-                            intent->second.sent_subscribed = update.subscribed;
-                        }
+                for (const auto& item : batch) {
+                    const auto pending = pending_subscription_updates_.find(item.key);
+                    const bool current_pending =
+                        pending != pending_subscription_updates_.end() &&
+                        pending->second.revision == item.update.revision &&
+                        pending->second.telemetry_operation ==
+                            item.update.telemetry_operation;
+                    if (!send_settings) {
+                        FinishSubscriptionOperationLocked(
+                            item.update, telemetry::OperationOutcome::Success);
+                    } else if (!current_pending && item.update.telemetry_operation) {
+                        FinishSubscriptionOperationLocked(
+                            item.update, telemetry::OperationOutcome::Cancelled);
                     }
-                    pending->second.in_flight = false;
-                    if (!pending->second.settings_dirty &&
-                        !pending->second.subscription_dirty) {
-                        pending_subscription_updates_.erase(pending);
+                    auto intent = subscription_intents_.find(item.key);
+                    if (current_pending) {
+                        if (send_settings) {
+                            pending->second.settings_dirty = false;
+                            if (intent != subscription_intents_.end() &&
+                                intent->second.revision == item.update.revision) {
+                                intent->second.settings_dirty = false;
+                            }
+                        } else {
+                            pending->second.subscription_dirty = false;
+                            pending->second.telemetry_operation.reset();
+                            if (intent != subscription_intents_.end() &&
+                                intent->second.revision == item.update.revision) {
+                                intent->second.subscription_dirty = false;
+                                intent->second.sent_subscribed = item.update.subscribed;
+                            }
+                        }
+                        pending->second.in_flight = false;
+                        if (!pending->second.settings_dirty &&
+                            !pending->second.subscription_dirty) {
+                            pending_subscription_updates_.erase(pending);
+                        }
+                    } else if (!send_settings &&
+                               logical_session == subscription_session_generation_ &&
+                               intent != subscription_intents_.end()) {
+                        intent->second.sent_subscribed = item.update.subscribed;
                     }
                 }
             }
         } catch (...) {
+            const auto outcome = TelemetryOutcome(std::current_exception());
             std::lock_guard lock(room_mutex_);
-            if (update.telemetry_operation) {
-                FinishSubscriptionOperationLocked(
-                    update, TelemetryOutcome(std::current_exception()));
+            for (const auto& item : batch) {
+                if (item.update.telemetry_operation) {
+                    FinishSubscriptionOperationLocked(item.update, outcome);
+                }
             }
             if (logical_session == subscription_session_generation_ &&
                 subscription_sender_active_ &&
                 subscription_sender_session_ == logical_session &&
                 subscription_sender_operation_ == sender_operation &&
                 signal_client_ == signal) {
-                const auto pending = pending_subscription_updates_.find(key);
-                const bool newer_update_pending =
-                    pending != pending_subscription_updates_.end() &&
-                    (pending->second.revision != update.revision ||
-                     pending->second.telemetry_operation !=
-                         update.telemetry_operation);
-                if (!newer_update_pending) {
-                    if (pending != pending_subscription_updates_.end()) {
-                        pending_subscription_updates_.erase(pending);
-                    }
-                }
-                if (!newer_update_pending) {
-                    const auto* current = FindSubscriptionIntentLocked(key);
-                    if (current) {
-                        QueueSubscriptionUpdateLocked(key);
+                for (const auto& item : batch) {
+                    const auto pending = pending_subscription_updates_.find(item.key);
+                    const bool newer_update_pending =
+                        pending != pending_subscription_updates_.end() &&
+                        (pending->second.revision != item.update.revision ||
+                         pending->second.telemetry_operation !=
+                             item.update.telemetry_operation);
+                    if (!newer_update_pending) {
+                        if (pending != pending_subscription_updates_.end()) {
+                            pending_subscription_updates_.erase(pending);
+                        }
+                        if (FindSubscriptionIntentLocked(item.key)) {
+                            QueueSubscriptionUpdateLocked(item.key);
+                        }
                     }
                 }
                 subscription_sender_active_ = false;
@@ -5587,12 +6428,26 @@ void Room::PauseSubscriptionSendingLocked() {
     subscription_sender_active_ = false;
     subscription_sender_operation_ = next_subscription_sender_operation_++;
     for (auto& [key, intent] : subscription_intents_) {
-        intent.subscription_dirty = true;
+        const auto pending = pending_subscription_updates_.find(key);
+        const bool in_flight =
+            pending != pending_subscription_updates_.end() &&
+            pending->second.in_flight;
+        const bool server_may_differ =
+            intent.subscription_dirty ||
+            in_flight ||
+            intent.subscribed != session_auto_subscribe_ ||
+            intent.sent_subscribed.value_or(session_auto_subscribe_) != intent.subscribed;
+        if (!server_may_differ && !intent.subscribed) {
+            CancelPendingSubscriptionUpdateLocked(key);
+            intent.settings_dirty = false;
+            continue;
+        }
+        intent.subscription_dirty = server_may_differ;
         const auto participant = remote_participants_.find(key.participant_sid);
         const auto publication = participant != remote_participants_.end() &&
                 participant->second
             ? participant->second->get_publication(key.track_sid) : nullptr;
-        if (publication && publication->track() &&
+        if (intent.subscribed && publication && publication->track() &&
             publication->track()->kind() == TrackKind::Video) {
             intent.settings_dirty = true;
         }
@@ -6357,11 +7212,17 @@ Room::AddTrackToPublisherAsync(
                 const bool primary_active =
                     task.publish_options.simulcast_codecs.size() <= 1 ||
                     task.publish_options.backup_codec_policy != BackupCodecPolicy::Regression;
+                const bool h264_primary =
+                    CompareCodecName(task.publish_options.video_codec.c_str(), "h264") == 0;
                 for (const auto& layer : task.publish_options.layers) {
                     webrtc::RtpEncodingParameters encoding;
                     encoding.active = primary_active;
                     encoding.rid = layer.rid;
                     encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
+                    if (h264_primary && layer.width > 0 && layer.height > 0) {
+                        encoding.scale_resolution_down_to =
+                            webrtc::Resolution{layer.width, layer.height};
+                    }
                     encoding.max_bitrate_bps = layer.max_bitrate_bps;
                     encoding.max_framerate = layer.max_fps;
                     init.send_encodings.push_back(std::move(encoding));
@@ -6538,11 +7399,17 @@ Room::AddTrackToPublisherAsync(
                             task.publish_options.backup_codec_policy !=
                             BackupCodecPolicy::PreferRegression;
 
+                        const bool h264_backup =
+                            CompareCodecName(backup_spec.codec.c_str(), "h264") == 0;
                         for (const auto& layer : backup_spec.layers) {
                             webrtc::RtpEncodingParameters encoding;
                             encoding.active = is_active;
                             encoding.rid = layer.rid;
                             encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
+                            if (h264_backup && layer.width > 0 && layer.height > 0) {
+                                encoding.scale_resolution_down_to =
+                                    webrtc::Resolution{layer.width, layer.height};
+                            }
                             encoding.max_bitrate_bps = layer.max_bitrate_bps;
                             encoding.max_framerate = layer.max_fps;
                             backup_init.send_encodings.push_back(std::move(encoding));
@@ -6947,6 +7814,131 @@ asio::awaitable<void> Room::ApplyPublishedSenderScalabilityModesAsync(
         "apply_scalability_mode");
 }
 
+asio::awaitable<void> Room::ReconcileNegotiatedVideoSendersAsync(
+    PublishedSenderBundle bundle,
+    VideoPublishOptions options,
+    uint64_t generation,
+    std::shared_ptr<LocalVideoTrack> track) {
+    const bool may_use_h264 = CompareCodecName(options.video_codec.c_str(), "h264") == 0 ||
+        std::any_of(options.simulcast_codecs.begin(), options.simulcast_codecs.end(),
+            [](const auto& spec) { return CompareCodecName(spec.codec.c_str(), "h264") == 0; });
+    if (!may_use_h264) co_return;
+    const auto source = track ? track->source() : nullptr;
+    const auto profile = track ? track->screen_share_profile() : std::nullopt;
+    const auto source_dimensions = profile ? std::pair{profile->width, profile->height}
+        : source ? source->dimensions() : std::pair{0, 0};
+    if (source_dimensions.first <= 0 || source_dimensions.second <= 0) co_return;
+    auto admission = AdmitOperation(OperationKind::PublishTrack, "reconcile_video_level");
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    const auto gate = callback_gate_;
+    auto cancel = gate->CancelWhenClosed(
+        [weak = std::weak_ptr(completion), weak_gate = std::weak_ptr(gate)] {
+            if (auto live_gate = weak_gate.lock()) live_gate->PostCompletion([weak] {
+                if (auto pending = weak.lock()) FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                    "reconcile_video_level", "room retired before H264 level reconciliation")));
+            });
+        });
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::chrono::milliseconds timeout;
+    {
+        std::lock_guard lock(room_mutex_);
+        pc = publisher_pc_;
+        timeout = operation_timeouts_.publish;
+    }
+    auto* signaling = WebRTCManager::Instance().signaling_thread();
+    if (!pc || !signaling || signaling->IsQuitting()) {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+            "reconcile_video_level", "publisher is unavailable for H264 level reconciliation");
+    }
+    struct Task {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<void>> completion;
+        std::shared_ptr<ExecutorCallbackGate> gate;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        PublishedSenderBundle bundle;
+        VideoPublishOptions options;
+        std::pair<int, int> source_dimensions;
+        uint64_t generation;
+        ExecutorCallbackGate::Ticket ticket;
+    };
+    auto* task = new Task{shared_from_this(), completion, gate, pc, std::move(bundle),
+        std::move(options), source_dimensions, generation, std::move(admission)};
+    try {
+        signaling->PostTask([task] {
+            std::unique_ptr<Task> owned(task);
+            const auto finish = [&](std::exception_ptr error = {}) {
+                task->gate->PostCompletion([completion = task->completion, error] {
+                    if (error) FailAwaitable(completion, error);
+                    else CompleteAwaitable(completion);
+                });
+            };
+            try {
+                {
+                    std::lock_guard lock(task->completion->mutex);
+                    if (task->completion->completed) return;
+                }
+                {
+                    std::lock_guard lock(task->room->room_mutex_);
+                    if (!task->room->IsNativeGenerationCurrentLocked(task->generation) ||
+                        task->room->publisher_pc_ != task->pc) {
+                        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                            "reconcile_video_level", "session changed before H264 level reconciliation");
+                    }
+                }
+                const auto& specs = task->options.simulcast_codecs;
+                for (std::size_t sender_index = 0; sender_index < task->bundle.senders.size(); ++sender_index) {
+                    const auto& sender = task->bundle.senders[sender_index];
+                    if (!sender) continue;
+                    const auto& layers = sender_index > 0 && sender_index < specs.size()
+                        ? specs[sender_index].layers : task->options.layers;
+                    const auto& expected_codec = sender_index > 0 && sender_index < specs.size()
+                        ? specs[sender_index].codec : task->options.video_codec;
+                    if (CompareCodecName(expected_codec.c_str(), "h264") != 0) continue;
+                    auto parameters = sender->GetParameters();
+                    if (parameters.encodings.empty()) continue;
+                    bool dirty = false;
+                    for (std::size_t index = 0; index < parameters.encodings.size(); ++index) {
+                        auto& encoding = parameters.encodings[index];
+                        const auto level = SenderH264Level(parameters, encoding);
+                        if (!level) continue;
+                        const auto geometry = ResolveSenderEncodingGeometry(
+                            encoding, layers, index, parameters.encodings.size(), task->source_dimensions);
+                        if (!geometry) continue;
+                        if (detail::CheckH264LevelConstraints(
+                                *level, geometry->width, geometry->height, geometry->framerate) ==
+                            detail::H264LevelConstraintStatus::Supported) {
+                            continue;
+                        }
+                        const auto constrained = detail::ConstrainH264Dimensions(
+                            *level, geometry->width, geometry->height, geometry->framerate);
+                        if (!constrained) continue;
+                        const webrtc::Resolution target{constrained->first, constrained->second};
+                        if (!encoding.scale_resolution_down_to ||
+                            *encoding.scale_resolution_down_to != target) {
+                            encoding.scale_resolution_down_to = target;
+                            dirty = true;
+                        }
+                    }
+                    if (dirty) {
+                        (void)sender->SetParameters(parameters);
+                    }
+                }
+                finish();
+            } catch (const OperationError&) {
+                finish(std::current_exception());
+            } catch (...) {
+                finish();
+            }
+        });
+    } catch (...) {
+        delete task;
+        throw;
+    }
+    co_await WaitAwaitable<void>(completion, timeout, OperationKind::PublishTrack,
+        OperationErrorCode::TrackPublishTimeout, "reconcile_video_level");
+}
+
 asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
     PublishedSenderBundle bundle,
     VideoPublishOptions options,
@@ -7076,34 +8068,14 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
                         }
                         const auto format = detail::ProjectH264Format(codec->name, codec->parameters);
                         if (!format || !format->valid) reject(index);
-                        auto planned = layers.end();
-                        if (!encoding.rid.empty()) planned = std::find_if(layers.begin(), layers.end(),
-                            [&](const auto& layer) { return layer.rid == encoding.rid; });
-                        if (planned == layers.end() && encoding.rid.empty() && layers.size() == parameters.encodings.size())
-                            planned = layers.begin() + index;
-                        if (planned == layers.end()) reject(index);
-                        int width = task->source_dimensions.first, height = task->source_dimensions.second;
-                        if (width <= 0 || height <= 0) reject(index);
-                        if (encoding.scale_resolution_down_to) {
-                            auto bound = *encoding.scale_resolution_down_to;
-                            if (bound.width <= 0 || bound.height <= 0) reject(index);
-                            if ((width < height) != (bound.width < bound.height)) std::swap(bound.width, bound.height);
-                            const auto scale = std::min({1.0, double(bound.width) / width, double(bound.height) / height});
-                            width = static_cast<int>(std::round(width * scale));
-                            height = static_cast<int>(std::round(height * scale));
-                        } else {
-                            const double scale = encoding.scale_resolution_down_by.value_or(planned->scale_resolution_down_by);
-                            if (!std::isfinite(scale) || scale < 1.0) reject(index);
-                            width = static_cast<int>(std::round(width / scale));
-                            height = static_cast<int>(std::round(height / scale));
-                        }
-                        const double fps = encoding.max_framerate.value_or(planned->max_fps);
-                        if (!std::isfinite(fps) || fps <= 0 || fps > std::numeric_limits<std::uint32_t>::max()) reject(index);
-                        const auto framerate = static_cast<std::uint32_t>(std::ceil(fps));
+                        const auto geometry = ResolveSenderEncodingGeometry(
+                            encoding, layers, index, parameters.encodings.size(), task->source_dimensions);
+                        if (!geometry) reject(index);
                         const auto status = detail::CheckH264LevelConstraints(
-                            static_cast<webrtc::H264Level>(format->level), width, height, framerate);
+                            static_cast<webrtc::H264Level>(format->level),
+                            geometry->width, geometry->height, geometry->framerate);
                         if (status != detail::H264LevelConstraintStatus::Supported)
-                            reject(index, width, height, framerate, status, format->level);
+                            reject(index, geometry->width, geometry->height, geometry->framerate, status, format->level);
                     }
                 }
                 finish();
@@ -7132,6 +8104,36 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
     }
 }
 
+asio::awaitable<void> Room::ReconcileAndValidateVideoSendersAsync(
+    PublishedSenderBundle bundle,
+    VideoPublishOptions options,
+    uint64_t generation,
+    std::shared_ptr<LocalVideoTrack> track,
+    std::function<void()> validate_preflight) {
+    for (int attempt = 0; ; ++attempt) {
+        co_await ReconcileNegotiatedVideoSendersAsync(
+            bundle, options, generation, track);
+        if (validate_preflight) validate_preflight();
+        try {
+            co_await ValidateFinalVideoSendersAsync(
+                bundle, options, generation, track);
+            co_return;
+        } catch (const OperationError& error) {
+            if (attempt < 2 &&
+                error.code() == OperationErrorCode::Cancelled &&
+                error.retryable() &&
+                error.stage() == "validate_video_level") {
+                std::lock_guard lock(room_mutex_);
+                if (IsNativeGenerationCurrentLocked(generation) &&
+                    connection_state_ == ConnectionState::Connected) {
+                    continue;
+                }
+            }
+            throw;
+        }
+    }
+}
+
 asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPlanAsync(
     std::shared_ptr<LocalVideoTrack> track,
     ResolvedVideoPublishPlan plan,
@@ -7156,8 +8158,16 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
          || hardware.vaapi.h264
 #endif
         );
-    if (!plan.ok() || plan.effective_codec != "h264" || preference == "software" ||
+    if (!plan.ok()) {
+        co_return PreflightedVideoPublishPlan{std::move(plan), {}
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            , CreateLinuxPublicationVideoEncoderFactory("software", {})
+#endif
+            };
+    }
+    if (plan.effective_codec != "h264" || preference == "software" ||
         (!plan.effective.auto_hardware_h264 && !explicit_hardware && !hardware_available)) {
+        ConstrainH264PublishOptions(plan.effective, SoftwareH264SendLevel());
         co_return PreflightedVideoPublishPlan{std::move(plan), {}
 #if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
             , CreateLinuxPublicationVideoEncoderFactory("software", {})
@@ -7204,6 +8214,16 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
 #endif
     request.screenshare = source_type == TrackSource::ScreenShareVideo;
     request.formats = LocalHardwareH264Formats();
+    const auto local_codecs = NormalizedVideoCodecs(LocalVideoSenderCodecs());
+    const auto server_codecs = NormalizedVideoCodecs(enabled_codecs);
+    const bool vp8_allowed = local_codecs.contains("vp8") &&
+        (enabled_codecs.empty() || server_codecs.contains("vp8"));
+    if (!request.formats.empty() && (plan.requested_codec == "h264" || !vp8_allowed)) {
+        if (const auto max_hw_level = MaxH264FormatLevel(request.formats);
+            max_hw_level && !H264LayersFitLevel(plan.effective.layers, *max_hw_level)) {
+            ConstrainH264PublishOptions(plan.effective, *max_hw_level);
+        }
+    }
     for (const auto& layer : plan.effective.layers) {
         request.layers.push_back({layer.width, layer.height, layer.max_fps, layer.max_bitrate_bps});
     }
@@ -7285,9 +8305,14 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
         }
         auto current_requested = track->requested_publish_options();
         current_requested.preflight_h264_formats.clear();
+        const auto current_dims = source ? source->dimensions() : std::pair{1280, 720};
+        const bool dims_changed = profile.has_value()
+            ? (dimensions != current_dims)
+            : (current_dims.first <= 0 || current_dims.second <= 0 ||
+               (dimensions.first < dimensions.second) != (current_dims.first < current_dims.second));
         if (revision != track->publish_options_revision() || requested != current_requested ||
             source != track->source() || source_type != track->Track::source() ||
-            dimensions != (source ? source->dimensions() : std::pair{1280, 720}) ||
+            dims_changed ||
             profile != track->screen_share_profile() || preference != GetVideoEncoderPreference() ||
             encrypted != (encryption && encryption->enabled())) stale();
         if (!approved.empty()) {
@@ -7372,6 +8397,7 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
             "hardware_preflight", "video hardware preflight did not retire safely");
     }
 #endif
+    bool software_fallback = false;
     if (result.ok()) {
         try {
             for (const auto& format : result.formats) {
@@ -7384,8 +8410,25 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
         plan.effective.preflight_h264_formats = std::move(result.formats);
     } else {
         const auto [width, height] = profile ? std::pair{profile->width, profile->height} : dimensions;
+        const auto requested_snapshot = plan.requested;
         plan = LocalVideoTrack::ResolveHardwarePreflightFallback(
             width, height, plan, LocalVideoSenderCodecs(), enabled_codecs);
+        if (!plan.ok() && !explicit_hardware &&
+            (preference.empty() || preference == "auto") &&
+            plan.requested_codec == "h264" &&
+            result.status != VideoEncoderPreflightStatus::RetirementFailed &&
+            result.status != VideoEncoderPreflightStatus::TimedOut) {
+            auto sw_plan = LocalVideoTrack::ResolvePublishPlan(
+                width, height, requested_snapshot, LocalVideoSenderCodecs(),
+                enabled_codecs, /*prefer_hardware_h264=*/false);
+            if (sw_plan.ok() &&
+                CompareCodecName(sw_plan.effective_codec.c_str(), "h264") == 0 &&
+                ConstrainH264PublishOptions(sw_plan.effective, SoftwareH264SendLevel())) {
+                sw_plan.fallback_reason = "hardware H264 preflight failed before publication";
+                plan = std::move(sw_plan);
+                software_fallback = true;
+            }
+        }
         if (!plan.ok()) {
             throw OperationError(OperationKind::PublishTrack, OperationErrorCode::TrackPublishRejected,
                 "hardware_preflight", plan.error);
@@ -7396,7 +8439,8 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
         plan.effective.preflight_h264_formats);
     if (!encoder_factory) stale();
 #endif
-    co_return PreflightedVideoPublishPlan{std::move(plan), std::move(validate_current)
+    co_return PreflightedVideoPublishPlan{std::move(plan),
+        software_fallback ? std::function<void()>{} : std::function<void()>{std::move(validate_current)}
 #if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
         , std::move(encoder_factory)
 #endif
@@ -7633,9 +8677,10 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         co_await ApplyPublishedSenderScalabilityModesAsync(
             sender_bundle, generation);
         if (video_plan) {
-            if (validate_video_preflight) validate_video_preflight();
-            co_await ValidateFinalVideoSendersAsync(sender_bundle, video_plan->effective,
-                generation, std::dynamic_pointer_cast<LocalVideoTrack>(track));
+            co_await ReconcileAndValidateVideoSendersAsync(
+                sender_bundle, video_plan->effective, generation,
+                std::dynamic_pointer_cast<LocalVideoTrack>(track),
+                validate_video_preflight);
         }
 
         if (generation != session_generation_.load(std::memory_order_acquire)) {
@@ -8014,9 +9059,10 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
             co_await ApplyPublishedSenderScalabilityModesAsync(
                 sender_bundles[index], generation);
             if (video_plans[index]) {
-                if (validate_video_preflights[index]) validate_video_preflights[index]();
-                co_await ValidateFinalVideoSendersAsync(sender_bundles[index], video_plans[index]->effective,
-                    generation, std::dynamic_pointer_cast<LocalVideoTrack>(items[index].track));
+                co_await ReconcileAndValidateVideoSendersAsync(
+                    sender_bundles[index], video_plans[index]->effective, generation,
+                    std::dynamic_pointer_cast<LocalVideoTrack>(items[index].track),
+                    validate_video_preflights[index]);
             }
         }
 
@@ -8961,8 +10007,8 @@ void Room::AttachRemoteTrackToParticipant(
     std::shared_ptr<SignalClient> signal;
     std::shared_ptr<E2eeManager> receive_e2ee;
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> retired_rtc_track;
-    bool native_enabled = true;
     double native_volume = 1.0;
+    bool initial_output_muted = false;
     uint64_t delivery_generation = 0;
 
     {
@@ -9014,6 +10060,9 @@ void Room::AttachRemoteTrackToParticipant(
 
         if (!pub) {
             r_track = std::make_shared<Track>(track_id, (kind == TrackKind::Video ? "camera_video" : "microphone_audio"), kind);
+            if (kind == TrackKind::Audio && audio_output_muted_) {
+                r_track->set_output_muted(true);
+            }
             pub = CreateRemoteTrackPublication(
                 r_track,
                 participant->sid(),
@@ -9026,6 +10075,9 @@ void Room::AttachRemoteTrackToParticipant(
             r_track = pub->track();
             if (!r_track) {
                 r_track = std::make_shared<Track>(track_id, pub->name().empty() ? (kind == TrackKind::Video ? "camera_video" : "microphone_audio") : pub->name(), kind);
+                if (kind == TrackKind::Audio && audio_output_muted_) {
+                    r_track->set_output_muted(true);
+                }
                 pub->set_track(r_track);
             }
         }
@@ -9044,6 +10096,7 @@ void Room::AttachRemoteTrackToParticipant(
         }
         subscription_revision = subscription_intent.revision;
         subscription_accepted_at = subscription_intent.accepted_at;
+        initial_output_muted = audio_output_muted_;
         receive_e2ee = e2ee_manager_;
         binding_serial = next_remote_track_binding_serial_++;
         media_binding = std::make_shared<MediaBindingState>(
@@ -9189,7 +10242,6 @@ void Room::AttachRemoteTrackToParticipant(
         retired_rtc_track = r_track->ExchangeRtcTrackBinding(
             track, kind == TrackKind::Audio && audio_output_muted_);
         native_volume = r_track->volume();
-        native_enabled = !r_track->muted() && !r_track->playout_muted() && native_volume > 0.001;
         {
             std::lock_guard media_lock(remote_media_mutex_);
             auto& media_tracks = kind == TrackKind::Video
@@ -9277,7 +10329,9 @@ void Room::AttachRemoteTrackToParticipant(
         return true;
     };
     const auto configure_native = [&]() {
-        track->set_enabled(native_enabled);
+        const bool effective_enabled =
+            !r_track->muted() && !r_track->playout_muted() && native_volume > 0.001;
+        track->set_enabled(effective_enabled);
         if (kind == TrackKind::Audio) {
             static_cast<webrtc::AudioTrackInterface*>(track.get())->SetVolume(native_volume);
         }
@@ -9286,7 +10340,9 @@ void Room::AttachRemoteTrackToParticipant(
     if (kind == TrackKind::Audio) {
         auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
         if (audio_track) {
-            audio_track->set_enabled(!r_track->muted() && !r_track->playout_muted());
+            audio_track->set_enabled(
+                !r_track->muted() && !r_track->playout_muted() &&
+                !initial_output_muted && r_track->volume() > 0.001);
         }
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         auto last_voice_log_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
@@ -9797,7 +10853,14 @@ void Room::OnRemoteTrackResolved(
                                 candidate.media_binding &&
                                 candidate.media_binding->active.load(std::memory_order_acquire);
                         });
-                    if (binding != remote_track_sinks_.end()) return;
+                    if (binding != remote_track_sinks_.end()) {
+                        if (remote->track()->kind() == TrackKind::Audio) {
+                            remote->track()->set_output_muted(audio_output_muted_);
+                        } else {
+                            remote->track()->UpdateRtcTrackEnabled();
+                        }
+                        return;
+                    }
                 }
                 if (current != current_remote_binding_serials_.end()) {
                     old_bindings.emplace_back(std::move(remote), current->second);
@@ -10023,7 +11086,11 @@ void Room::HandleSignalMessage(
         msg->has_trickle() || msg->has_track_published() ||
         msg->has_media_sections_requirement() || msg->has_reconnect() ||
         msg->has_leave() || msg->has_refresh_token() ||
-        msg->has_pong() || msg->has_pong_resp();
+        msg->has_pong() || msg->has_pong_resp() ||
+        msg->has_publish_data_track_response() ||
+        msg->has_unpublish_data_track_response() ||
+        msg->has_data_track_subscriber_handles() ||
+        msg->has_request_response();
     bool stale_message_at_admission = false;
     {
         std::lock_guard lock(room_mutex_);
@@ -10060,6 +11127,9 @@ void Room::HandleSignalMessage(
         else if (msg->has_reconnect())               type_tag = "RECONNECT";
         else if (msg->has_subscription_response())   type_tag = "SUB_RESP";
         else if (msg->has_request_response())        type_tag = "REQUEST_RESP";
+        else if (msg->has_publish_data_track_response()) type_tag = "PUB_DATA_TRACK_RESP";
+        else if (msg->has_unpublish_data_track_response()) type_tag = "UNPUB_DATA_TRACK_RESP";
+        else if (msg->has_data_track_subscriber_handles()) type_tag = "DATA_TRACK_SUB_HANDLES";
         else if (msg->has_track_subscribed())        type_tag = "TRACK_SUBSCRIBED";
         else if (msg->has_media_sections_requirement()) type_tag = "MEDIA_SECTIONS_REQ";
         else if (msg->has_pong() || msg->has_pong_resp()) type_tag = "PONG";
@@ -10175,6 +11245,14 @@ void Room::HandleSignalMessage(
             if (it != pending_track_publishes_.end()) pending = it->second;
         }
         if (pending) CompleteAwaitable(pending, tp);
+    } else if (msg->has_publish_data_track_response()) {
+        HandlePublishDataTrackResponse(msg->publish_data_track_response(), event_generation);
+    } else if (msg->has_unpublish_data_track_response()) {
+        HandleUnpublishDataTrackResponse(msg->unpublish_data_track_response(), event_generation);
+    } else if (msg->has_data_track_subscriber_handles()) {
+        HandleDataTrackSubscriberHandles(msg->data_track_subscriber_handles(), event_generation);
+    } else if (msg->has_request_response()) {
+        (void)HandleDataTrackRequestResponse(msg->request_response(), event_generation);
     } else if (msg->has_subscription_response()) {
         const auto& sr = msg->subscription_response();
         std::string err_str;
@@ -10356,6 +11434,11 @@ void Room::UpdateParticipants(
     bool encryption_resume = false;
     std::vector<std::pair<std::shared_ptr<RemoteTrackPublication>, uint64_t>> encryption_rejected_bindings;
     std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<TrackPublication>>> unpublished_tracks;
+    std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<RemoteDataTrack>>>
+        newly_published_data_tracks;
+    std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::string>>
+        unpublished_data_tracks;
+    DataTrackCleanupBatch retired_data_track_cleanup;
     std::vector<std::shared_ptr<RemoteParticipant>> disconnected;
     struct AttrChange {
         std::shared_ptr<Participant> participant;
@@ -10396,12 +11479,57 @@ void Room::UpdateParticipants(
         if (!IsSignalGenerationCurrentLocked(event_generation)) return;
         event_generation = session_generation_.load(std::memory_order_acquire);
         signal_snapshot = signal_client_;
-        if (connection_state_ != ConnectionState::Connecting) {
+        const bool emit_events = (connection_state_ != ConnectionState::Connecting);
+        if (emit_events) {
             listeners_snapshot = listeners_;
         }
 
+        const auto retire_remote_data_track_locked =
+            [&](const std::shared_ptr<RemoteParticipant>& remote, const std::string& dt_sid) {
+                remote->remove_data_track(dt_sid);
+                const auto dt_it = remote_data_tracks_.find(dt_sid);
+                if (dt_it != remote_data_tracks_.end()) {
+                    auto entry = dt_it->second;
+                    remote_data_tracks_.erase(dt_it);
+                    if (entry) {
+                        entry->published = false;
+                        if (entry->assigned_sub_handle != 0) {
+                            data_track_sub_handles_.erase(entry->assigned_sub_handle);
+                            entry->assigned_sub_handle = 0;
+                        }
+                        if (auto live = entry->track.lock()) {
+                            retired_data_track_cleanup.remote_tracks.push_back(std::move(live));
+                        }
+                        for (auto& pending_sub : entry->pending_subscribes) {
+                            if (pending_sub) {
+                                retired_data_track_cleanup.subscribe_states.push_back(
+                                    std::move(pending_sub));
+                            }
+                        }
+                        entry->pending_subscribes.clear();
+                        for (const auto& weak_stream : entry->active_streams) {
+                            if (auto stream = weak_stream.lock()) {
+                                retired_data_track_cleanup.streams.push_back(std::move(stream));
+                            }
+                        }
+                        entry->active_streams.clear();
+                    }
+                }
+                if (emit_events) {
+                    auto evt = MakeParticipantEventLocked(
+                        ParticipantEventKind::DataTrackUnpublished, remote, false);
+                    evt.data_track_sid = dt_sid;
+                    EnqueueParticipantEventLocked(std::move(evt));
+                }
+                unpublished_data_tracks.emplace_back(remote, dt_sid);
+            };
+
         const auto retire_remote = [&](auto it) {
             const auto remote = it->second;
+            for (const auto& [dt_sid, dt] : remote->data_tracks()) {
+                (void)dt;
+                retire_remote_data_track_locked(remote, dt_sid);
+            }
             for (const auto& [sid, publication] : remote->tracks()) {
                 const auto intent_key = MakeSubscriptionIntentKeyLocked(
                     remote->sid(), remote->identity(), sid);
@@ -10446,7 +11574,9 @@ void Room::UpdateParticipants(
             RetireParticipantLocked(remote);
             remote_participant_joined_at_ms_.erase(it->first);
             remote_participants_.erase(it);
-            EnqueueParticipantEventLocked(std::move(departure));
+            if (emit_events) {
+                EnqueueParticipantEventLocked(std::move(departure));
+            }
         };
 
         for (const auto& p_info : participants) {
@@ -10462,6 +11592,7 @@ void Room::UpdateParticipants(
             }
 
             if (local_participant_ && p_info.sid() == local_participant_->sid()) {
+                local_participant_->set_kind(ParticipantKindFromProto(p_info.kind()));
                 if (!p_info.name().empty()) {
                     local_participant_->set_name(p_info.name());
                 }
@@ -10485,8 +11616,10 @@ void Room::UpdateParticipants(
                     local_participant_->set_permission(new_perm);
                     changed_permissions_events.push_back({local_participant_, old_perm, new_perm});
                 }
-                EnqueueParticipantEventLocked(MakeParticipantEventLocked(
-                    ParticipantEventKind::Upsert, local_participant_, true));
+                if (emit_events) {
+                    EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+                        ParticipantEventKind::Upsert, local_participant_, true));
+                }
                 continue;
             }
 
@@ -10531,12 +11664,14 @@ void Room::UpdateParticipants(
                     remote = std::make_shared<RemoteParticipant>(p_info.sid(), p_info.identity());
                     remote->set_name(p_info.name());
                     remote->set_metadata(p_info.metadata());
+                    remote->set_kind(ParticipantKindFromProto(p_info.kind()));
                     remote->set_attributes(new_attrs);
                     remote->set_permission(new_perm);
                     remote_participants_[p_info.sid()] = remote;
                     newly_connected.push_back(remote);
                 } else {
                     remote = it->second;
+                    remote->set_kind(ParticipantKindFromProto(p_info.kind()));
                     if (!p_info.name().empty()) {
                         remote->set_name(p_info.name());
                     }
@@ -10578,6 +11713,9 @@ void Room::UpdateParticipants(
                         auto remote_track = std::make_shared<Track>(t_info.sid(), t_info.name(), kind,
                             TrackSourceFromProto(t_info.source()));
                         remote_track->set_muted(t_info.muted());
+                        if (kind == TrackKind::Audio && audio_output_muted_) {
+                            remote_track->set_output_muted(true);
+                        }
                         // RemoteParticipant owns the actual controllable
                         // publication. Do not create a parallel controller by
                         // SID: subscription/quality settings must target this
@@ -10611,11 +11749,13 @@ void Room::UpdateParticipants(
                         if (pub->track() && pub->track()->muted() != t_info.muted()) {
                             pub->track()->set_muted(t_info.muted());
                             changed_mute_events.push_back({remote, pub, t_info.muted()});
-                            EnqueueParticipantEventLocked(MakeTrackEventLocked(
-                                ParticipantEventKind::TrackMuted,
-                                remote,
-                                pub,
-                                false));
+                            if (emit_events) {
+                                EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                                    ParticipantEventKind::TrackMuted,
+                                    remote,
+                                    pub,
+                                    false));
+                            }
                             Log("TRACK", "MUTE_CHANGED", "Remote track state changed to: " +
                                 std::string(t_info.muted() ? "muted/off" : "on"));
                         }
@@ -10631,13 +11771,17 @@ void Room::UpdateParticipants(
                                     encryption_rejected_bindings.emplace_back(remote_pub, current->second);
                                 }
                             }
-                            EnqueueParticipantEventLocked(MakeTrackEventLocked(
-                                ParticipantEventKind::TrackSubscriptionError, remote, pub, false));
+                            if (emit_events) {
+                                EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                                    ParticipantEventKind::TrackSubscriptionError, remote, pub, false));
+                            }
                         } else if (pub->subscription_error() == TrackPublication::SubscriptionError::EncryptionRequired) {
                             encryption_resume = true;
                             pub->set_subscription_error(TrackPublication::SubscriptionError::None);
-                            EnqueueParticipantEventLocked(MakeTrackEventLocked(
-                                ParticipantEventKind::TrackSubscriptionError, remote, pub, false));
+                            if (emit_events) {
+                                EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                                    ParticipantEventKind::TrackSubscriptionError, remote, pub, false));
+                            }
                         }
                     }
                 }
@@ -10682,13 +11826,65 @@ void Room::UpdateParticipants(
                         }
                         RetireTrackMembershipLocked(pub);
                         remote->remove_publication(sid);
-                        EnqueueParticipantEventLocked(std::move(unavailable));
+                        if (emit_events) {
+                            EnqueueParticipantEventLocked(std::move(unavailable));
+                        }
                         unpublished_tracks.push_back({remote, pub});
                         Log("TRACK", "UNPUBLISHED", "Remote track unpublished");
                     }
                 }
-                EnqueueParticipantEventLocked(MakeParticipantEventLocked(
-                    ParticipantEventKind::Upsert, remote, false));
+
+                // 同步解析远端参会人发布的 2026 Dedicated DataTracks
+                std::set<std::string> current_data_track_sids;
+                for (int dt_idx = 0; dt_idx < p_info.data_tracks_size(); ++dt_idx) {
+                    const auto& dt_proto = p_info.data_tracks(dt_idx);
+                    if (dt_proto.sid().empty() || dt_proto.pub_handle() == 0 ||
+                        dt_proto.pub_handle() > 0xFFFFu) {
+                        continue;
+                    }
+                    if (dt_proto.encryption() != proto::Encryption::NONE &&
+                        dt_proto.encryption() != proto::Encryption::GCM) {
+                        Log("DATA_TRACK", "UNSUPPORTED_E2EE",
+                            "Skipping remote data track with unsupported encryption type");
+                        continue;
+                    }
+                    current_data_track_sids.insert(dt_proto.sid());
+                    if (remote_data_tracks_.find(dt_proto.sid()) != remote_data_tracks_.end()) {
+                        continue;
+                    }
+                    auto entry = std::make_shared<RemoteDataTrackEntry>();
+                    entry->info.pub_handle = static_cast<uint16_t>(dt_proto.pub_handle());
+                    entry->info.sid = dt_proto.sid();
+                    entry->info.name = dt_proto.name();
+                    entry->info.uses_e2ee = (dt_proto.encryption() == proto::Encryption::GCM);
+                    entry->publisher_sid = remote->sid();
+                    entry->publisher_identity = remote->identity();
+                    auto dt_obj = BuildRemoteDataTrackObjectLocked(entry, event_generation);
+                    entry->track = dt_obj;
+                    remote_data_tracks_[entry->info.sid] = entry;
+                    remote->add_data_track(dt_obj);
+
+                    if (emit_events) {
+                        auto dt_evt = MakeParticipantEventLocked(
+                            ParticipantEventKind::DataTrackPublished, remote, false);
+                        dt_evt.data_track = dt_obj;
+                        dt_evt.data_track_sid = entry->info.sid;
+                        EnqueueParticipantEventLocked(std::move(dt_evt));
+                    }
+                    newly_published_data_tracks.emplace_back(remote, std::move(dt_obj));
+                }
+
+                for (const auto& [existing_dt_sid, existing_dt] : remote->data_tracks()) {
+                    (void)existing_dt;
+                    if (current_data_track_sids.find(existing_dt_sid) == current_data_track_sids.end()) {
+                        retire_remote_data_track_locked(remote, existing_dt_sid);
+                    }
+                }
+
+                if (emit_events) {
+                    EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+                        ParticipantEventKind::Upsert, remote, false));
+                }
             }
         }
     }
@@ -10807,6 +12003,36 @@ void Room::UpdateParticipants(
         for (const auto& listener : listeners_snapshot) {
             DeliverListener({event_generation}, listener, [&](RoomListener& target) {
                 target.OnParticipantMetadataChanged(evt.participant, evt.old_metadata, evt.new_metadata);
+            }, true);
+        }
+    }
+
+    for (const auto& [p, dt] : newly_published_data_tracks) {
+        for (const auto& listener : listeners_snapshot) {
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnDataTrackPublished(p, dt);
+            }, true);
+        }
+    }
+
+    // Deliver normal EOS to streams whose remote data tracks were unpublished or departed.
+    for (const auto& live : retired_data_track_cleanup.remote_tracks) {
+        if (live) live->MarkUnpublishedInternal();
+    }
+    for (const auto& pending_sub : retired_data_track_cleanup.subscribe_states) {
+        CompleteAwaitable(pending_sub,
+            DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>::Failure({
+                SubscribeDataTrackErrorCode::Unpublished,
+                "Remote data track was unpublished before subscription completed",
+            }));
+    }
+    for (const auto& stream : retired_data_track_cleanup.streams) {
+        if (stream) stream->PushEos(std::nullopt);
+    }
+    for (const auto& [p, dt_sid] : unpublished_data_tracks) {
+        for (const auto& listener : listeners_snapshot) {
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnDataTrackUnpublished(p, dt_sid);
             }, true);
         }
     }
@@ -11243,12 +12469,12 @@ void Room::HandleOfferSignal(
                                 }
                             }
 
-                            // 扫描并激活所有 Subscriber Transceiver 下的 Receiver Track，确保后加入用户的音频被及时挂载与播放
+                            // 扫描 Subscriber Transceiver 下的 Receiver Track，确保后加入用户的轨道被及时挂载；
+                            // 不得在此无条件 set_enabled(true)，轨道启用状态由 Room/Track 静音与扬声器静音状态统一控制。
                             auto transceivers = pc->GetTransceivers();
                             for (const auto& t : transceivers) {
                                 if (t && t->receiver() && t->receiver()->track()) {
                                     auto r_track = t->receiver()->track();
-                                    r_track->set_enabled(true);
                                     self->PostRemoteTrack(t->receiver(), r_track, event_generation);
                                 }
                             }
@@ -11830,6 +13056,29 @@ proto::SyncState Room::BuildSyncState(SubscriptionSyncSnapshot* snapshot) const 
     };
     add_data_channel(reliable, proto::SignalTarget::PUBLISHER);
     add_data_channel(lossy, proto::SignalTarget::PUBLISHER);
+    {
+        webrtc::scoped_refptr<webrtc::DataChannelInterface> dt_dc;
+        {
+            std::lock_guard lock(room_mutex_);
+            dt_dc = data_track_dc_;
+            for (const auto& [pub_handle, entry] : local_data_tracks_) {
+                (void)pub_handle;
+                if (!entry || entry->unpublished) continue;
+                const auto live = entry->track.lock();
+                if (!live || !live->IsPublished()) continue;
+                auto* resp = state.add_publish_data_tracks();
+                auto* info = resp->mutable_info();
+                const auto snapshot = live->info();
+                info->set_pub_handle(entry->pub_handle);
+                info->set_sid(snapshot.sid);
+                info->set_name(snapshot.name);
+                info->set_encryption(snapshot.uses_e2ee
+                    ? proto::Encryption::GCM
+                    : proto::Encryption::NONE);
+            }
+        }
+        add_data_channel(dt_dc, proto::SignalTarget::PUBLISHER);
+    }
     for (const auto& channel : remote_channels) {
         add_data_channel(channel, proto::SignalTarget::SUBSCRIBER);
     }
@@ -12302,6 +13551,7 @@ asio::awaitable<void> Room::AttemptReconnect(
                     old_subscriber = std::move(subscriber_pc_);
                     old_publisher_observer = std::move(publisher_observer_);
                     old_subscriber_observer = std::move(subscriber_observer_);
+                    PrepareDataTracksForFullRestartLocked();
                     RetireAllMembershipsLocked(retired_events);
                     local_participant_.reset();
                     pending_local_unpublishes_.clear();
@@ -12315,6 +13565,10 @@ asio::awaitable<void> Room::AttemptReconnect(
                     if (lossy_dc_) {
                         old_data_channels.push_back(lossy_dc_);
                         lossy_dc_ = nullptr;
+                    }
+                    if (data_track_dc_) {
+                        old_data_channels.push_back(data_track_dc_);
+                        data_track_dc_ = nullptr;
                     }
                     for (auto& dc : remote_data_channels_) {
                         if (dc) old_data_channels.push_back(dc);
@@ -12466,6 +13720,8 @@ asio::awaitable<void> Room::AttemptReconnect(
                         reconnect_generation);
                 }
 
+                co_await RecoverDataTracksAfterFullRestartAsync(reconnect_generation);
+
                 {
                     std::lock_guard lock(room_mutex_);
                     if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
@@ -12585,6 +13841,10 @@ asio::awaitable<void> Room::AttemptReconnect(
         if (lossy_dc_) {
             data_channels.push_back(lossy_dc_);
             lossy_dc_ = nullptr;
+        }
+        if (data_track_dc_) {
+            data_channels.push_back(data_track_dc_);
+            data_track_dc_ = nullptr;
         }
         for (auto& dc : remote_data_channels_) {
             if (dc) data_channels.push_back(dc);
@@ -13081,23 +14341,37 @@ asio::awaitable<void> Room::RepublishLocalTracks(
 
     if (!local) co_return;
 
+    std::vector<PublishedTrackRecord> valid_records;
+    std::vector<std::shared_ptr<Track>> tracks_to_publish;
     for (auto& record : records) {
-        if (!record.track) continue;
-        {
-            std::lock_guard lock(room_mutex_);
-            if (!IsNativeGenerationCurrentLocked(generation) ||
-                !reconnect_active_ || reconnect_disabled_) co_return;
-            reconnect_republish_tracks_.insert(record.track.get());
+        if (record.track) {
+            valid_records.push_back(record);
+            tracks_to_publish.push_back(record.track);
         }
-        std::shared_ptr<TrackPublication> new_pub;
-        try {
-            new_pub = co_await local->PublishTrackAsync(record.track);
-        } catch (...) {
-            std::lock_guard lock(room_mutex_);
+    }
+    if (tracks_to_publish.empty()) co_return;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            !reconnect_active_ || reconnect_disabled_) co_return;
+        for (const auto& track : tracks_to_publish) {
+            reconnect_republish_tracks_.insert(track.get());
+        }
+    }
+
+    std::vector<std::shared_ptr<TrackPublication>> new_pubs;
+    try {
+        new_pubs = co_await local->PublishTracksBatchAsync(std::move(tracks_to_publish));
+    } catch (...) {
+        std::lock_guard lock(room_mutex_);
+        for (const auto& record : valid_records) {
             reconnect_republish_tracks_.erase(record.track.get());
-            throw;
         }
-        DeliverRepublishedTrack(generation, record.previous_sid, std::move(new_pub));
+        throw;
+    }
+    for (size_t i = 0; i < new_pubs.size() && i < valid_records.size(); ++i) {
+        DeliverRepublishedTrack(generation, valid_records[i].previous_sid, std::move(new_pubs[i]));
     }
 }
 
@@ -13474,6 +14748,11 @@ void Room::SetAudioOutputMuted(bool muted) {
     Log("MEDIA", "SPEAKER_MUTE", "Set room audio output mute=" + std::string(muted ? "true" : "false"));
 }
 
+bool Room::IsAudioOutputMuted() const {
+    std::lock_guard lock(room_mutex_);
+    return audio_output_muted_;
+}
+
 void Room::SimulateScenario(SimulateScenarioType scenario) {
     auto operation_admission = callback_gate_->Enter();
     if (!operation_admission) return;
@@ -13621,6 +14900,1592 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         }
         break;
     }
+    }
+    co_return;
+}
+
+// =========================================================================
+// Dedicated DataTrack Implementation (2026 Standard)
+// =========================================================================
+
+void Room::BindLocalDataTrackHandlersLocked(uint64_t generation) {
+    if (!local_participant_) {
+        return;
+    }
+    std::weak_ptr<Room> weak_self = weak_from_this();
+    local_participant_->SetAsyncPublishDataTrackHandler(
+        [weak_self, generation](DataTrackPublishOptions options)
+            -> asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>> {
+            auto self = weak_self.lock();
+            if (!self) {
+                return []() -> asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>> {
+                    co_return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+                        PublishDataTrackErrorCode::Disconnected,
+                        "Room is no longer active",
+                    });
+                }();
+            }
+            return self->PublishLocalDataTrackAsync(std::move(options), generation);
+        });
+    local_participant_->SetPublishDataTrackSyncHandler(
+        [weak_self, generation](const DataTrackPublishOptions& options)
+            -> DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError> {
+            auto self = weak_self.lock();
+            if (!self) {
+                return DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+                    PublishDataTrackErrorCode::Disconnected,
+                    "Room is no longer active",
+                });
+            }
+            return self->PublishLocalDataTrackSync(options, generation);
+        });
+}
+
+std::optional<uint16_t> Room::AllocateDataTrackPubHandleLocked() {
+    for (uint32_t attempts = 0; attempts < 65535; ++attempts) {
+        if (next_data_track_pub_handle_ == 0) {
+            next_data_track_pub_handle_ = 1;
+        }
+        const uint16_t candidate = next_data_track_pub_handle_++;
+        if (local_data_tracks_.find(candidate) == local_data_tracks_.end() &&
+            pending_data_track_publishes_.find(candidate) == pending_data_track_publishes_.end()) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
+}
+
+void Room::SendDataTrackSignal(const proto::SignalRequest& req, uint64_t generation) {
+    std::shared_ptr<SignalClient> signal;
+    std::function<void(const proto::SignalRequest&)> signal_hook;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(generation)) {
+            return;
+        }
+        signal = signal_client_;
+        if (data_track_instrumentation_) {
+            signal_hook = data_track_instrumentation_->on_signal_send;
+        }
+    }
+    if (signal) {
+        signal->Send(req);
+    }
+    if (signal_hook) {
+        signal_hook(req);
+    }
+}
+
+void Room::OnDataTrackChannelStateChanged(
+    webrtc::DataChannelInterface::DataState state,
+    uint64_t generation,
+    const webrtc::DataChannelInterface* channel) {
+    if (!channel) return;
+    BeforeNativeEventCommit(generation);
+
+    std::vector<std::shared_ptr<AwaitableState<void>>> success;
+    std::vector<std::shared_ptr<AwaitableState<void>>> failure;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            data_track_dc_.get() != channel) {
+            return;
+        }
+        for (const auto& waiter : pending_data_track_dc_waits_) {
+            if (waiter.generation != generation) continue;
+            if (state == webrtc::DataChannelInterface::kOpen) {
+                success.push_back(waiter.completion);
+            } else if (state == webrtc::DataChannelInterface::kClosing ||
+                       state == webrtc::DataChannelInterface::kClosed) {
+                failure.push_back(waiter.completion);
+            }
+        }
+        if (state == webrtc::DataChannelInterface::kOpen) {
+            ScheduleDataTrackDrainLocked(generation);
+        }
+    }
+    for (const auto& completion : success) {
+        CompleteAwaitable(completion);
+    }
+    for (const auto& completion : failure) {
+        FailAwaitable(completion, std::make_exception_ptr(OperationError(
+            OperationKind::PublishTrack,
+            OperationErrorCode::DataChannelUnavailable,
+            "data_track_channel_state",
+            "_data_track channel closed before becoming ready",
+            true)));
+    }
+}
+
+void Room::OnDataTrackChannelBufferedAmountLow(uint64_t generation) {
+    BeforeNativeEventCommit(generation);
+    std::lock_guard lock(room_mutex_);
+    if (!IsNativeGenerationCurrentLocked(generation)) return;
+    ScheduleDataTrackDrainLocked(generation);
+}
+
+asio::awaitable<void> Room::WaitForDataTrackChannelOpen(
+    std::chrono::milliseconds timeout,
+    uint64_t generation) {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::Cancelled,
+                                 "wait_data_track_channel",
+                                 "session replaced while waiting for _data_track channel");
+        }
+        channel = data_track_dc_;
+        if (!channel) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::DataChannelUnavailable,
+                                 "wait_data_track_channel",
+                                 "_data_track channel is missing",
+                                 true);
+        }
+        pending_data_track_dc_waits_.push_back({generation, completion});
+    }
+
+    OnDataTrackChannelStateChanged(channel->state(), generation, channel.get());
+
+    try {
+        co_await WaitAwaitable<void>(completion, timeout,
+                                     OperationKind::PublishTrack,
+                                     OperationErrorCode::DataChannelUnavailable,
+                                     "wait_data_track_channel");
+    } catch (...) {
+        std::lock_guard lock(room_mutex_);
+        pending_data_track_dc_waits_.erase(
+            std::remove_if(pending_data_track_dc_waits_.begin(),
+                           pending_data_track_dc_waits_.end(),
+                           [&](const PendingDataChannelWait& item) {
+                               return item.completion == completion;
+                           }),
+            pending_data_track_dc_waits_.end());
+        throw;
+    }
+
+    std::lock_guard lock(room_mutex_);
+    pending_data_track_dc_waits_.erase(
+        std::remove_if(pending_data_track_dc_waits_.begin(),
+                       pending_data_track_dc_waits_.end(),
+                       [&](const PendingDataChannelWait& item) {
+                           return item.completion == completion;
+                       }),
+        pending_data_track_dc_waits_.end());
+}
+
+std::pair<LocalDataTrack::TryPushHandler, LocalDataTrack::UnpublishHandler>
+Room::MakeLocalDataTrackHandlers(uint16_t pub_handle, uint64_t generation) {
+    std::weak_ptr<Room> weak_self = weak_from_this();
+    LocalDataTrack::TryPushHandler push_handler =
+        [weak_self, pub_handle, generation](const DataTrackFrame& frame)
+            -> DataTrackResult<void, LocalDataTrackTryPushError> {
+            auto self = weak_self.lock();
+            if (!self) {
+                return DataTrackResult<void, LocalDataTrackTryPushError>::Failure({
+                    LocalDataTrackTryPushErrorCode::TrackUnpublished,
+                    "Room has been destroyed",
+                });
+            }
+            return self->EnqueueLocalDataTrackFrame(pub_handle, frame, generation);
+        };
+    LocalDataTrack::UnpublishHandler unpub_handler =
+        [weak_self, pub_handle, generation]() {
+            if (auto self = weak_self.lock()) {
+                self->UnpublishLocalDataTrack(pub_handle, generation);
+            }
+        };
+    return {std::move(push_handler), std::move(unpub_handler)};
+}
+
+std::shared_ptr<LocalDataTrack> Room::BuildLocalDataTrackObjectLocked(
+    const std::shared_ptr<LocalDataTrackEntry>& entry,
+    uint64_t generation) {
+    auto handlers = MakeLocalDataTrackHandlers(entry->pub_handle, generation);
+    return std::make_shared<LocalDataTrack>(
+        entry->info,
+        std::move(handlers.first),
+        std::move(handlers.second));
+}
+
+DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>
+Room::PublishLocalDataTrackSync(const DataTrackPublishOptions& options, uint64_t generation) {
+    using Res = DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>;
+    if (retired()) {
+        return Res::Failure({PublishDataTrackErrorCode::Disconnected, "Room is retired"});
+    }
+    auto promise = std::make_shared<std::promise<Res>>();
+    auto future = promise->get_future();
+    std::chrono::milliseconds wait_budget = std::chrono::seconds(11);
+    {
+        std::lock_guard lock(room_mutex_);
+        wait_budget = operation_timeouts_.publish + std::chrono::seconds(1);
+    }
+
+    auto self = shared_from_this();
+    livekit::safe_co_spawn(executor_, [self, options, generation, promise]() -> asio::awaitable<void> {
+        try {
+            auto result = co_await self->PublishLocalDataTrackAsync(options, generation);
+            promise->set_value(std::move(result));
+        } catch (const std::exception& e) {
+            try {
+                promise->set_value(Res::Failure({PublishDataTrackErrorCode::Internal, e.what()}));
+            } catch (...) {}
+        } catch (...) {
+            try {
+                promise->set_value(Res::Failure({PublishDataTrackErrorCode::Internal, "unknown error"}));
+            } catch (...) {}
+        }
+    });
+
+    if (future.wait_for(wait_budget) != std::future_status::ready) {
+        return Res::Failure({PublishDataTrackErrorCode::Timeout, "PublishDataTrack timed out"});
+    }
+    return future.get();
+}
+
+asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>
+Room::PublishLocalDataTrackAsync(DataTrackPublishOptions options, uint64_t generation) {
+    using Res = DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>;
+    auto admission = callback_gate_->Enter();
+    if (!admission) {
+        co_return Res::Failure({PublishDataTrackErrorCode::Disconnected, "Room is retired"});
+    }
+    if (options.name.empty()) {
+        co_return Res::Failure({PublishDataTrackErrorCode::InvalidName, "Data track name must not be empty"});
+    }
+
+    bool need_negotiate = false;
+    bool need_dc_wait = false;
+    std::chrono::milliseconds pc_timeout = std::chrono::seconds(10);
+    std::chrono::milliseconds neg_timeout = std::chrono::seconds(10);
+    std::chrono::milliseconds pub_timeout = std::chrono::seconds(10);
+    bool uses_e2ee = false;
+    uint16_t pub_handle = 0;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            co_return Res::Failure({
+                PublishDataTrackErrorCode::Disconnected,
+                "Room is not connected for this session generation",
+            });
+        }
+        if (!local_participant_ || !local_participant_->permission().can_publish_data) {
+            co_return Res::Failure({
+                PublishDataTrackErrorCode::NotAllowed,
+                "Participant does not have permission to publish data",
+            });
+        }
+        pc_timeout = operation_timeouts_.peer_connection;
+        neg_timeout = operation_timeouts_.negotiation;
+        pub_timeout = operation_timeouts_.publish;
+        const bool bypass_dc = data_track_instrumentation_ &&
+            data_track_instrumentation_->bypass_webrtc_data_channel_wait;
+        if (!bypass_dc && require_media_connection_) {
+            if (!publisher_pc_ || !data_track_dc_) {
+                co_return Res::Failure({
+                    PublishDataTrackErrorCode::Disconnected,
+                    "DataTrack transport is not available",
+                });
+            }
+            if (data_track_dc_->state() != webrtc::DataChannelInterface::kOpen) {
+                need_dc_wait = true;
+                need_negotiate = !signal_client_ || !signal_client_->is_single_pc_mode_active();
+            }
+        }
+    }
+
+    if (need_dc_wait) {
+        if (need_negotiate) {
+            try {
+                co_await NegotiatePublisherAsync(neg_timeout, generation);
+            } catch (const OperationError& err) {
+                co_return Res::Failure({
+                    err.code() == OperationErrorCode::Cancelled
+                        ? PublishDataTrackErrorCode::Disconnected
+                        : PublishDataTrackErrorCode::Timeout,
+                    err.what(),
+                });
+            } catch (const std::exception& err) {
+                co_return Res::Failure({PublishDataTrackErrorCode::Disconnected, err.what()});
+            }
+        }
+        try {
+            co_await WaitForDataTrackChannelOpen(pc_timeout, generation);
+        } catch (const OperationError& err) {
+            co_return Res::Failure({
+                err.code() == OperationErrorCode::Cancelled
+                    ? PublishDataTrackErrorCode::Disconnected
+                    : PublishDataTrackErrorCode::Timeout,
+                err.what(),
+            });
+        } catch (const std::exception& err) {
+            co_return Res::Failure({PublishDataTrackErrorCode::Disconnected, err.what()});
+        }
+    }
+
+    auto state = std::make_shared<AwaitableState<Res>>(executor_);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            co_return Res::Failure({
+                PublishDataTrackErrorCode::Disconnected,
+                "Session closed before PublishDataTrack request",
+            });
+        }
+        if (e2ee_manager_ && e2ee_manager_->enabled()) {
+            if (e2ee_manager_->encryption_type() != EncryptionType::GCM) {
+                co_return Res::Failure({
+                    PublishDataTrackErrorCode::Internal,
+                    "Unsupported encryption type for DataTrack",
+                });
+            }
+            uses_e2ee = true;
+        }
+        const auto allocated = AllocateDataTrackPubHandleLocked();
+        if (!allocated.has_value()) {
+            co_return Res::Failure({
+                PublishDataTrackErrorCode::LimitReached,
+                "Maximum number of published data track handles exhausted",
+            });
+        }
+        pub_handle = *allocated;
+        pending_data_track_publishes_.emplace(pub_handle, state);
+    }
+
+    proto::SignalRequest req;
+    auto* pub_req = req.mutable_publish_data_track_request();
+    pub_req->set_pub_handle(pub_handle);
+    pub_req->set_name(options.name);
+    pub_req->set_encryption(uses_e2ee ? proto::Encryption::GCM : proto::Encryption::NONE);
+    SendDataTrackSignal(req, generation);
+
+    try {
+        auto result = co_await WaitAwaitable<Res>(
+            state,
+            pub_timeout,
+            OperationKind::PublishTrack,
+            OperationErrorCode::TrackPublishTimeout,
+            "publish_data_track");
+        co_return result;
+    } catch (const OperationError& err) {
+        bool was_pending = false;
+        bool still_connected = false;
+        {
+            std::lock_guard lock(room_mutex_);
+            was_pending = pending_data_track_publishes_.erase(pub_handle) > 0;
+            still_connected = IsSignalGenerationCurrentLocked(generation) &&
+                connection_state_ == ConnectionState::Connected;
+        }
+        if (was_pending && still_connected) {
+            // Cancel orphaned publish if SFU response arrives later.
+            proto::SignalRequest unpub_req;
+            unpub_req.mutable_unpublish_data_track_request()->set_pub_handle(pub_handle);
+            SendDataTrackSignal(unpub_req, generation);
+        }
+        const auto code = err.code() == OperationErrorCode::Cancelled ||
+                err.code() == OperationErrorCode::SessionClosed
+            ? PublishDataTrackErrorCode::Disconnected
+            : PublishDataTrackErrorCode::Timeout;
+        co_return Res::Failure({code, err.what()});
+    } catch (const std::exception& err) {
+        std::lock_guard lock(room_mutex_);
+        pending_data_track_publishes_.erase(pub_handle);
+        co_return Res::Failure({PublishDataTrackErrorCode::Internal, err.what()});
+    }
+}
+
+DataTrackResult<void, LocalDataTrackTryPushError> Room::EnqueueLocalDataTrackFrame(
+    uint16_t pub_handle,
+    const DataTrackFrame& frame,
+    uint64_t expected_generation) {
+    using Res = DataTrackResult<void, LocalDataTrackTryPushError>;
+    if (frame.payload.empty()) {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(expected_generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::TrackUnpublished,
+                                 "Room session is no longer active"});
+        }
+        const auto it = local_data_tracks_.find(pub_handle);
+        if (it == local_data_tracks_.end() || !it->second || it->second->unpublished) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::TrackUnpublished,
+                                 "LocalDataTrack is unpublished"});
+        }
+        if (it->second->republishing) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::QueueFull,
+                                 "LocalDataTrack is republishing during reconnect"});
+        }
+        return Res::Success();
+    }
+
+    std::shared_ptr<LocalDataTrackEntry> entry;
+    bool uses_e2ee = false;
+    std::shared_ptr<E2eeManager> enc_owner;
+    E2eeManager::DataPacketState enc_state{};
+    std::string sender_identity;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(expected_generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::TrackUnpublished,
+                                 "Room session is no longer active"});
+        }
+        const auto it = local_data_tracks_.find(pub_handle);
+        if (it == local_data_tracks_.end() || !it->second || it->second->unpublished) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::TrackUnpublished,
+                                 "LocalDataTrack is unpublished"});
+        }
+        entry = it->second;
+        if (entry->republishing) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::QueueFull,
+                                 "LocalDataTrack is republishing during reconnect"});
+        }
+        uses_e2ee = entry->info.uses_e2ee;
+        if (uses_e2ee) {
+            enc_owner = e2ee_manager_;
+            if (enc_owner) {
+                enc_state = enc_owner->data_packet_state();
+            }
+            if (!local_participant_) {
+                return Res::Failure({LocalDataTrackTryPushErrorCode::EncryptionFailed,
+                                     "Missing local participant identity for E2EE"});
+            }
+            sender_identity = local_participant_->identity();
+            if (!enc_owner || !enc_state.enabled ||
+                enc_owner->encryption_type() != EncryptionType::GCM ||
+                !enc_owner->data_packet_cryptor() || sender_identity.empty()) {
+                return Res::Failure({LocalDataTrackTryPushErrorCode::EncryptionFailed,
+                                     "E2EE key/cryptor unavailable for encrypted DataTrack"});
+            }
+        }
+    }
+
+    data_track::DtpExtensions extensions;
+    extensions.user_timestamp = frame.user_timestamp;
+    std::vector<uint8_t> payload_bytes = frame.payload;
+
+    if (uses_e2ee) {
+        auto encrypted = enc_owner->data_packet_cryptor()->EncryptPacket(
+            sender_identity,
+            enc_state.key_index,
+            payload_bytes,
+            DataPacketCryptor::kMaxDataTrackPayloadBytes);
+        const auto* sealed = std::get_if<EncryptedDataPacket>(&encrypted);
+        if (!sealed || sealed->iv.size() != 12 || sealed->key_index > 0xFFu) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::EncryptionFailed,
+                                 "Failed to encrypt DataTrack frame payload"});
+        }
+        data_track::DtpE2eeExtension ext;
+        ext.key_index = static_cast<uint8_t>(sealed->key_index);
+        std::copy_n(sealed->iv.begin(), ext.iv.size(), ext.iv.begin());
+        extensions.e2ee = ext;
+        payload_bytes = sealed->ciphertext;
+    }
+
+    std::vector<data_track::DtpPacket> packets;
+    {
+        std::lock_guard pipe_lock(entry->pipeline_mutex);
+        if (!entry->packetizer) {
+            entry->packetizer = std::make_unique<data_track::DtpPacketizer>(pub_handle);
+        }
+        std::string pkt_err;
+        if (!entry->packetizer->Packetize(payload_bytes, extensions, packets, &pkt_err)) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::Internal,
+                                 pkt_err.empty() ? "Packetize failed" : pkt_err});
+        }
+    }
+
+    DataTrackSendQueue::FramePackets serialized_batch;
+    serialized_batch.reserve(packets.size());
+    for (const auto& pkt : packets) {
+        std::vector<uint8_t> encoded;
+        if (!pkt.SerializeInto(encoded)) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::Internal,
+                                 "Failed to serialize DTP packet"});
+        }
+        serialized_batch.push_back(std::move(encoded));
+    }
+    if (serialized_batch.empty()) {
+        return Res::Success();
+    }
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(expected_generation) ||
+            connection_state_ != ConnectionState::Connected ||
+            entry->unpublished || entry->republishing) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::TrackUnpublished,
+                                 "LocalDataTrack session state changed during push"});
+        }
+        if (uses_e2ee &&
+            (e2ee_manager_ != enc_owner ||
+             !enc_owner ||
+             enc_owner->data_packet_state().policy_revision != enc_state.policy_revision)) {
+            return Res::Failure({LocalDataTrackTryPushErrorCode::EncryptionFailed,
+                                 "E2EE policy changed before admission"});
+        }
+        entry->send_queue.Push(std::move(serialized_batch));
+        ScheduleDataTrackDrainLocked(expected_generation);
+    }
+    return Res::Success();
+}
+
+void Room::UnpublishLocalDataTrack(uint16_t pub_handle, uint64_t expected_generation) {
+    bool send_unpublish = false;
+    {
+        std::lock_guard lock(room_mutex_);
+        const auto it = local_data_tracks_.find(pub_handle);
+        if (it != local_data_tracks_.end() && it->second) {
+            it->second->unpublished = true;
+            it->second->send_queue.Clear();
+            it->second->in_flight_packets.clear();
+            local_data_tracks_.erase(it);
+        }
+        // Keep handle tracked as unpublished across reconnect records so it isn't resurrected.
+        reconnect_data_track_records_.erase(
+            std::remove_if(reconnect_data_track_records_.begin(),
+                           reconnect_data_track_records_.end(),
+                           [&](const ReconnectLocalDataTrackRecord& rec) {
+                               return rec.pub_handle == pub_handle;
+                           }),
+            reconnect_data_track_records_.end());
+        send_unpublish = IsSignalGenerationCurrentLocked(expected_generation) &&
+            (connection_state_ == ConnectionState::Connected ||
+             connection_state_ == ConnectionState::Reconnecting);
+    }
+    if (send_unpublish) {
+        proto::SignalRequest req;
+        req.mutable_unpublish_data_track_request()->set_pub_handle(pub_handle);
+        SendDataTrackSignal(req, expected_generation);
+    }
+}
+
+void Room::ScheduleDataTrackDrainLocked(uint64_t generation) {
+    if (data_track_drain_scheduled_) {
+        return;
+    }
+    data_track_drain_scheduled_ = true;
+    std::weak_ptr<Room> weak_self = weak_from_this();
+    asio::post(executor_, [weak_self, generation]() {
+        if (auto self = weak_self.lock()) {
+            self->DrainDataTrackSendQueue(generation);
+        }
+    });
+}
+
+void Room::DrainDataTrackSendQueue(uint64_t generation) {
+    auto admission = callback_gate_->Enter();
+    if (!admission) return;
+
+    while (true) {
+        webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+        std::function<void(const std::vector<uint8_t>&)> wire_hook;
+        {
+            std::lock_guard lock(room_mutex_);
+            data_track_drain_scheduled_ = false;
+            if (!IsNativeGenerationCurrentLocked(generation) ||
+                connection_state_ != ConnectionState::Connected) {
+                return;
+            }
+            dc = data_track_dc_;
+            if (data_track_instrumentation_) {
+                wire_hook = data_track_instrumentation_->on_wire_packet_send;
+            }
+        }
+
+        if (dc && dc->state() != webrtc::DataChannelInterface::kOpen && !wire_hook) {
+            return;
+        }
+        if (!dc && !wire_hook) {
+            return;
+        }
+        if (dc && !wire_hook && dc->buffered_amount() > kDataTrackLowBufferThresholdBytes) {
+            return;
+        }
+
+        std::vector<uint8_t> packet_to_send;
+        bool found_packet = false;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!IsNativeGenerationCurrentLocked(generation) ||
+                connection_state_ != ConnectionState::Connected) {
+                return;
+            }
+            for (auto& [handle, entry] : local_data_tracks_) {
+                (void)handle;
+                if (!entry || entry->unpublished || entry->republishing) {
+                    continue;
+                }
+                if (entry->in_flight_packets.empty()) {
+                    if (auto batch = entry->send_queue.TryPop()) {
+                        for (auto& p : *batch) {
+                            entry->in_flight_packets.push_back(std::move(p));
+                        }
+                    }
+                }
+                if (!entry->in_flight_packets.empty()) {
+                    packet_to_send = std::move(entry->in_flight_packets.front());
+                    entry->in_flight_packets.pop_front();
+                    found_packet = true;
+                    break;
+                }
+            }
+            if (!found_packet) {
+                return;
+            }
+        }
+
+        if (wire_hook) {
+            wire_hook(packet_to_send);
+        }
+        if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
+            webrtc::DataBuffer buffer(
+                webrtc::CopyOnWriteBuffer(packet_to_send.data(), packet_to_send.size()),
+                /*binary=*/true);
+            if (!dc->Send(buffer)) {
+                Log("DATA_TRACK", "SEND_FAILED", "_data_track channel rejected outgoing DTP packet");
+                return;
+            }
+        }
+    }
+}
+
+std::shared_ptr<RemoteDataTrack> Room::BuildRemoteDataTrackObjectLocked(
+    const std::shared_ptr<RemoteDataTrackEntry>& entry,
+    uint64_t generation) {
+    const std::string track_sid = entry->info.sid;
+    std::weak_ptr<Room> weak_self = weak_from_this();
+    std::weak_ptr<RemoteDataTrackEntry> weak_entry = entry;
+    return std::make_shared<RemoteDataTrack>(
+        entry->info,
+        entry->publisher_identity,
+        [weak_self, track_sid, generation](DataTrackSubscribeOptions opts)
+            -> asio::awaitable<DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>> {
+            auto self = weak_self.lock();
+            if (!self) {
+                return []() -> asio::awaitable<DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>> {
+                    co_return DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>::Failure({
+                        SubscribeDataTrackErrorCode::Disconnected,
+                        "Room has been destroyed",
+                    });
+                }();
+            }
+            return self->SubscribeRemoteDataTrackAsync(track_sid, std::move(opts), generation);
+        },
+        [weak_self, track_sid, generation](const DataTrackSubscribeOptions& opts)
+            -> DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError> {
+            auto self = weak_self.lock();
+            if (!self) {
+                return DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>::Failure({
+                    SubscribeDataTrackErrorCode::Disconnected,
+                    "Room has been destroyed",
+                });
+            }
+            return self->SubscribeRemoteDataTrackSync(track_sid, opts, generation);
+        },
+        [weak_entry](const DataTrackPipelineOptions& opts) {
+            if (auto locked = weak_entry.lock()) {
+                if (opts.max_partial_frames.has_value()) {
+                    const size_t clamped = std::max<size_t>(1, *opts.max_partial_frames);
+                    locked->max_partial_frames.store(clamped, std::memory_order_release);
+                }
+            }
+        });
+}
+
+DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>
+Room::SubscribeRemoteDataTrackSync(const std::string& track_sid,
+                                   const DataTrackSubscribeOptions& options,
+                                   uint64_t generation) {
+    using Res = DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>;
+    if (retired()) {
+        return Res::Failure({SubscribeDataTrackErrorCode::Disconnected, "Room is retired"});
+    }
+    auto promise = std::make_shared<std::promise<Res>>();
+    auto future = promise->get_future();
+    std::chrono::milliseconds wait_budget = std::chrono::seconds(11);
+    {
+        std::lock_guard lock(room_mutex_);
+        wait_budget = operation_timeouts_.publish + std::chrono::seconds(1);
+    }
+
+    auto self = shared_from_this();
+    livekit::safe_co_spawn(executor_, [self, track_sid, options, generation, promise]() -> asio::awaitable<void> {
+        try {
+            auto result = co_await self->SubscribeRemoteDataTrackAsync(track_sid, options, generation);
+            promise->set_value(std::move(result));
+        } catch (const std::exception& e) {
+            try {
+                promise->set_value(Res::Failure({SubscribeDataTrackErrorCode::Internal, e.what()}));
+            } catch (...) {}
+        } catch (...) {
+            try {
+                promise->set_value(Res::Failure({SubscribeDataTrackErrorCode::Internal, "unknown error"}));
+            } catch (...) {}
+        }
+    });
+
+    if (future.wait_for(wait_budget) != std::future_status::ready) {
+        return Res::Failure({SubscribeDataTrackErrorCode::Timeout, "RemoteDataTrack::Subscribe timed out"});
+    }
+    return future.get();
+}
+
+asio::awaitable<DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>>
+Room::SubscribeRemoteDataTrackAsync(std::string track_sid,
+                                    DataTrackSubscribeOptions options,
+                                    uint64_t generation) {
+    using Res = DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>;
+    auto admission = callback_gate_->Enter();
+    if (!admission) {
+        co_return Res::Failure({SubscribeDataTrackErrorCode::Disconnected, "Room is retired"});
+    }
+
+    std::shared_ptr<AwaitableState<Res>> wait_state;
+    std::shared_ptr<DataTrackStream> ready_stream;
+    bool send_sub_request = false;
+    std::chrono::milliseconds sub_timeout = std::chrono::seconds(10);
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            co_return Res::Failure({
+                SubscribeDataTrackErrorCode::Disconnected,
+                "Room session is not connected",
+            });
+        }
+        const auto it = remote_data_tracks_.find(track_sid);
+        if (it == remote_data_tracks_.end() || !it->second || !it->second->published) {
+            co_return Res::Failure({
+                SubscribeDataTrackErrorCode::Unpublished,
+                "RemoteDataTrack is not published",
+            });
+        }
+        auto& entry = it->second;
+        if (entry->info.uses_e2ee) {
+            if (!e2ee_manager_ || !e2ee_manager_->enabled() ||
+                e2ee_manager_->encryption_type() != EncryptionType::GCM ||
+                !e2ee_manager_->data_packet_cryptor()) {
+                co_return Res::Failure({
+                    SubscribeDataTrackErrorCode::Internal,
+                    "Encrypted remote DataTrack cannot be subscribed without active E2EE key",
+                });
+            }
+        } else if (e2ee_manager_ && e2ee_manager_->enabled() &&
+                   e2ee_manager_->encryption_type() != EncryptionType::NONE) {
+            co_return Res::Failure({
+                SubscribeDataTrackErrorCode::Internal,
+                "Unencrypted remote DataTrack rejected under active E2EE room policy",
+            });
+        }
+
+        sub_timeout = operation_timeouts_.publish;
+        const size_t buf_size = options.buffer_size.has_value()
+            ? std::max<size_t>(1, *options.buffer_size)
+            : DataTrackStream::kDefaultBufferSize;
+
+        if (entry->sub_state == RemoteDataTrackEntry::SubState::Active) {
+            std::weak_ptr<Room> weak_self = weak_from_this();
+            ready_stream = std::make_shared<DataTrackStream>(buf_size, [weak_self, track_sid, generation]() {
+                if (auto self = weak_self.lock()) {
+                    self->OnDataTrackStreamClosed(track_sid, generation);
+                }
+            });
+            entry->active_streams.push_back(ready_stream);
+        } else {
+            wait_state = std::make_shared<AwaitableState<Res>>(executor_);
+            entry->stream_buffer_size = buf_size;
+            if (options.target_fps.has_value()) {
+                entry->target_fps = options.target_fps;
+            }
+            entry->pending_subscribes.push_back(wait_state);
+            if (entry->sub_state == RemoteDataTrackEntry::SubState::None) {
+                entry->sub_state = RemoteDataTrackEntry::SubState::Pending;
+                send_sub_request = true;
+            }
+        }
+    }
+
+    if (ready_stream) {
+        co_return Res::Success(std::move(ready_stream));
+    }
+
+    if (send_sub_request) {
+        proto::SignalRequest req;
+        auto* sub = req.mutable_update_data_subscription();
+        auto* upd = sub->add_updates();
+        upd->set_track_sid(track_sid);
+        upd->set_subscribe(true);
+        if (options.target_fps.has_value()) {
+            upd->mutable_options()->set_target_fps(*options.target_fps);
+        }
+        SendDataTrackSignal(req, generation);
+    }
+
+    try {
+        auto res = co_await WaitAwaitable<Res>(
+            wait_state,
+            sub_timeout,
+            OperationKind::SendData,
+            OperationErrorCode::TrackPublishTimeout,
+            "subscribe_data_track");
+        co_return res;
+    } catch (const OperationError& err) {
+        bool send_unsub = false;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (const auto it = remote_data_tracks_.find(track_sid);
+                it != remote_data_tracks_.end() && it->second) {
+                auto& pending = it->second->pending_subscribes;
+                pending.erase(std::remove(pending.begin(), pending.end(), wait_state), pending.end());
+                it->second->active_streams.erase(
+                    std::remove_if(it->second->active_streams.begin(),
+                                   it->second->active_streams.end(),
+                                   [](const std::weak_ptr<DataTrackStream>& w) { return w.expired(); }),
+                    it->second->active_streams.end());
+                if (pending.empty() && it->second->active_streams.empty() &&
+                    it->second->sub_state == RemoteDataTrackEntry::SubState::Pending) {
+                    it->second->sub_state = RemoteDataTrackEntry::SubState::None;
+                    send_unsub = IsSignalGenerationCurrentLocked(generation) &&
+                        connection_state_ == ConnectionState::Connected;
+                }
+            }
+        }
+        if (send_unsub) {
+            proto::SignalRequest unsub_req;
+            auto* upd = unsub_req.mutable_update_data_subscription()->add_updates();
+            upd->set_track_sid(track_sid);
+            upd->set_subscribe(false);
+            SendDataTrackSignal(unsub_req, generation);
+        }
+        const auto code = err.code() == OperationErrorCode::Cancelled ||
+                err.code() == OperationErrorCode::SessionClosed
+            ? SubscribeDataTrackErrorCode::Disconnected
+            : SubscribeDataTrackErrorCode::Timeout;
+        co_return Res::Failure({code, err.what()});
+    } catch (const std::exception& err) {
+        co_return Res::Failure({SubscribeDataTrackErrorCode::Internal, err.what()});
+    }
+}
+
+void Room::OnDataTrackStreamClosed(const std::string& track_sid, uint64_t generation) {
+    bool send_unsub = false;
+    {
+        std::lock_guard lock(room_mutex_);
+        // If session is currently in full_restart preserve records, detach stream cleanly
+        // when the user drops it rather than resurrecting it later.
+        for (auto it = reconnect_data_sub_records_.begin(); it != reconnect_data_sub_records_.end();) {
+            it->streams.erase(
+                std::remove_if(it->streams.begin(), it->streams.end(),
+                               [](const std::weak_ptr<DataTrackStream>& w) {
+                                   auto locked = w.lock();
+                                   return !locked || locked->IsClosed();
+                               }),
+                it->streams.end());
+            if (it->streams.empty()) {
+                it = reconnect_data_sub_records_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        const auto dt_it = remote_data_tracks_.find(track_sid);
+        if (dt_it != remote_data_tracks_.end() && dt_it->second) {
+            auto& entry = dt_it->second;
+            entry->active_streams.erase(
+                std::remove_if(entry->active_streams.begin(), entry->active_streams.end(),
+                               [](const std::weak_ptr<DataTrackStream>& w) {
+                                   auto locked = w.lock();
+                                   return !locked || locked->IsClosed();
+                               }),
+                entry->active_streams.end());
+            if (entry->active_streams.empty() && entry->pending_subscribes.empty() &&
+                entry->sub_state != RemoteDataTrackEntry::SubState::None) {
+                if (entry->assigned_sub_handle != 0) {
+                    data_track_sub_handles_.erase(entry->assigned_sub_handle);
+                    entry->assigned_sub_handle = 0;
+                }
+                entry->sub_state = RemoteDataTrackEntry::SubState::None;
+                {
+                    std::lock_guard pipe_lock(entry->depacketizer_mutex);
+                    entry->depacketizer.Reset();
+                }
+                send_unsub = IsSignalGenerationCurrentLocked(generation) &&
+                    connection_state_ == ConnectionState::Connected;
+            }
+        }
+    }
+    if (send_unsub) {
+        proto::SignalRequest req;
+        auto* upd = req.mutable_update_data_subscription()->add_updates();
+        upd->set_track_sid(track_sid);
+        upd->set_subscribe(false);
+        SendDataTrackSignal(req, generation);
+    }
+}
+
+void Room::HandlePublishDataTrackResponse(const proto::PublishDataTrackResponse& resp,
+                                          uint64_t event_generation) {
+    if (!resp.has_info()) {
+        return;
+    }
+    const auto& pb_info = resp.info();
+    if (pb_info.pub_handle() == 0 || pb_info.pub_handle() > 0xFFFFu) {
+        return;
+    }
+    const uint16_t pub_handle = static_cast<uint16_t>(pb_info.pub_handle());
+    if (pb_info.encryption() != proto::Encryption::NONE &&
+        pb_info.encryption() != proto::Encryption::GCM) {
+        std::shared_ptr<AwaitableState<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>>
+            pending;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+            const auto p_it = pending_data_track_publishes_.find(pub_handle);
+            if (p_it != pending_data_track_publishes_.end()) {
+                pending = std::move(p_it->second);
+                pending_data_track_publishes_.erase(p_it);
+            }
+        }
+        if (pending) {
+            CompleteAwaitable(pending,
+                DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+                    PublishDataTrackErrorCode::ProtocolError,
+                    "Unsupported encryption type in PublishDataTrackResponse",
+                }));
+        }
+        return;
+    }
+
+    std::shared_ptr<AwaitableState<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>>
+        pending;
+    std::shared_ptr<LocalDataTrack> created_track;
+    std::shared_ptr<LocalDataTrack> repub_track;
+    bool orphan_unpublish = false;
+    uint64_t current_gen = 0;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        current_gen = session_generation_.load(std::memory_order_acquire);
+
+        if (const auto p_it = pending_data_track_publishes_.find(pub_handle);
+            p_it != pending_data_track_publishes_.end()) {
+            pending = std::move(p_it->second);
+            pending_data_track_publishes_.erase(p_it);
+
+            auto entry = std::make_shared<LocalDataTrackEntry>();
+            entry->pub_handle = pub_handle;
+            entry->info.pub_handle = pub_handle;
+            entry->info.sid = pb_info.sid();
+            entry->info.name = pb_info.name();
+            entry->info.uses_e2ee = (pb_info.encryption() == proto::Encryption::GCM);
+            entry->packetizer = std::make_unique<data_track::DtpPacketizer>(pub_handle);
+
+            created_track = BuildLocalDataTrackObjectLocked(entry, current_gen);
+            entry->track = created_track;
+            local_data_tracks_[pub_handle] = std::move(entry);
+        } else if (const auto l_it = local_data_tracks_.find(pub_handle);
+                   l_it != local_data_tracks_.end() && l_it->second && l_it->second->republishing) {
+            l_it->second->info.sid = pb_info.sid();
+            l_it->second->republishing = false;
+            repub_track = l_it->second->track.lock();
+        } else {
+            orphan_unpublish = true;
+        }
+    }
+
+    if (repub_track) {
+        repub_track->UpdateSidFromReconnect(pb_info.sid());
+        repub_track->SetRepublishing(false);
+        std::lock_guard lock(room_mutex_);
+        if (IsNativeGenerationCurrentLocked(current_gen)) {
+            ScheduleDataTrackDrainLocked(current_gen);
+        }
+        return;
+    }
+
+    if (pending && created_track) {
+        CompleteAwaitable(pending,
+            DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Success(
+                std::move(created_track)));
+        return;
+    }
+
+    if (orphan_unpublish) {
+        proto::SignalRequest unpub;
+        unpub.mutable_unpublish_data_track_request()->set_pub_handle(pub_handle);
+        SendDataTrackSignal(unpub, event_generation);
+    }
+}
+
+void Room::HandleUnpublishDataTrackResponse(const proto::UnpublishDataTrackResponse& resp,
+                                            uint64_t event_generation) {
+    if (!resp.has_info() || resp.info().pub_handle() == 0 || resp.info().pub_handle() > 0xFFFFu) {
+        return;
+    }
+    const uint16_t pub_handle = static_cast<uint16_t>(resp.info().pub_handle());
+    std::shared_ptr<LocalDataTrack> track_to_retire;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        const auto it = local_data_tracks_.find(pub_handle);
+        if (it != local_data_tracks_.end() && it->second) {
+            it->second->unpublished = true;
+            it->second->send_queue.Clear();
+            it->second->in_flight_packets.clear();
+            track_to_retire = it->second->track.lock();
+            local_data_tracks_.erase(it);
+        }
+    }
+    if (track_to_retire) {
+        track_to_retire->MarkUnpublishedInternal();
+    }
+}
+
+void Room::HandleDataTrackSubscriberHandles(const proto::DataTrackSubscriberHandles& handles,
+                                            uint64_t event_generation) {
+    using Res = DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>;
+    struct CompletedWait {
+        std::shared_ptr<AwaitableState<Res>> state;
+        std::shared_ptr<DataTrackStream> stream;
+    };
+    std::vector<CompletedWait> completed;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        const uint64_t current_gen = session_generation_.load(std::memory_order_acquire);
+
+        for (const auto& [raw_handle, published] : handles.sub_handles()) {
+            if (raw_handle == 0 || raw_handle > 0xFFFFu || published.track_sid().empty()) {
+                continue;
+            }
+            const uint16_t sub_handle = static_cast<uint16_t>(raw_handle);
+            const std::string& track_sid = published.track_sid();
+            const auto dt_it = remote_data_tracks_.find(track_sid);
+            if (dt_it == remote_data_tracks_.end() || !dt_it->second || !dt_it->second->published) {
+                continue;
+            }
+            auto& entry = dt_it->second;
+            if (entry->sub_state == RemoteDataTrackEntry::SubState::None) {
+                continue;
+            }
+            if (entry->assigned_sub_handle != 0 && entry->assigned_sub_handle != sub_handle) {
+                data_track_sub_handles_.erase(entry->assigned_sub_handle);
+            }
+            entry->assigned_sub_handle = sub_handle;
+            data_track_sub_handles_[sub_handle] = track_sid;
+
+            if (entry->sub_state == RemoteDataTrackEntry::SubState::Pending) {
+                entry->sub_state = RemoteDataTrackEntry::SubState::Active;
+                std::weak_ptr<Room> weak_self = weak_from_this();
+                auto pending_list = std::move(entry->pending_subscribes);
+                entry->pending_subscribes.clear();
+                for (auto& wait_state : pending_list) {
+                    if (!wait_state) continue;
+                    auto stream = std::make_shared<DataTrackStream>(
+                        entry->stream_buffer_size,
+                        [weak_self, track_sid, current_gen]() {
+                            if (auto self = weak_self.lock()) {
+                                self->OnDataTrackStreamClosed(track_sid, current_gen);
+                            }
+                        });
+                    entry->active_streams.push_back(stream);
+                    completed.push_back({std::move(wait_state), std::move(stream)});
+                }
+            }
+        }
+    }
+
+    for (auto& item : completed) {
+        CompleteAwaitable(item.state, Res::Success(std::move(item.stream)));
+    }
+}
+
+bool Room::HandleDataTrackRequestResponse(const proto::RequestResponse& resp,
+                                          uint64_t event_generation) {
+    if (!resp.has_publish_data_track()) {
+        return false;
+    }
+    const uint32_t raw_handle = resp.publish_data_track().pub_handle();
+    if (raw_handle == 0 || raw_handle > 0xFFFFu) {
+        return true;
+    }
+    const uint16_t pub_handle = static_cast<uint16_t>(raw_handle);
+
+    PublishDataTrackErrorCode code = PublishDataTrackErrorCode::Internal;
+    switch (resp.reason()) {
+        case proto::RequestResponse::NOT_ALLOWED:     code = PublishDataTrackErrorCode::NotAllowed; break;
+        case proto::RequestResponse::DUPLICATE_NAME:  code = PublishDataTrackErrorCode::DuplicateName; break;
+        case proto::RequestResponse::INVALID_NAME:    code = PublishDataTrackErrorCode::InvalidName; break;
+        case proto::RequestResponse::INVALID_HANDLE:
+        case proto::RequestResponse::DUPLICATE_HANDLE:code = PublishDataTrackErrorCode::InvalidHandle; break;
+        case proto::RequestResponse::LIMIT_EXCEEDED:  code = PublishDataTrackErrorCode::LimitReached; break;
+        default:                                      code = PublishDataTrackErrorCode::Internal; break;
+    }
+    PublishDataTrackError err{
+        code,
+        resp.message().empty() ? "SFU rejected PublishDataTrack request" : resp.message(),
+    };
+
+    std::shared_ptr<AwaitableState<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>>
+        pending;
+    std::shared_ptr<LocalDataTrack> repub_track_to_retire;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return true;
+        if (const auto it = pending_data_track_publishes_.find(pub_handle);
+            it != pending_data_track_publishes_.end()) {
+            pending = std::move(it->second);
+            pending_data_track_publishes_.erase(it);
+        } else if (const auto l_it = local_data_tracks_.find(pub_handle);
+                   l_it != local_data_tracks_.end() && l_it->second && l_it->second->republishing) {
+            l_it->second->unpublished = true;
+            repub_track_to_retire = l_it->second->track.lock();
+            local_data_tracks_.erase(l_it);
+        }
+    }
+
+    if (pending) {
+        CompleteAwaitable(pending,
+            DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure(
+                std::move(err)));
+    }
+    if (repub_track_to_retire) {
+        repub_track_to_retire->MarkUnpublishedInternal();
+    }
+    return true;
+}
+
+void Room::OnIncomingDataTrackPacket(const std::vector<uint8_t>& payload, uint64_t generation) {
+    if (payload.empty()) return;
+    BeforeNativeEventCommit(generation);
+
+    data_track::DtpPacket packet;
+    data_track::DtpDeserializeError derr = data_track::DtpDeserializeError::None;
+    if (!data_track::DtpPacket::Deserialize(payload, packet, &derr)) {
+        Log("DATA_TRACK", "DESERIALIZE_ERR",
+            std::string("Dropped malformed DTP packet: ") + data_track::ToString(derr));
+        return;
+    }
+
+    std::shared_ptr<RemoteDataTrackEntry> entry;
+    bool track_uses_e2ee = false;
+    std::string publisher_identity;
+    std::shared_ptr<E2eeManager> enc_owner;
+    E2eeManager::DataPacketState enc_state{};
+    std::vector<std::shared_ptr<DataTrackStream>> live_streams;
+    size_t max_partials = 1;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            return;
+        }
+        const auto h_it = data_track_sub_handles_.find(packet.header.track_handle);
+        if (h_it == data_track_sub_handles_.end()) {
+            return;
+        }
+        const auto r_it = remote_data_tracks_.find(h_it->second);
+        if (r_it == remote_data_tracks_.end() || !r_it->second || !r_it->second->published ||
+            r_it->second->sub_state != RemoteDataTrackEntry::SubState::Active) {
+            return;
+        }
+        entry = r_it->second;
+        max_partials = entry->max_partial_frames.load(std::memory_order_acquire);
+        track_uses_e2ee = entry->info.uses_e2ee;
+        publisher_identity = entry->publisher_identity;
+        enc_owner = e2ee_manager_;
+        if (enc_owner) {
+            enc_state = enc_owner->data_packet_state();
+        }
+        for (auto it = entry->active_streams.begin(); it != entry->active_streams.end();) {
+            if (auto s = it->lock(); s && !s->IsClosed() && !s->IsEos()) {
+                live_streams.push_back(std::move(s));
+                ++it;
+            } else {
+                it = entry->active_streams.erase(it);
+            }
+        }
+    }
+
+    if (live_streams.empty()) {
+        return;
+    }
+
+    // Fail-closed E2EE room gate before frame assembly: reject plaintext tracks
+    // when room E2EE is enabled.
+    if (!track_uses_e2ee && enc_owner && enc_state.enabled &&
+        enc_owner->encryption_type() != EncryptionType::NONE) {
+        Log("SECURITY", "DATA_TRACK_PLAINTEXT_REJECTED",
+            "Rejected unencrypted remote DataTrack packet under active E2EE session");
+        return;
+    }
+
+    data_track::DtpDepacketizerPushResult push_res;
+    {
+        std::lock_guard pipe_lock(entry->depacketizer_mutex);
+        push_res = entry->depacketizer.Push(std::move(packet), {max_partials});
+    }
+    if (push_res.drop_error.has_value()) {
+        Log("DATA_TRACK", "FRAME_DROPPED", push_res.drop_error->Describe());
+    }
+    if (!push_res.frame.has_value()) {
+        return;
+    }
+
+    DataTrackFrame frame;
+    frame.user_timestamp = push_res.frame->extensions.user_timestamp;
+    frame.payload = std::move(push_res.frame->payload);
+
+    if (track_uses_e2ee) {
+        if (!enc_owner || !enc_state.enabled ||
+            enc_owner->encryption_type() != EncryptionType::GCM ||
+            !enc_owner->data_packet_cryptor()) {
+            return;
+        }
+        if (!push_res.frame->extensions.e2ee.has_value()) {
+            Log("SECURITY", "DATA_TRACK_E2EE_MISSING",
+                "Dropped encrypted DataTrack frame missing E2EE header extension");
+            return;
+        }
+        const auto& ext = *push_res.frame->extensions.e2ee;
+        EncryptedDataPacket encrypted_pkt;
+        encrypted_pkt.encryption_type = EncryptionType::GCM;
+        encrypted_pkt.key_index = ext.key_index;
+        encrypted_pkt.iv.assign(ext.iv.begin(), ext.iv.end());
+        encrypted_pkt.ciphertext = std::move(frame.payload);
+
+        auto decrypted = enc_owner->data_packet_cryptor()->DecryptPacket(
+            publisher_identity,
+            encrypted_pkt,
+            DataPacketCryptor::kMaxDataTrackPayloadBytes);
+        const auto* auth = std::get_if<AuthenticatedDataPayload>(&decrypted);
+        if (!auth) {
+            Log("SECURITY", "DATA_TRACK_DECRYPT_FAILED",
+                "Dropped remote DataTrack frame failing E2EE authentication");
+            return;
+        }
+        frame.payload = auth->bytes;
+    }
+
+    // Revalidate session generation and E2EE policy revision right before delivery.
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected ||
+            !entry->published ||
+            entry->sub_state != RemoteDataTrackEntry::SubState::Active) {
+            return;
+        }
+        if (track_uses_e2ee &&
+            (e2ee_manager_ != enc_owner || !enc_owner ||
+             !enc_owner->enabled() ||
+             enc_owner->data_packet_state().policy_revision != enc_state.policy_revision)) {
+            return;
+        }
+    }
+
+    for (const auto& stream : live_streams) {
+        stream->PushFrame(frame);
+    }
+}
+
+void Room::PrepareDataTracksForFullRestartLocked() {
+    reconnect_data_track_records_.clear();
+    reconnect_data_sub_records_.clear();
+
+    for (const auto& [pub_handle, entry] : local_data_tracks_) {
+        if (!entry || entry->unpublished) continue;
+        auto live = entry->track.lock();
+        if (!live || !live->IsPublished()) continue;
+        entry->republishing = true;
+        live->SetRepublishing(true);
+        reconnect_data_track_records_.push_back({
+            pub_handle,
+            entry->info.name,
+            entry->info.uses_e2ee,
+            live,
+        });
+    }
+
+    for (auto& [sid, entry] : remote_data_tracks_) {
+        (void)sid;
+        if (!entry || !entry->published) continue;
+        if (entry->sub_state == RemoteDataTrackEntry::SubState::None) continue;
+        std::vector<std::weak_ptr<DataTrackStream>> live_streams;
+        for (const auto& weak_s : entry->active_streams) {
+            if (auto s = weak_s.lock(); s && !s->IsClosed() && !s->IsEos()) {
+                live_streams.push_back(weak_s);
+            }
+        }
+        if (!live_streams.empty()) {
+            reconnect_data_sub_records_.push_back({
+                entry->publisher_identity,
+                entry->info.name,
+                entry->info.sid,
+                entry->target_fps,
+                entry->max_partial_frames.load(std::memory_order_acquire),
+                std::move(live_streams),
+            });
+            // Detach streams from the old session's entry so terminal teardown of
+            // the old session does not spuriously push EOS before recovery tries.
+            entry->active_streams.clear();
+        }
+    }
+}
+
+void Room::TakeDataTrackCleanupLocked(bool clear_reconnect_records,
+                                      DataTrackCleanupBatch& batch) {
+    for (const auto& waiter : pending_data_track_dc_waits_) {
+        if (waiter.completion) batch.dc_waits.push_back(waiter.completion);
+    }
+    pending_data_track_dc_waits_.clear();
+
+    for (auto& [handle, state] : pending_data_track_publishes_) {
+        (void)handle;
+        if (state) batch.publish_states.push_back(std::move(state));
+    }
+    pending_data_track_publishes_.clear();
+
+    for (auto& [handle, entry] : local_data_tracks_) {
+        (void)handle;
+        if (!entry) continue;
+        entry->unpublished = true;
+        entry->send_queue.Clear();
+        entry->in_flight_packets.clear();
+        if (auto live = entry->track.lock()) {
+            batch.local_tracks.push_back(std::move(live));
+        }
+    }
+    local_data_tracks_.clear();
+
+    for (auto& [sid, entry] : remote_data_tracks_) {
+        (void)sid;
+        if (!entry) continue;
+        entry->published = false;
+        if (auto live = entry->track.lock()) {
+            batch.remote_tracks.push_back(std::move(live));
+        }
+        for (auto& sub_state : entry->pending_subscribes) {
+            if (sub_state) batch.subscribe_states.push_back(std::move(sub_state));
+        }
+        entry->pending_subscribes.clear();
+        for (const auto& weak_s : entry->active_streams) {
+            if (auto s = weak_s.lock()) {
+                batch.streams.push_back(std::move(s));
+            }
+        }
+        entry->active_streams.clear();
+    }
+    remote_data_tracks_.clear();
+    data_track_sub_handles_.clear();
+    data_track_drain_scheduled_ = false;
+
+    if (clear_reconnect_records) {
+        for (auto& rec : reconnect_data_track_records_) {
+            if (auto live = rec.track.lock()) {
+                batch.local_tracks.push_back(std::move(live));
+            }
+        }
+        reconnect_data_track_records_.clear();
+
+        for (auto& sub_rec : reconnect_data_sub_records_) {
+            for (const auto& weak_s : sub_rec.streams) {
+                if (auto s = weak_s.lock()) {
+                    batch.streams.push_back(std::move(s));
+                }
+            }
+        }
+        reconnect_data_sub_records_.clear();
+    }
+}
+
+void Room::FinalizeDataTrackCleanup(DataTrackCleanupBatch batch,
+                                    OperationErrorCode code,
+                                    const std::string& message) {
+    const auto pub_err = code == OperationErrorCode::ReconnectExhausted ||
+            code == OperationErrorCode::SessionClosed ||
+            code == OperationErrorCode::Cancelled
+        ? PublishDataTrackErrorCode::Disconnected
+        : PublishDataTrackErrorCode::Timeout;
+    const auto sub_err = code == OperationErrorCode::ReconnectExhausted ||
+            code == OperationErrorCode::SessionClosed ||
+            code == OperationErrorCode::Cancelled
+        ? SubscribeDataTrackErrorCode::Disconnected
+        : SubscribeDataTrackErrorCode::Timeout;
+
+    for (const auto& dc_wait : batch.dc_waits) {
+        FailAwaitable(dc_wait, std::make_exception_ptr(OperationError(
+            OperationKind::PublishTrack, code, "data_track_cleanup", message, true)));
+    }
+    for (const auto& pub_wait : batch.publish_states) {
+        CompleteAwaitable(pub_wait,
+            DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>::Failure({
+                pub_err, message
+            }));
+    }
+    for (const auto& sub_wait : batch.subscribe_states) {
+        CompleteAwaitable(sub_wait,
+            DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>::Failure({
+                sub_err, message
+            }));
+    }
+    for (const auto& track : batch.local_tracks) {
+        if (track) track->MarkUnpublishedInternal();
+    }
+    for (const auto& remote_track : batch.remote_tracks) {
+        if (remote_track) remote_track->MarkUnpublishedInternal();
+    }
+    for (const auto& stream : batch.streams) {
+        if (stream) {
+            stream->PushEos(SubscribeDataTrackError{sub_err, message});
+        }
+    }
+}
+
+asio::awaitable<void> Room::RecoverDataTracksAfterFullRestartAsync(uint64_t generation) {
+    std::vector<ReconnectLocalDataTrackRecord> local_records;
+    std::vector<ReconnectRemoteDataSubRecord> remote_records;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            co_return;
+        }
+        local_records = std::move(reconnect_data_track_records_);
+        remote_records = std::move(reconnect_data_sub_records_);
+        reconnect_data_track_records_.clear();
+        reconnect_data_sub_records_.clear();
+    }
+
+    // 1. Restore remote subscriptions against the newly joined participant tracks.
+    std::vector<std::shared_ptr<DataTrackStream>> orphaned_streams;
+    std::vector<proto::SignalRequest> resub_requests;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            for (auto& rec : local_records) {
+                if (auto t = rec.track.lock()) t->MarkUnpublishedInternal();
+            }
+            for (auto& srec : remote_records) {
+                for (const auto& w : srec.streams) {
+                    if (auto s = w.lock()) orphaned_streams.push_back(std::move(s));
+                }
+            }
+            co_return;
+        }
+
+        std::weak_ptr<Room> weak_self = weak_from_this();
+        for (auto& rec : remote_records) {
+            std::shared_ptr<RemoteDataTrackEntry> matched;
+            for (const auto& [new_sid, entry] : remote_data_tracks_) {
+                (void)new_sid;
+                if (!entry || !entry->published) continue;
+                if (entry->publisher_identity == rec.publisher_identity &&
+                    entry->info.name == rec.track_name) {
+                    matched = entry;
+                    break;
+                }
+            }
+            if (!matched) {
+                for (const auto& w : rec.streams) {
+                    if (auto s = w.lock()) orphaned_streams.push_back(std::move(s));
+                }
+                continue;
+            }
+            matched->max_partial_frames.store(
+                std::max<size_t>(1, rec.max_partial_frames), std::memory_order_release);
+            if (rec.target_fps.has_value()) {
+                matched->target_fps = rec.target_fps;
+            }
+            const std::string new_sid = matched->info.sid;
+            size_t attached = 0;
+            for (const auto& w : rec.streams) {
+                if (auto s = w.lock(); s && !s->IsClosed() && !s->IsEos()) {
+                    s->SetCloseHandler([weak_self, new_sid, generation]() {
+                        if (auto self = weak_self.lock()) {
+                            self->OnDataTrackStreamClosed(new_sid, generation);
+                        }
+                    });
+                    matched->active_streams.push_back(s);
+                    ++attached;
+                }
+            }
+            if (attached > 0 && matched->sub_state == RemoteDataTrackEntry::SubState::None) {
+                matched->sub_state = RemoteDataTrackEntry::SubState::Pending;
+                proto::SignalRequest req;
+                auto* upd = req.mutable_update_data_subscription()->add_updates();
+                upd->set_track_sid(new_sid);
+                upd->set_subscribe(true);
+                if (matched->target_fps.has_value()) {
+                    upd->mutable_options()->set_target_fps(*matched->target_fps);
+                }
+                resub_requests.push_back(std::move(req));
+            }
+        }
+    }
+
+    for (const auto& s : orphaned_streams) {
+        if (s) s->PushEos(std::nullopt);
+    }
+    for (const auto& req : resub_requests) {
+        SendDataTrackSignal(req, generation);
+    }
+
+    // 2. Re-publish surviving local DataTracks preserving original pub_handle & object identity.
+    std::vector<std::pair<std::shared_ptr<LocalDataTrack>,
+        std::pair<LocalDataTrack::TryPushHandler, LocalDataTrack::UnpublishHandler>>>
+        rebound_locals;
+    std::vector<proto::SignalRequest> repub_requests;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            connection_state_ != ConnectionState::Connected) {
+            for (auto& rec : local_records) {
+                if (auto t = rec.track.lock()) t->MarkUnpublishedInternal();
+            }
+            co_return;
+        }
+        for (const auto& rec : local_records) {
+            auto live = rec.track.lock();
+            if (!live || !live->IsPublished()) continue;
+            auto entry = std::make_shared<LocalDataTrackEntry>();
+            entry->pub_handle = rec.pub_handle;
+            entry->info = live->info();
+            entry->republishing = true;
+            entry->track = live;
+            entry->packetizer = std::make_unique<data_track::DtpPacketizer>(rec.pub_handle);
+            // Rebind hooks to the new session generation while keeping original LocalDataTrack alive.
+            rebound_locals.emplace_back(live, MakeLocalDataTrackHandlers(rec.pub_handle, generation));
+            local_data_tracks_[rec.pub_handle] = std::move(entry);
+
+            proto::SignalRequest req;
+            auto* pub = req.mutable_publish_data_track_request();
+            pub->set_pub_handle(rec.pub_handle);
+            pub->set_name(rec.name);
+            pub->set_encryption(rec.uses_e2ee ? proto::Encryption::GCM : proto::Encryption::NONE);
+            repub_requests.push_back(std::move(req));
+        }
+    }
+
+    for (auto& [live, handlers] : rebound_locals) {
+        live->RebindHandlersInternal(std::move(handlers.first), std::move(handlers.second));
+    }
+    for (const auto& req : repub_requests) {
+        SendDataTrackSignal(req, generation);
     }
     co_return;
 }

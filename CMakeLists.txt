@@ -271,6 +271,8 @@ set(LIVEKIT_SOURCES
     src/core/video_demand_policy.cpp
     src/core/data_stream_assembler.cpp
     src/core/data_stream.cpp
+    src/core/data_track/dtp_packet.cpp
+    src/core/data_track.cpp
     src/rtc/webrtc_manager.cpp
     src/rtc/retained_vp8_decoder.cpp
     src/rtc/retained_vp8_decoder.h
@@ -387,6 +389,8 @@ set(LIVEKIT_HEADERS
     src/core/video_demand_policy.h
     src/core/video_demand_types.h
     src/core/data_stream_assembler.h
+    src/core/data_track/dtp_packet.h
+    src/core/data_track.h
     src/rtc/webrtc_manager.h
     src/rtc/audio_frame.h
     src/rtc/video_frame.h

@@ -484,9 +484,10 @@ DataPacketCryptor::DataPacketCryptor(std::shared_ptr<KeyProvider> key_provider)
 
 std::variant<EncryptedDataPacket, PacketCryptoError>
 DataPacketCryptor::EncryptPacket(std::string_view sender_identity, int key_index,
-                                const std::vector<uint8_t>& payload) {
+                                const std::vector<uint8_t>& payload,
+                                size_t max_packet_bytes) {
     // Account for both the IV and the authentication tag before encrypting.
-    if (payload.size() > kMaxEncryptedPacketBytes - 12 - 16)
+    if (max_packet_bytes < 28 || payload.size() > max_packet_bytes - 12 - 16)
         return PacketCryptoError::SizeLimitExceeded;
     if (sender_identity.empty()) return PacketCryptoError::InvalidEnvelope;
     if (!key_provider_) return PacketCryptoError::MissingKey;
@@ -545,11 +546,13 @@ DataPacketCryptor::EncryptPacket(std::string_view sender_identity, int key_index
 
 std::variant<AuthenticatedDataPayload, PacketCryptoError>
 DataPacketCryptor::DecryptPacket(std::string_view sender_identity,
-                               const EncryptedDataPacket& packet) {
+                               const EncryptedDataPacket& packet,
+                               size_t max_packet_bytes) {
     if (packet.encryption_type != EncryptionType::GCM)
         return PacketCryptoError::UnsupportedType;
-    if (packet.iv.size() > kMaxEncryptedPacketBytes ||
-        packet.ciphertext.size() > kMaxEncryptedPacketBytes - packet.iv.size())
+    if (max_packet_bytes < 28 ||
+        packet.iv.size() > max_packet_bytes ||
+        packet.ciphertext.size() > max_packet_bytes - packet.iv.size())
         return PacketCryptoError::SizeLimitExceeded;
     if (sender_identity.empty() || packet.iv.size() != 12 ||
         packet.ciphertext.size() < 16)

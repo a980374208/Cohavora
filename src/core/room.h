@@ -29,6 +29,8 @@
 #include "frame_cryptor.h"
 #include "data_stream_assembler.h"
 #include "data_stream.h"
+#include "data_track.h"
+#include "data_track/dtp_packet.h"
 #include "operation.h"
 #include "screen_share_quality.h"
 #include "telemetry/diagnostic_event.h"
@@ -210,6 +212,24 @@ public:
     virtual void OnDataChannelBufferedAmountLowThresholdChanged(uint64_t amount, bool reliable) {}
     virtual void OnTextStreamOpened(std::shared_ptr<TextStreamReader> reader, std::shared_ptr<Participant> participant) {}
     virtual void OnByteStreamOpened(std::shared_ptr<ByteStreamReader> reader, std::shared_ptr<Participant> participant) {}
+    virtual void OnDataTrackPublished(std::shared_ptr<RemoteParticipant> participant,
+                                      std::shared_ptr<RemoteDataTrack> track) {
+        (void)participant;
+        (void)track;
+    }
+    virtual void OnDataTrackUnpublished(std::shared_ptr<RemoteParticipant> participant,
+                                        const std::string& sid) {
+        (void)participant;
+        (void)sid;
+    }
+    virtual void OnTranscriptionReceived(
+        const TranscriptionEvent& event,
+        std::shared_ptr<Participant> transcribed_participant,
+        std::shared_ptr<TrackPublication> publication) {
+        (void)event;
+        (void)transcribed_participant;
+        (void)publication;
+    }
 
     virtual void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<Participant>>& speakers) {}
     virtual void OnParticipantEvent(const ParticipantEvent& event) {}
@@ -223,6 +243,13 @@ public:
 
 class RoomDataChannelObserver;
 class RoomStreamDeliveryInspectionAccess;
+class RoomDataTrackInspectionAccess;
+
+enum class RoomDataChannelRole {
+    Reliable,
+    Lossy,
+    DataTrack,
+};
 
 class Room : public std::enable_shared_from_this<Room> {
 private:
@@ -264,6 +291,10 @@ public:
         local_participant_ = local;
         if (local_participant_) {
             EnsureMembershipLocked(local_participant_, true);
+            const auto gen = session_generation_.load(std::memory_order_acquire);
+            if (gen != 0) {
+                BindLocalDataTrackHandlersLocked(gen);
+            }
         }
     }
     void InjectParticipantUpdate(const proto::ParticipantUpdate& update);
@@ -333,6 +364,7 @@ public:
     void SetParticipantVolume(const std::string& identity_or_sid, double volume);
     void SetParticipantMuted(const std::string& identity_or_sid, bool muted);
     void SetAudioOutputMuted(bool muted);
+    bool IsAudioOutputMuted() const;
 
     // === 新增：E2EE 端到端加密管理器 ===
     void EnableE2ee(const E2eeOptions& options);
@@ -426,6 +458,7 @@ private:
     friend class RoomSecurityInspectionAccess;
     friend class RoomConnectAttemptInspectionAccess;
     friend class RoomStreamDeliveryInspectionAccess;
+    friend class RoomDataTrackInspectionAccess;
     friend class RoomSinglePcInspectionAccess;
     friend class RoomEncryptionInteropInspectionAccess;
     // Only the named inspection friend can install these two transport-boundary
@@ -520,7 +553,7 @@ private:
         webrtc::PeerConnectionInterface* publisher, bool single_pc_mode,
         bool video_enabled = true);
     std::shared_ptr<webrtc::DataChannelObserver> CreateDataChannelObserver(
-        bool reliable,
+        RoomDataChannelRole role,
         uint64_t generation,
         webrtc::DataChannelInterface* channel = nullptr);
     void PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
@@ -555,6 +588,11 @@ private:
                                    uint64_t generation,
                                    const webrtc::DataChannelInterface* channel);
     void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable, uint64_t generation);
+    void OnDataTrackChannelStateChanged(webrtc::DataChannelInterface::DataState state,
+                                        uint64_t generation,
+                                        const webrtc::DataChannelInterface* channel);
+    void OnDataTrackChannelBufferedAmountLow(uint64_t generation);
+    void OnIncomingDataTrackPacket(const std::vector<uint8_t>& payload, uint64_t generation);
     void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& sid, const std::string& topic, uint64_t generation);
     void OnIncomingDataPacketAt(
         const std::vector<uint8_t>& payload,
@@ -618,11 +656,22 @@ private:
     asio::awaitable<void> ApplyPublishedSenderScalabilityModesAsync(
         PublishedSenderBundle bundle,
         uint64_t generation);
+    asio::awaitable<void> ReconcileNegotiatedVideoSendersAsync(
+        PublishedSenderBundle bundle,
+        VideoPublishOptions options,
+        uint64_t generation,
+        std::shared_ptr<LocalVideoTrack> track);
     asio::awaitable<void> ValidateFinalVideoSendersAsync(
         PublishedSenderBundle bundle,
         VideoPublishOptions options,
         uint64_t generation,
         std::shared_ptr<LocalVideoTrack> track);
+    asio::awaitable<void> ReconcileAndValidateVideoSendersAsync(
+        PublishedSenderBundle bundle,
+        VideoPublishOptions options,
+        uint64_t generation,
+        std::shared_ptr<LocalVideoTrack> track,
+        std::function<void()> validate_preflight);
     void HandleSignalEvent(const SignalEvent& event, uint64_t event_generation = 0);
     void HandleSignalMessage(
         std::shared_ptr<proto::SignalResponse> msg,
@@ -796,6 +845,10 @@ private:
         const std::string& participant_sid,
         const std::string& participant_identity,
         std::shared_ptr<Participant>* participant);
+    std::pair<std::shared_ptr<Participant>, std::shared_ptr<TrackPublication>>
+    ResolveTranscriptionTargetLocked(
+        const std::string& track_sid,
+        const std::string& participant_identity) const;
     asio::awaitable<void> RemoveLocalTrackFromPublisherAsync(
         std::shared_ptr<Track> track,
         uint64_t generation);
@@ -832,13 +885,88 @@ private:
     asio::awaitable<void> WaitForReliableDataChannel(
         std::chrono::milliseconds timeout,
         uint64_t generation);
+    asio::awaitable<void> WaitForDataTrackChannelOpen(
+        std::chrono::milliseconds timeout,
+        uint64_t generation);
     void CompleteNegotiation(
         const std::string& error,
         uint64_t generation = 0);
+
+    // === 2026 Dedicated DataTrack 生命周期与传输调度 ===
+    static constexpr uint64_t kDataTrackLowBufferThresholdBytes = 8 * 1024;
+    static constexpr size_t kDefaultDataTrackStreamBufferSize = 16;
+
+    struct DataTrackInstrumentation {
+        std::function<void(const proto::SignalRequest&)> on_signal_send;
+        std::function<void(const std::vector<uint8_t>&)> on_wire_packet_send;
+        bool bypass_webrtc_data_channel_wait = false;
+    };
+
+    struct LocalDataTrackEntry {
+        uint16_t pub_handle = 0;
+        DataTrackInfo info;
+        bool republishing = false;
+        bool unpublished = false;
+        std::weak_ptr<LocalDataTrack> track;
+        std::mutex pipeline_mutex;
+        std::unique_ptr<data_track::DtpPacketizer> packetizer;
+        DataTrackSendQueue send_queue{1};
+        std::deque<std::vector<uint8_t>> in_flight_packets;
+    };
+
+    struct RemoteDataTrackEntry {
+        DataTrackInfo info;
+        std::string publisher_sid;
+        std::string publisher_identity;
+        bool published = true;
+        enum class SubState { None, Pending, Active } sub_state = SubState::None;
+        uint16_t assigned_sub_handle = 0;
+        std::optional<uint32_t> target_fps;
+        size_t stream_buffer_size = kDefaultDataTrackStreamBufferSize;
+        std::atomic<size_t> max_partial_frames{1};
+        std::mutex depacketizer_mutex;
+        data_track::DtpDepacketizer depacketizer;
+        std::weak_ptr<RemoteDataTrack> track;
+        std::vector<std::shared_ptr<AwaitableState<
+            DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>>>>
+            pending_subscribes;
+        std::vector<std::weak_ptr<DataTrackStream>> active_streams;
+    };
+
+    struct ReconnectLocalDataTrackRecord {
+        uint16_t pub_handle = 0;
+        std::string name;
+        bool uses_e2ee = false;
+        std::weak_ptr<LocalDataTrack> track;
+    };
+
+    struct ReconnectRemoteDataSubRecord {
+        std::string publisher_identity;
+        std::string track_name;
+        std::string previous_sid;
+        std::optional<uint32_t> target_fps;
+        size_t max_partial_frames = 1;
+        std::vector<std::weak_ptr<DataTrackStream>> streams;
+    };
+
+    struct DataTrackCleanupBatch {
+        std::vector<std::shared_ptr<AwaitableState<
+            DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>>>
+            publish_states;
+        std::vector<std::shared_ptr<AwaitableState<
+            DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>>>>
+            subscribe_states;
+        std::vector<std::shared_ptr<LocalDataTrack>> local_tracks;
+        std::vector<std::shared_ptr<RemoteDataTrack>> remote_tracks;
+        std::vector<std::shared_ptr<DataTrackStream>> streams;
+        std::vector<std::shared_ptr<AwaitableState<void>>> dc_waits;
+    };
+
     struct PendingOperationCleanup {
         std::vector<std::function<void(const RpcPacket&)>> rpc_completions;
         std::vector<std::shared_ptr<AwaitableState<void>>> void_states;
         std::vector<std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> publish_states;
+        DataTrackCleanupBatch data_tracks;
     };
     PendingOperationCleanup TakePendingOperationsLocked();
     static void FailPendingOperations(
@@ -914,6 +1042,7 @@ private:
     // DataChannel 句柄与背压控制水线
     webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable_dc_;
     webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> data_track_dc_;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> remote_data_channels_;
     std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers_;
     enum class RemoteTrackSinkThread {
@@ -982,6 +1111,66 @@ private:
         std::shared_ptr<AwaitableState<void>> completion;
     };
     std::vector<PendingDataChannelWait> pending_reliable_dc_waits_;
+    std::vector<PendingDataChannelWait> pending_data_track_dc_waits_;
+
+    // === 2026 Dedicated DataTrack 状态 ===
+    uint16_t next_data_track_pub_handle_ = 1;
+    bool data_track_drain_scheduled_ = false;
+    std::shared_ptr<DataTrackInstrumentation> data_track_instrumentation_;
+    std::unordered_map<uint16_t, std::shared_ptr<AwaitableState<
+        DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>>>
+        pending_data_track_publishes_;
+    std::unordered_map<uint16_t, std::shared_ptr<LocalDataTrackEntry>> local_data_tracks_;
+    std::unordered_map<std::string, std::shared_ptr<RemoteDataTrackEntry>> remote_data_tracks_;
+    std::unordered_map<uint16_t, std::string> data_track_sub_handles_;
+    std::vector<ReconnectLocalDataTrackRecord> reconnect_data_track_records_;
+    std::vector<ReconnectRemoteDataSubRecord> reconnect_data_sub_records_;
+
+    void BindLocalDataTrackHandlersLocked(uint64_t generation);
+    std::optional<uint16_t> AllocateDataTrackPubHandleLocked();
+    void SendDataTrackSignal(const proto::SignalRequest& req, uint64_t generation);
+    asio::awaitable<DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>>
+    PublishLocalDataTrackAsync(DataTrackPublishOptions options, uint64_t generation);
+    DataTrackResult<std::shared_ptr<LocalDataTrack>, PublishDataTrackError>
+    PublishLocalDataTrackSync(const DataTrackPublishOptions& options, uint64_t generation);
+    std::pair<LocalDataTrack::TryPushHandler, LocalDataTrack::UnpublishHandler>
+    MakeLocalDataTrackHandlers(uint16_t pub_handle, uint64_t generation);
+    std::shared_ptr<LocalDataTrack> BuildLocalDataTrackObjectLocked(
+        const std::shared_ptr<LocalDataTrackEntry>& entry,
+        uint64_t generation);
+    DataTrackResult<void, LocalDataTrackTryPushError> EnqueueLocalDataTrackFrame(
+        uint16_t pub_handle,
+        const DataTrackFrame& frame,
+        uint64_t expected_generation);
+    void UnpublishLocalDataTrack(uint16_t pub_handle, uint64_t expected_generation);
+    void ScheduleDataTrackDrainLocked(uint64_t generation);
+    void DrainDataTrackSendQueue(uint64_t generation);
+    std::shared_ptr<RemoteDataTrack> BuildRemoteDataTrackObjectLocked(
+        const std::shared_ptr<RemoteDataTrackEntry>& entry,
+        uint64_t generation);
+    asio::awaitable<DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>>
+    SubscribeRemoteDataTrackAsync(std::string track_sid,
+                                  DataTrackSubscribeOptions options,
+                                  uint64_t generation);
+    DataTrackResult<std::shared_ptr<DataTrackStream>, SubscribeDataTrackError>
+    SubscribeRemoteDataTrackSync(const std::string& track_sid,
+                                 const DataTrackSubscribeOptions& options,
+                                 uint64_t generation);
+    void OnDataTrackStreamClosed(const std::string& track_sid, uint64_t generation);
+    void HandlePublishDataTrackResponse(const proto::PublishDataTrackResponse& resp,
+                                        uint64_t event_generation);
+    void HandleUnpublishDataTrackResponse(const proto::UnpublishDataTrackResponse& resp,
+                                          uint64_t event_generation);
+    void HandleDataTrackSubscriberHandles(const proto::DataTrackSubscriberHandles& handles,
+                                          uint64_t event_generation);
+    bool HandleDataTrackRequestResponse(const proto::RequestResponse& resp,
+                                        uint64_t event_generation);
+    void PrepareDataTracksForFullRestartLocked();
+    void TakeDataTrackCleanupLocked(bool clear_reconnect_records, DataTrackCleanupBatch& batch);
+    static void FinalizeDataTrackCleanup(DataTrackCleanupBatch batch,
+                                         OperationErrorCode code,
+                                         const std::string& message);
+    asio::awaitable<void> RecoverDataTracksAfterFullRestartAsync(uint64_t generation);
 
     std::unordered_map<std::string,
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> pending_track_publishes_;
@@ -1117,6 +1306,38 @@ private:
     };
     std::unordered_map<std::string, IncomingReader<TextStreamReader>> active_text_readers_;
     std::unordered_map<std::string, IncomingReader<ByteStreamReader>> active_byte_readers_;
+    struct ActiveTranscriptionSegmentEntry {
+        std::string map_key;
+        std::string speaker_key;
+        std::string speaker_identity;
+        std::string segment_id;
+        std::string last_stream_id;
+        std::string track_sid;
+        std::string text;
+        std::string source_text;
+        std::string source_language;
+        bool is_translated = false;
+        std::string language;
+        std::string emitted_final_text;
+        bool pending_replace = false;
+        bool generated = false;
+        bool has_explicit_final = false;
+        bool explicit_final_value = false;
+        bool emitted_final = false;
+        int64_t first_received_time_ms = 0;
+        int64_t last_received_time_ms = 0;
+    };
+    struct ActiveTranscriptionStreamEntry {
+        std::string segment_map_key;
+        std::string speaker_identity;
+        std::string sender_identity;
+        std::string track_sid;
+        SenderContext sender;
+        bool generated = false;
+    };
+    static constexpr size_t kMaxActiveTranscriptionSegments = 128;
+    std::unordered_map<std::string, ActiveTranscriptionSegmentEntry> active_transcription_segments_;
+    std::unordered_map<std::string, ActiveTranscriptionStreamEntry> active_transcription_streams_;
     std::unordered_map<std::string, IncomingDataStreamAssembler::TimePoint>
         incoming_stream_deadlines_;
     std::shared_ptr<asio::steady_timer> incoming_stream_cleanup_timer_;
