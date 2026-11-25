@@ -65,6 +65,49 @@ inline uint32_t SpeakerThumbnailCapacity(SpeakerLayout layout,
     return 0;
 }
 
+// Metrics and placement for the detached SpeakerLayout::Floating member window.
+// Only whole 16:9 cards are placed per page; overflow uses the window's pager.
+inline SpeakerStripMetrics CalculateFloatingStripMetrics(LogicalViewport strip_stage) {
+    if (strip_stage.width < 96 || strip_stage.height < 64) return {};
+    constexpr int margin = 8;
+    constexpr int gap = 8;
+    const int inner_width = strip_stage.width - 2 * margin;
+    const int inner_height = strip_stage.height - 2 * margin;
+    if (inner_width <= 0 || inner_height <= 0) return {};
+    int width = inner_width;
+    int height = static_cast<int>(int64_t(width) * 9 / 16);
+    if (height > inner_height) {
+        height = inner_height;
+        width = static_cast<int>(int64_t(height) * 16 / 9);
+    }
+    if (width <= 0 || height <= 0) return {};
+    const uint32_t rows = static_cast<uint32_t>(
+        std::max<int64_t>(1, (int64_t(inner_height) + gap) / (height + gap)));
+    return {width, height, 1u, rows};
+}
+
+inline uint32_t CalculateFloatingStripCapacity(LogicalViewport strip_stage) {
+    return CalculateFloatingStripMetrics(strip_stage).rows;
+}
+
+inline std::vector<LogicalViewport> CalculateFloatingStripLayout(
+    LogicalViewport strip_stage, std::size_t count) {
+    std::vector<LogicalViewport> result(count, {strip_stage.x, strip_stage.y, 0, 0});
+    if (count == 0) return result;
+    const auto metrics = CalculateFloatingStripMetrics(strip_stage);
+    if (metrics.width <= 0 || metrics.height <= 0 || metrics.rows == 0) return result;
+    constexpr int margin = 8;
+    constexpr int gap = 8;
+    const int x = strip_stage.x + (strip_stage.width - metrics.width) / 2;
+    const int start_y = strip_stage.y + margin;
+    const auto visible = std::min<std::size_t>(count, metrics.rows);
+    for (std::size_t index = 0; index < visible; ++index) {
+        result[index] = {x, start_y + static_cast<int>(index) * (metrics.height + gap),
+            metrics.width, metrics.height};
+    }
+    return result;
+}
+
 inline std::vector<LogicalViewport> CalculateVideoLayout(
     VideoLayoutMode mode, SpeakerLayout speaker_layout, LogicalViewport stage,
     uint32_t grid_capacity, std::size_t total_seats, std::size_t main_index = 0) {

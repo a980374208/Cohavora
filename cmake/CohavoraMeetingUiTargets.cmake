@@ -94,6 +94,8 @@ add_library(cohavora_meeting_window_ui OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_layout_controls.h
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_layout_controls.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/render/share_view_transform.h
+    ${PROJECT_SOURCE_DIR}/src/ui/floating_member_list_window.h
+    ${PROJECT_SOURCE_DIR}/src/ui/floating_member_list_window.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/shared_screen_window.h
     ${PROJECT_SOURCE_DIR}/src/ui/shared_screen_window.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/remote_control_ui.h

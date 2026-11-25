@@ -53,6 +53,7 @@
 #include <cstring>
 #include <functional>
 #include <optional>
+#include <set>
 
 
 class CameraOwnerInspectionAccess;
@@ -64,6 +65,7 @@ class RemoteControlUi;
 class MeetingLayoutPopup;
 class MeetingVideoPager;
 class SharedScreenWindow;
+class FloatingMemberListWindow;
 
 class WhiteboardPanel;
 class AnnotationOverlayWindow;
@@ -148,6 +150,9 @@ public:
 	bool isHardwareCanvasMode() const { return _useHardwareCanvas; }
 	// UI-thread-only decoration cache. Video pixels never pass through this image.
 	QImage hardwareDecoration(const QSize &pixels, bool hasFrame, bool hovered);
+	void paintOnExternalSurface(QPainter &p, const QRect &targetRect, bool hovered);
+	void setExternalCpuSurfaceState(bool active, bool visible, bool minimized, const QSize &logicalSize);
+	bool isOnExternalSurface() const { return _externalSurfaceActive; }
 	QRect pinButtonRect() const;
 	// Tile-local visible part; the full widget size still owns video fitting.
 	void setLayoutClip(const QRect &visible);
@@ -237,6 +242,10 @@ private:
 	bool _decorationHasFrame = false;
 	bool _decorationHovered = false;
 	quint64 _decorationThemeRevision = 0;
+	bool _externalSurfaceActive = false;
+	bool _externalSurfaceVisible = false;
+	bool _externalSurfaceMinimized = false;
+	QSize _externalLogicalSize;
 };
 
 // ----------------------------------------------------
@@ -603,14 +612,25 @@ private:
 	void setupWhiteboardBinding();
 	void setupRemoteControl();
 	std::unique_ptr<RemoteControlUi> _remoteControlUi;
-    void showVideoTileMenu(const QString& renderKey);
+    void showVideoTileMenu(const QString& renderKey, const QPoint& globalAnchor = {});
     void detachSharedScreen(std::optional<livekit::TrackKey> key, bool local);
     void returnSharedScreen();
     void syncSharedScreenPlan();
+    void syncFloatingListWindowVisibility();
+    void dockFloatingMemberList();
+    bool isFloatingStripModeActive() const;
+    bool isFloatingListVisible() const;
+    void updateFloatingListLayout(VideoTileWidget* pinnedTile);
+    void removeUserFromCanvases(const std::string& key);
 
     bool isDetachedShareFrame(const QString& key) const;
     bool isSharedScreenVisible() const;
     std::unique_ptr<SharedScreenWindow> _sharedWindow;
+    std::unique_ptr<FloatingMemberListWindow> _floatingListWindow;
+    std::set<QString> _floatingStripRenderKeys;
+    uint64_t _floatingSurfaceId = 0;
+    bool _lastFloatingCollapsed = false;
+    bool _lastFloatingMinimized = false;
     std::optional<livekit::DetachedShareViewport> _detachedShareIntent;
     uint64_t _nextSharedSurfaceId = 0;
     uint64_t _displayedSharedSurfaceId = 0;

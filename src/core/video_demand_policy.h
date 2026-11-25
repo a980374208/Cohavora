@@ -107,8 +107,9 @@ private:
     void AdvanceSpeaker(TimePoint now);
     bool IsThumbnailSpeaker(const ParticipantKey& key, bool is_local,
                             TimePoint now) const;
-    void FinalizeLayout(VideoDemandPlan& plan);
+    void FinalizeLayout(VideoDemandPlan& plan, bool main_stage_visible);
     SeatExtent RectExtent(const LogicalViewport& rect) const;
+    static SeatExtent RectExtentForDpr(const LogicalViewport& rect, double raw_dpr);
     void RefreshAutoShare();
     FocusChoice ChooseFocus(const std::vector<SeatCandidate>& videos,
                             bool allow_auto_share,
@@ -122,6 +123,7 @@ private:
                       const std::vector<SeatCandidate>& videos,
                       VideoLayoutMode mode,
                       bool allow_auto_share,
+                      bool main_stage_visible,
                       TimePoint now);
     void AddSeat(VideoDemandPlan& plan,
                  const SeatCandidate& candidate,

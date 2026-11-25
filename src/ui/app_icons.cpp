@@ -102,10 +102,11 @@ public:
             break;
         }
         case Icon::LayoutFloating:
-            painter->drawRoundedRect(QRectF(3, 3, 18, 18), 1, 1);
-            painter->drawRoundedRect(QRectF(14, 6, 5, 12), .6, .6);
-            painter->drawLine(QPointF(14, 10), QPointF(19, 10));
-            painter->drawLine(QPointF(14, 14), QPointF(19, 14));
+            painter->drawRoundedRect(QRectF(2.5, 4.5, 11.5, 15.0), 1, 1);
+            painter->drawRoundedRect(QRectF(15.5, 3.0, 6.0, 18.0), .8, .8);
+            painter->drawLine(QPointF(16.0, 6.5), QPointF(21.0, 6.5));
+            painter->drawLine(QPointF(16.5, 11.5), QPointF(20.5, 11.5));
+            painter->drawLine(QPointF(16.5, 16.0), QPointF(20.5, 16.0));
             break;
         case Icon::ChevronDown:
             painter->drawLine(QPointF(6, 9), QPointF(12, 15));

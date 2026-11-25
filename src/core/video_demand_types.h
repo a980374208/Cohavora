@@ -88,6 +88,19 @@ struct DetachedShareViewport {
     bool operator==(const DetachedShareViewport&) const = default;
 };
 
+// Independent presentation window for SpeakerLayout::Floating thumbnails.
+struct FloatingStripViewport {
+    uint64_t surface_id = 0;
+    LogicalViewport rect;
+    int paging_bar_height = 0;
+    double device_pixel_ratio = 1.0;
+    bool visible = false;
+    bool minimized = false;
+    bool collapsed = false;
+
+    bool operator==(const FloatingStripViewport&) const = default;
+};
+
 struct ViewportIntent {
     uint64_t coordinator_session = 0;
     uint64_t view_revision = 0;
@@ -116,6 +129,7 @@ struct ViewportIntent {
     bool local_participant_present = false;
     bool local_screen_share_present = false;
     std::optional<DetachedShareViewport> detached_share;
+    std::optional<FloatingStripViewport> floating_strip;
 };
 
 struct VideoSeat {
@@ -174,6 +188,10 @@ struct VideoDemandPlan {
     std::optional<VideoSeat> detached_share;
     bool detached_local = false;
     bool show_detached_local = false;
+    uint64_t floating_strip_surface_id = 0;
+    bool floating_strip_active = false;
+    bool local_participant_in_floating_strip = false;
+    bool local_screen_share_in_floating_strip = false;
     uint32_t effective_main_page_size = 0;
 
     const VideoSeat* FindMediaSeat(const TrackKey& key) const {

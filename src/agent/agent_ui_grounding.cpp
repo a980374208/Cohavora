@@ -629,7 +629,7 @@ QString buildClientUiNavigationGuidePrompt() {
 		roomTr("Top member list"),
 		roomTr("Upper L"),
 		roomTr("Lower L"),
-		roomTr("Floating list"),
+		QStringLiteral("%1 (%2)").arg(roomTr("Floating list"), roomTr("Open in separate window")),
 	}.join(QStringLiteral(" / "));
 	lines.push_back(
 		QStringLiteral("  * Top Bar: [%1] + duration timer; network signal icon ([%2] with [%3]); Meeting ID badge (click to copy); active speaker pill; ")

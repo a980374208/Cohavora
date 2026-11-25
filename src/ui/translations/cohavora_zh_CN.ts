@@ -9346,6 +9346,34 @@ Password: %6</source>
         <source>Screen sharing has ended.</source>
         <translation>共享已结束。</translation>
     </message>
+    <message>
+        <source>Always on top</source>
+        <translation>置顶显示</translation>
+    </message>
+    <message>
+        <source>Cancel always on top</source>
+        <translation>取消置顶</translation>
+    </message>
+    <message>
+        <source>Collapse member list</source>
+        <translation>折叠成员列表</translation>
+    </message>
+    <message>
+        <source>Expand member list</source>
+        <translation>展开成员列表</translation>
+    </message>
+    <message>
+        <source>Dock to meeting window</source>
+        <translation>嵌回主会议窗口</translation>
+    </message>
+    <message>
+        <source>No speaking members right now</source>
+        <translation>当前无人正在发言</translation>
+    </message>
+    <message>
+        <source>No other video participants</source>
+        <translation>暂无其他参会画面</translation>
+    </message>
 </context>
 <context><name>MeetingUI::VideoTileWidget</name><message><source>More actions</source><translation>更多操作</translation></message></context>
 <context>

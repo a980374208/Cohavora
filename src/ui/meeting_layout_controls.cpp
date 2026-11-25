@@ -195,13 +195,14 @@ protected:
             for (int i = 0; i != 4; ++i)
                 box(QRectF(picture.x() + i * picture.width() / 4, picture.y(), picture.width() / 4 - 2, 15));
         } else if (layout_ == livekit::SpeakerLayout::Floating) {
-            box(picture, true);
-            const QRectF strip(picture.right() - 21, picture.y() + 5, 17, picture.height() - 10);
-            p.setPen(QPen(AppTheme::color(Role::Border), 1));
+            box(QRectF(picture.x(), picture.y() + 4, picture.width() * .66, picture.height() - 8), true);
+            const QRectF win(picture.right() - 23, picture.y() + 1, 22, picture.height() - 2);
+            p.setPen(QPen(AppTheme::color(Role::Accent), 1));
             p.setBrush(AppTheme::color(Role::Surface));
-            p.drawRoundedRect(strip.adjusted(-2, -2, 2, 2), 2, 2);
-            for (int i = 0; i != 4; ++i)
-                box(QRectF(strip.x(), strip.y() + i * 12.5, strip.width(), 10.5));
+            p.drawRoundedRect(win, 2.5, 2.5);
+            p.drawLine(QPointF(win.left() + 2, win.top() + 5), QPointF(win.right() - 2, win.top() + 5));
+            for (int i = 0; i != 3; ++i)
+                box(QRectF(win.x() + 2.5, win.y() + 8 + i * 15.0, win.width() - 5.0, 12.5));
         } else {
             const bool upper = layout_ == livekit::SpeakerLayout::TopLeft;
             const auto stripY = upper ? picture.y() : picture.bottom() - 13;

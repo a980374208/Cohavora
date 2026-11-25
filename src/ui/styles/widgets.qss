@@ -2481,6 +2481,48 @@ QPushButton#openSharedScreen:hover {
 }
 QPushButton#openSharedScreen:disabled { color: @text-muted@; }
 
+/* Detached floating member list window */
+QWidget[uiStyle="floating-member-list-window"] {
+    background: @window@;
+    color: @text@;
+}
+[uiStyle="floating-member-list-window"] QWidget#floatingMemberListTitleBar {
+    background: @surface@;
+    border-bottom: 1px solid @border@;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+}
+[uiStyle="floating-member-list-window"] QLabel#floatingMemberListTitle {
+    background: transparent;
+    color: @text@;
+    font-size: 12px;
+    font-weight: 600;
+}
+[uiStyle="floating-member-list-window"] QLabel#floatingMemberListEmpty {
+    background: transparent;
+    color: @text-muted@;
+    font-size: 12px;
+}
+[uiStyle="floating-member-list-window"] QWidget#floatingMemberListTitleBar QToolButton {
+    background: transparent;
+    color: @text-secondary@;
+    border: none;
+    border-radius: 6px;
+    padding: 2px;
+}
+[uiStyle="floating-member-list-window"] QWidget#floatingMemberListTitleBar QToolButton:hover {
+    background: @hover@;
+    color: @text@;
+}
+[uiStyle="floating-member-list-window"] QWidget#floatingMemberListTitleBar QToolButton:checked {
+    background: @accent-soft@;
+    color: @accent@;
+}
+[uiStyle="floating-member-list-window"] QWidget#floatingMemberListTitleBar QToolButton#floatingMemberListDock:hover {
+    background: @danger@;
+    color: @on-accent@;
+}
+
 /* AI Copilot sidebar widget (used in both dark MeetingRoomWindow and adaptive MeetingMainWindow) */
 QWidget[uiStyle="copilot-sidebar-widget"][objectName="CopilotSidebar"] {
     background: @window@;
