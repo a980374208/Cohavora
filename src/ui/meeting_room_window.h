@@ -59,6 +59,13 @@
 class CameraOwnerInspectionAccess;
 class ParticipantWindowInspectionAccess;
 
+namespace OpenMeeting {
+class CallInviteController;
+struct CallSession;
+class ContactCatalogController;
+class PresenceWatchController;
+}
+
 namespace MeetingUI {
 class MeetingEncryptionPanel;
 class RemoteControlUi;
@@ -517,6 +524,9 @@ public:
 		livekit::BackupCodecPolicy backupCodecPolicy = livekit::BackupCodecPolicy::PreferRegression;
 		InvitationMode invitationMode = InvitationMode::Disabled;
 		std::shared_ptr<OpenMeeting::AgentCoordinator> agentCoordinator;
+		OpenMeeting::ContactCatalogController *contacts = nullptr;
+		OpenMeeting::PresenceWatchController *presence = nullptr;
+		OpenMeeting::CallInviteController *callInvite = nullptr;
 		std::function<void(QWidget *parent)> openCopilotSettings;
 		std::function<void(int pageIndex, int subTabIndex, QWidget *parent)> openSettingsPage;
 	};
@@ -679,6 +689,9 @@ private:
 	void dismissDepartureNotice();
 	void setupInvitationBinding();
 	void handleInviteClicked();
+	void copyMeetingIdInvitation();
+	void openInMeetingContactInviteDialog();
+	void showSilentMissedCallBanner(const OpenMeeting::CallSession &session);
 	void showInvitationNotice(bool success, const QString &title, const QString &message);
 	void restoreParticipantPresentations();
 	void applyParticipantPresentation(const OpenMeeting::ParticipantPresentation &presentation);
@@ -844,6 +857,8 @@ private:
 	QLabel *_inviteHintBanner = nullptr;
 	QLabel *_recoveryBanner = nullptr;
 	QTimer *_recoveryBannerFadeTimer = nullptr;
+	QLabel *_missedCallBanner = nullptr;
+	QTimer *_missedCallBannerTimer = nullptr;
 	QLabel *_liveCaptionBanner = nullptr;
 	QTimer *_liveCaptionFadeTimer = nullptr;
 	QString _liveCaptionFullText;

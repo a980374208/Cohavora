@@ -20,6 +20,7 @@ enum MeetingItemRole {
 	MeetingRepeatRole,
 	MeetingDateGroupRole,
 	MeetingShowDateHeaderRole,
+	MeetingIsInvitedRole,
 };
 
 class MeetingListModel final : public QAbstractListModel {
@@ -30,6 +31,7 @@ public:
 	QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
 	QHash<int, QByteArray> roleNames() const override;
 
+	void setCurrentUserId(const QString &userId);
 	void setMeetings(
 		const OpenMeeting::MeetingList &meetings,
 		bool history,
@@ -59,6 +61,7 @@ private:
 	std::vector<Row> _rows;
 	QString _searchText;
 	QString _historyCreatorUserId;
+	QString _currentUserId;
 	bool _history = false;
 };
 

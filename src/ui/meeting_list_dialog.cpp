@@ -200,6 +200,7 @@ void MeetingListDialog::updatePage(
 		QListView *view,
 		QLabel *stateLabel,
 		bool history) {
+	model->setCurrentUserId(_session.userId());
 	model->setMeetings(state.meetings, history, history ? _session.userId() : QString());
 	const auto message = stateText(state, *model, history);
 	stateLabel->setText(message);

@@ -318,6 +318,13 @@ bool parseMeetingCatalogDetail(
             record.coHostUserIds.push_back(id);
         }
     }
+    const auto invitees = object.value(QStringLiteral("inviteeUserIDs"));
+    if (!invitees.isUndefined() && !invitees.isNull() && invitees.isArray()) {
+        for (const auto &v : invitees.toArray()) {
+            const QString id = v.toString().trimmed();
+            if (!id.isEmpty()) record.inviteeUserIds.push_back(id);
+        }
+    }
     if (!parseSettings(object.value(QStringLiteral("setting")), &record.settings, errorMessage) ||
         !parseRepeatRule(object.value(QStringLiteral("repeatInfo")), &record.repeatRule, errorMessage)) return false;
     *detail = std::move(parsed);
@@ -370,7 +377,7 @@ bool validateMeetingUpdateRequest(const MeetingUpdateRequest &request, QString *
         request.canParticipantsUnmuteMicrophone || request.canParticipantsShareScreen ||
         request.disableCameraOnJoin || request.disableMicrophoneOnJoin ||
         request.canParticipantJoinMeetingEarly || request.lockMeeting || request.audioEncouragement ||
-        request.videoMirroring || request.repeatRule;
+        request.videoMirroring || request.repeatRule || request.inviteeUserIds;
     if (!hasChange) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting update contains no changes."));
     if (request.title && request.title->trimmed().isEmpty()) {
         return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting title is empty."));
@@ -405,12 +412,20 @@ QJsonObject meetingBookingToJson(const MeetingBookingRequest &request, const QSt
         {QStringLiteral("password"), request.password},
         {QStringLiteral("timeZone"), request.timeZone},
     };
-    return {
+    QJsonObject body{
         {QStringLiteral("creatorUserID"), creatorUserId},
         {QStringLiteral("creatorDefinedMeetingInfo"), creatorInfo},
         {QStringLiteral("setting"), settingsToJson(request.settings)},
         {QStringLiteral("repeatInfo"), repeatRuleToJson(request.repeatRule)},
     };
+    if (!request.inviteeUserIds.empty()) {
+        QJsonArray inv;
+        for (const auto &id : request.inviteeUserIds) {
+            if (!id.trimmed().isEmpty()) inv.append(id.trimmed());
+        }
+        body.insert(QStringLiteral("inviteeUserIDs"), inv);
+    }
+    return body;
 }
 
 QJsonObject meetingUpdateToJson(const MeetingUpdateRequest &request, const QString &updatingUserId) {
@@ -433,6 +448,13 @@ QJsonObject meetingUpdateToJson(const MeetingUpdateRequest &request, const QStri
     addOptional(&object, QStringLiteral("audioEncouragement"), request.audioEncouragement);
     addOptional(&object, QStringLiteral("videoMirroring"), request.videoMirroring);
     if (request.repeatRule) object.insert(QStringLiteral("repeatInfo"), repeatRuleToJson(*request.repeatRule));
+    if (request.inviteeUserIds) {
+        QJsonArray inv;
+        for (const auto &id : *request.inviteeUserIds) {
+            if (!id.trimmed().isEmpty()) inv.append(id.trimmed());
+        }
+        object.insert(QStringLiteral("inviteeUserIDs"), inv);
+    }
     return object;
 }
 

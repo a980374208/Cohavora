@@ -23,6 +23,9 @@ function(cohavora_configure_meeting_ui_objects target)
     set_target_properties(${target} PROPERTIES
         AUTOMOC ON
         FOLDER "meeting/ui")
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /utf-8)
+    endif()
 endfunction()
 
 add_library(cohavora_device_discovery STATIC
@@ -62,7 +65,37 @@ add_library(cohavora_meeting_widgets OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/copilot_chat_canvas_widget.h
     ${PROJECT_SOURCE_DIR}/src/ui/copilot_chat_canvas_widget.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/copilot_sidebar_widget.h
-    ${PROJECT_SOURCE_DIR}/src/ui/copilot_sidebar_widget.cpp)
+    ${PROJECT_SOURCE_DIR}/src/ui/copilot_sidebar_widget.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/initials_avatar_painter.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/initials_avatar_painter.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_tree_model.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_tree_model.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_list_model.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_list_model.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_item_delegate.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_item_delegate.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_request_list_model.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_request_list_model.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_request_item_delegate.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_request_item_delegate.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contacts_tree_model.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contacts_tree_model.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contacts_tree_delegate.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contacts_tree_delegate.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_picker_dialog.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_picker_dialog.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_history_list_model.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_history_list_model.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_history_item_delegate.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_history_item_delegate.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/user_profile_dialog.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/user_profile_dialog.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contacts_page_widget.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contacts_page_widget.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/call/incoming_call_window.h
+    ${PROJECT_SOURCE_DIR}/src/ui/call/incoming_call_window.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/call/outgoing_call_overlay.h
+    ${PROJECT_SOURCE_DIR}/src/ui/call/outgoing_call_overlay.cpp)
 cohavora_configure_meeting_ui_objects(cohavora_meeting_widgets)
 target_link_libraries(cohavora_meeting_widgets PRIVATE
     cohavora_device_discovery

@@ -200,6 +200,12 @@ void ScheduleWidget::setShowAllMeetingsAction(bool show) {
 	}
 }
 
+void ScheduleWidget::setCurrentUserId(const QString &userId) {
+	if (_model) {
+		_model->setCurrentUserId(userId);
+	}
+}
+
 void ScheduleWidget::changeEvent(QEvent *event) {
 	Ui::RpWidget::changeEvent(event);
 	if (event && event->type() == QEvent::LanguageChange) {

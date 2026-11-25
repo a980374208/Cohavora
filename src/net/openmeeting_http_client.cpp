@@ -90,7 +90,13 @@ bool isRetryablePostPath(const QString &path) noexcept {
            path == QStringLiteral("/meeting/cancel_meeting") ||
            path == QStringLiteral("/meeting/end_meeting") ||
            path == QStringLiteral("/meeting/leave_meeting") ||
-           path == QStringLiteral("/meeting/set_meeting_host");
+           path == QStringLiteral("/meeting/set_meeting_host") ||
+           path == QStringLiteral("/user/get_profile") ||
+           path == QStringLiteral("/directory/search") ||
+           path == QStringLiteral("/directory/get_org_tree") ||
+           path == QStringLiteral("/directory/get_dept_members") ||
+           path == QStringLiteral("/contact/sync_snapshot") ||
+           path == QStringLiteral("/contact/list_requests");
 }
 
 bool isTransientTransportError(QNetworkReply::NetworkError error) noexcept {
@@ -926,6 +932,255 @@ void OpenMeetingHttpClient::getMeetingAgentStatus(const QString &meetingId,
             }
             if (callback) callback(true, resp, err);
         }, true, std::move(context));
+}
+
+void OpenMeetingHttpClient::getUserProfile(const QString &targetUserId,
+                                           ResultCallback<UserProfileResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("targetUserID")] = targetUserId;
+    sendPost(QStringLiteral("/user/get_profile"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, UserProfileResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseUserProfileResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::updateUserProfile(const std::optional<QString> &nickname,
+                                              const std::optional<QString> &signature,
+                                              const std::optional<QString> &email,
+                                              const std::optional<QString> &phone,
+                                              ResultCallback<UserProfile> callback) {
+    QJsonObject body;
+    if (nickname) body[QStringLiteral("nickname")] = *nickname;
+    if (signature) body[QStringLiteral("signature")] = *signature;
+    if (email) body[QStringLiteral("email")] = *email;
+    if (phone) body[QStringLiteral("phone")] = *phone;
+    sendPost(QStringLiteral("/user/update_profile"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, UserProfile{}, err);
+                return;
+            }
+            const auto root = data.toObject();
+            const auto profObj = root.value(QStringLiteral("profile")).isObject()
+                ? root.value(QStringLiteral("profile")).toObject() : root;
+            if (callback) callback(true, parseUserProfile(profObj), err);
+        });
+}
+
+void OpenMeetingHttpClient::searchDirectory(const QString &keyword, const QString &deptId,
+                                            const QString &scope, qint64 offset, qint64 limit,
+                                            ResultCallback<DirectorySearchResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("keyword")] = keyword;
+    if (!deptId.isEmpty()) body[QStringLiteral("deptID")] = deptId;
+    if (!scope.isEmpty()) body[QStringLiteral("scope")] = scope;
+    body[QStringLiteral("offset")] = static_cast<double>(offset);
+    body[QStringLiteral("limit")] = static_cast<double>(limit);
+    sendPost(QStringLiteral("/directory/search"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, DirectorySearchResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseDirectorySearchResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::getOrgTree(qint64 clientVersion, ResultCallback<OrgTreeResponse> callback) {
+    QJsonObject body;
+    if (clientVersion > 0) body[QStringLiteral("clientVersion")] = static_cast<double>(clientVersion);
+    sendPost(QStringLiteral("/directory/get_org_tree"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, OrgTreeResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseOrgTreeResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::getDeptMembers(const QString &deptId, qint64 offset, qint64 limit,
+                                           ResultCallback<DeptMembersResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("deptID")] = deptId;
+    body[QStringLiteral("offset")] = static_cast<double>(offset);
+    body[QStringLiteral("limit")] = static_cast<double>(limit);
+    sendPost(QStringLiteral("/directory/get_dept_members"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, DeptMembersResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseDeptMembersResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::syncContactSnapshot(qint64 updatedAfterMs,
+                                                ResultCallback<ContactSnapshotResponse> callback) {
+    QJsonObject body;
+    if (updatedAfterMs > 0) body[QStringLiteral("updatedAfterMs")] = static_cast<double>(updatedAfterMs);
+    sendPost(QStringLiteral("/contact/sync_snapshot"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, ContactSnapshotResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseContactSnapshotResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::upsertContactRelation(const UpsertContactRelationRequest &request,
+                                                  ResultCallback<ContactRelation> callback) {
+    QJsonObject body;
+    body[QStringLiteral("targetUserID")] = request.targetUserId;
+    if (request.remark) body[QStringLiteral("remark")] = *request.remark;
+    if (request.isFavorite) body[QStringLiteral("isFavorite")] = *request.isFavorite;
+    if (request.isBlocked) body[QStringLiteral("isBlocked")] = *request.isBlocked;
+    if (request.groupIds) {
+        QJsonArray arr;
+        for (const auto &g : *request.groupIds) arr.append(g);
+        body[QStringLiteral("groupIDs")] = arr;
+        body[QStringLiteral("hasGroupIDs")] = true;
+    }
+    sendPost(QStringLiteral("/contact/upsert_relation"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, ContactRelation{}, err);
+                return;
+            }
+            const auto root = data.toObject();
+            const auto relObj = root.value(QStringLiteral("relation")).isObject()
+                ? root.value(QStringLiteral("relation")).toObject() : root;
+            if (callback) callback(true, parseContactRelation(relObj), err);
+        });
+}
+
+void OpenMeetingHttpClient::removeContactRelation(const QString &targetUserId, ResultCallback<bool> callback) {
+    QJsonObject body;
+    body[QStringLiteral("targetUserID")] = targetUserId;
+    sendPost(QStringLiteral("/contact/remove_relation"), body,
+        [callback](bool ok, const QJsonValue &, const HttpError &err) {
+            if (callback) callback(ok, ok, err);
+        });
+}
+
+void OpenMeetingHttpClient::manageContactGroup(const ManageContactGroupRequest &request,
+                                               ResultCallback<ManageContactGroupResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("action")] = request.action;
+    if (!request.groupId.isEmpty()) body[QStringLiteral("groupID")] = request.groupId;
+    if (!request.name.isEmpty()) body[QStringLiteral("name")] = request.name;
+    body[QStringLiteral("sortOrder")] = request.sortOrder;
+    sendPost(QStringLiteral("/contact/manage_group"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, ManageContactGroupResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseManageContactGroupResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::sendContactRequest(const QString &toUserId, const QString &greeting,
+                                               ResultCallback<SendContactRequestResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("toUserID")] = toUserId;
+    if (!greeting.isEmpty()) body[QStringLiteral("greeting")] = greeting;
+    sendPost(QStringLiteral("/contact/send_request"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, SendContactRequestResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseSendContactRequestResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::handleContactRequest(const QString &requestId, bool accept,
+                                                 ResultCallback<HandleContactRequestResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("requestID")] = requestId;
+    body[QStringLiteral("accept")] = accept;
+    sendPost(QStringLiteral("/contact/handle_request"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, HandleContactRequestResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseHandleContactRequestResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::listContactRequests(qint64 limit, ResultCallback<ContactRequestsResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("limit")] = static_cast<double>(limit);
+    sendPost(QStringLiteral("/contact/list_requests"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, ContactRequestsResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseContactRequestsResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::startCall(const StartCallRequest &request, ResultCallback<CallSession> callback) {
+    QJsonObject body;
+    body[QStringLiteral("calleeUserID")] = request.calleeUserId;
+    body[QStringLiteral("mode")] = callModeToWire(request.mode);
+    body[QStringLiteral("mediaType")] = callMediaTypeToWire(request.mediaType);
+    if (!request.meetingId.isEmpty()) body[QStringLiteral("meetingID")] = request.meetingId;
+    if (request.e2eeRequired) body[QStringLiteral("e2eeRequired")] = true;
+    sendPost(QStringLiteral("/call/start"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, CallSession{}, err);
+                return;
+            }
+            const auto root = data.toObject();
+            const auto sessObj = root.value(QStringLiteral("session")).isObject()
+                ? root.value(QStringLiteral("session")).toObject() : root;
+            if (callback) callback(true, parseCallSession(sessObj), err);
+        });
+}
+
+void OpenMeetingHttpClient::acceptCall(const QString &callId, ResultCallback<AcceptCallResponse> callback) {
+    QJsonObject body;
+    body[QStringLiteral("callID")] = callId;
+    sendPost(QStringLiteral("/call/accept"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok || !data.isObject()) {
+                if (callback) callback(false, AcceptCallResponse{}, err);
+                return;
+            }
+            if (callback) callback(true, parseAcceptCallResponse(data.toObject()), err);
+        });
+}
+
+void OpenMeetingHttpClient::rejectCall(const QString &callId, const QString &reason, ResultCallback<QString> callback) {
+    QJsonObject body;
+    body[QStringLiteral("callID")] = callId;
+    if (!reason.isEmpty()) body[QStringLiteral("reason")] = reason;
+    sendPost(QStringLiteral("/call/reject"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            const QString state = data.isObject() ? data.toObject().value(QStringLiteral("state")).toString() : QString();
+            if (callback) callback(ok, state, err);
+        });
+}
+
+void OpenMeetingHttpClient::cancelCall(const QString &callId, const QString &reason, ResultCallback<QString> callback) {
+    QJsonObject body;
+    body[QStringLiteral("callID")] = callId;
+    if (!reason.isEmpty()) body[QStringLiteral("reason")] = reason;
+    sendPost(QStringLiteral("/call/cancel"), body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            const QString state = data.isObject() ? data.toObject().value(QStringLiteral("state")).toString() : QString();
+            if (callback) callback(ok, state, err);
+        });
 }
 
 } // namespace OpenMeeting

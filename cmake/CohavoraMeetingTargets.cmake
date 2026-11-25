@@ -2,8 +2,14 @@ add_library(cohavora_meeting_network STATIC
     ${PROJECT_SOURCE_DIR}/src/net/http_types.h
     ${PROJECT_SOURCE_DIR}/src/net/meeting_types.h
     ${PROJECT_SOURCE_DIR}/src/net/meeting_types.cpp
+    ${PROJECT_SOURCE_DIR}/src/net/contact_types.h
+    ${PROJECT_SOURCE_DIR}/src/net/contact_types.cpp
+    ${PROJECT_SOURCE_DIR}/src/net/call_types.h
+    ${PROJECT_SOURCE_DIR}/src/net/call_types.cpp
     ${PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.h
     ${PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.cpp
+    ${PROJECT_SOURCE_DIR}/src/net/user_event_stream_client.h
+    ${PROJECT_SOURCE_DIR}/src/net/user_event_stream_client.cpp
     ${PROJECT_SOURCE_DIR}/src/net/session_manager.h
     ${PROJECT_SOURCE_DIR}/src/net/session_manager.cpp
     ${PROJECT_SOURCE_DIR}/src/net/credential_store.h
@@ -54,7 +60,33 @@ add_library(cohavora_meeting_runtime STATIC
     ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.h
     ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.cpp
     ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.h
-    ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.cpp)
+    ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/contact_snapshot_store.h
+    ${PROJECT_SOURCE_DIR}/src/core/contact_snapshot_store.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/contact_catalog_controller.h
+    ${PROJECT_SOURCE_DIR}/src/core/contact_catalog_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/presence_watch_controller.h
+    ${PROJECT_SOURCE_DIR}/src/core/presence_watch_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/call_invite_controller.h
+    ${PROJECT_SOURCE_DIR}/src/core/call_invite_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/media/ringtone_player.h)
+if(WIN32)
+    target_sources(cohavora_meeting_runtime PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/media/ringtone_player_win.cpp)
+else()
+    target_sources(cohavora_meeting_runtime PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/media/ringtone_player_linux.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(COHAVORA_PULSE_SIMPLE QUIET IMPORTED_TARGET libpulse-simple)
+            if(COHAVORA_PULSE_SIMPLE_FOUND)
+                target_compile_definitions(cohavora_meeting_runtime PRIVATE COHAVORA_HAS_PULSE_SIMPLE=1)
+                target_link_libraries(cohavora_meeting_runtime PRIVATE PkgConfig::COHAVORA_PULSE_SIMPLE)
+            endif()
+        endif()
+    endif()
+endif()
 
 target_include_directories(cohavora_meeting_runtime PUBLIC
     ${PROJECT_SOURCE_DIR}

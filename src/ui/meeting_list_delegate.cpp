@@ -91,13 +91,17 @@ void MeetingListDelegate::paint(
 	stateFont.setPixelSize(11);
 	stateFont.setBold(false);
 	painter->setFont(stateFont);
+	const bool isInvited = index.data(MeetingIsInvitedRole).toBool();
+	const QString statusBadge = isInvited
+		? QCoreApplication::translate("MeetingUI", "Invited · %1").arg(status)
+		: status;
 	painter->setPen(status == QCoreApplication::translate("MeetingUI", "In Progress")
 		? Theme::color(Theme::ColorRole::Success)
-		: Theme::color(Theme::ColorRole::TextSecondary));
+		: (isInvited ? Theme::color(Theme::ColorRole::Accent) : Theme::color(Theme::ColorRole::TextSecondary)));
 	painter->drawText(
-		QRect(right - 70, content.top() + 8, 70, 23),
+		QRect(right - 110, content.top() + 8, 110, 23),
 		Qt::AlignRight | Qt::AlignVCenter,
-		status);
+		statusBadge);
 
 	auto subtitle = creator.trimmed().isEmpty()
 		? QCoreApplication::translate("MeetingUI", "Meeting ID %1").arg(index.data(MeetingIdRole).toString())

@@ -10,7 +10,9 @@ class QLabel;
 class QPushButton;
 
 namespace OpenMeeting {
+class ContactCatalogController;
 class MeetingCatalogController;
+class PresenceWatchController;
 class SessionManager;
 }
 
@@ -23,7 +25,9 @@ public:
 		const QString &meetingId,
 		OpenMeeting::MeetingCatalogController &controller,
 		OpenMeeting::SessionManager &session,
-		QWidget *parent = nullptr);
+		QWidget *parent = nullptr,
+		OpenMeeting::ContactCatalogController *contacts = nullptr,
+		OpenMeeting::PresenceWatchController *presence = nullptr);
 	bool joinRequested() const { return _joinRequested; }
 	std::optional<OpenMeeting::MeetingCatalogDetail> detailForJoin() const;
 
@@ -40,6 +44,8 @@ private:
 	QString _meetingId;
 	OpenMeeting::MeetingCatalogController &_controller;
 	OpenMeeting::SessionManager &_session;
+	OpenMeeting::ContactCatalogController *_contacts = nullptr;
+	OpenMeeting::PresenceWatchController *_presence = nullptr;
 	quint64 _authGeneration = 0;
 	std::optional<OpenMeeting::MeetingCatalogDetail> _detail;
 	QLabel *_titleLabel = nullptr;

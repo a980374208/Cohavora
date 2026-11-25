@@ -279,6 +279,18 @@ QString SessionManager::nickname() const {
     return _currentUser.userId.isEmpty() ? QCoreApplication::translate("MeetingUI", "Not Signed In") : _currentUser.userId;
 }
 
+void SessionManager::updateCurrentUserNickname(const QString &nickname) {
+    const QString trimmed = nickname.trimmed();
+    if (!isLoggedIn() || trimmed.isEmpty() || _currentUser.nickname == trimmed) {
+        return;
+    }
+    _currentUser.nickname = trimmed;
+    if (_savedSession && _savedSession->user.userId == _currentUser.userId) {
+        _savedSession->user.nickname = trimmed;
+    }
+    emit currentUserProfileChanged(_currentUser);
+}
+
 void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
     const auto encoder = NormalizeVideoEncoderPreference(
         prefs.videoEncoderPreference.toStdString(), kVideoEncoderPreferencePlatform);

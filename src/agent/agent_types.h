@@ -255,12 +255,14 @@ enum class AgentToolScope {
 	AccountCatalog = 1,
 	ActiveMeeting = 2,
 	MeetingHost = 3,
+	AccountContacts = 4,
 };
 
 enum class AgentConcurrencyGroup {
 	None = 0,
 	CatalogWrite = 1,
 	MeetingTransition = 2,
+	ContactWrite = 3,
 };
 
 struct AgentToolDefinition {

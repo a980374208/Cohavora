@@ -25,9 +25,14 @@
 
 namespace OpenMeeting {
 enum class SessionInvalidationReason;
+class CallInviteController;
+struct CallJoinHandoff;
+class ContactCatalogController;
 class MeetingCatalogController;
 class MeetingCoordinator;
+class PresenceWatchController;
 class SessionManager;
+class UserEventStreamClient;
 }
 
 namespace Cohavora::Update {
@@ -35,6 +40,10 @@ class UpdateService;
 }
 
 namespace MeetingUI {
+
+class ContactsPageWidget;
+class IncomingCallWindow;
+class OutgoingCallOverlay;
 
 class WindowControlsWidget : public Ui::RpWidget {
 public:
@@ -193,9 +202,14 @@ private:
 	void showLoginDialog();
 	void closeMeetingWindows();
 	void hideLogConsole();
-	void showBookingDialog();
+	void showBookingDialog(const QStringList &preselectedInvitees = {});
 	void showMeetingListDialog();
 	void showMeetingDetail(const QString &meetingId);
+	void switchMainTab(bool showContacts);
+	void updateContactsNavBadge();
+	void setupContactsAndCallRuntime();
+	void startEventStreamForSession();
+	void joinCallMeeting(OpenMeeting::CallJoinHandoff &&handoff);
 	void beginMeetingEntry(
 		const QString &meetingId = QString(),
 		std::optional<OpenMeeting::MeetingSettings> meetingSettings = std::nullopt,
@@ -223,10 +237,15 @@ private:
 	QWidget *_headerBar = nullptr;
 	QWidget *_brandBadge = nullptr;
 	QLabel *_dateBadge = nullptr;
+	QFrame *_mainNavCapsule = nullptr;
+	QPushButton *_navMeetingsButton = nullptr;
+	QPushButton *_navContactsButton = nullptr;
 	QPushButton *_copilotButton = nullptr;
 	QPushButton *_settingsButton = nullptr;
 	QPushButton *_accountButton = nullptr;
 	QWidget *_centerColumn = nullptr;
+	ContactsPageWidget *_contactsPage = nullptr;
+	bool _showingContactsTab = false;
 	QPushButton *_quickMeetingButton = nullptr;
 	QFrame *_joinInputBox = nullptr;
 	QLineEdit *_meetingIdInput = nullptr;
@@ -251,6 +270,13 @@ private:
 	bool _copilotVisible = false;
 	bool _copilotExpanded = false;
 	OpenMeeting::MeetingCatalogController *_meetingCatalog = nullptr;
+	OpenMeeting::UserEventStreamClient *_eventStream = nullptr;
+	OpenMeeting::ContactCatalogController *_contactCatalog = nullptr;
+	OpenMeeting::PresenceWatchController *_presenceWatch = nullptr;
+	OpenMeeting::CallInviteController *_callInvite = nullptr;
+	QPointer<IncomingCallWindow> _incomingCallWindow;
+	QPointer<OutgoingCallOverlay> _outgoingCallOverlay;
+	QPointer<OpenMeeting::MeetingCoordinator> _activeMeetingCoordinator;
 	Cohavora::Update::UpdateService *_updateService = nullptr;
 	bool _sessionInvalidationDialogActive = false;
 	MeetingEntryGuard _meetingEntryGuard;

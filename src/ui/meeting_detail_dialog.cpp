@@ -77,11 +77,15 @@ MeetingDetailDialog::MeetingDetailDialog(
 		const QString &meetingId,
 		OpenMeeting::MeetingCatalogController &controller,
 		OpenMeeting::SessionManager &session,
-		QWidget *parent)
+		QWidget *parent,
+		OpenMeeting::ContactCatalogController *contacts,
+		OpenMeeting::PresenceWatchController *presence)
 	: QDialog(parent)
 	, _meetingId(meetingId)
 	, _controller(controller)
 	, _session(session)
+	, _contacts(contacts)
+	, _presence(presence)
 	, _authGeneration(session.authGeneration()) {
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting Details"));
 	setWindowFlag(Qt::WindowContextHelpButtonHint, false);
@@ -271,7 +275,7 @@ void MeetingDetailDialog::handleWriteState() {
 
 void MeetingDetailDialog::editMeeting() {
 	if (!_detail || !_editButton->isEnabled()) return;
-	MeetingBookingDialog dialog(_controller, _session, *_detail, this);
+	MeetingBookingDialog dialog(_controller, _session, *_detail, this, _contacts, _presence);
 	dialog.exec();
 }
 

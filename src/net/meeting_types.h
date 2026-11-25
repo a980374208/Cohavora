@@ -56,6 +56,7 @@ struct MeetingRecord {
     QString creatorNickname;
     QString hostUserId;
     std::vector<QString> coHostUserIds;
+    std::vector<QString> inviteeUserIds;
     MeetingStatus status = MeetingStatus::Unknown;
     QString rawStatus;
     qint64 startTimeSeconds = 0;
@@ -81,6 +82,7 @@ struct MeetingBookingRequest {
     QString timeZone;
     MeetingSettings settings;
     MeetingRepeatRule repeatRule;
+    std::vector<QString> inviteeUserIds;
     bool allowCustomRepeatRule = false;
 };
 
@@ -101,6 +103,7 @@ struct MeetingUpdateRequest {
     std::optional<bool> audioEncouragement;
     std::optional<bool> videoMirroring;
     std::optional<MeetingRepeatRule> repeatRule;
+    std::optional<std::vector<QString>> inviteeUserIds;
     bool allowCustomRepeatRule = false;
 };
 

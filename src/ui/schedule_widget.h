@@ -33,6 +33,7 @@ public:
 	}
 
 	void setMeetingState(const OpenMeeting::MeetingListViewState &state);
+	void setCurrentUserId(const QString &userId);
 	void setShowAllMeetingsAction(bool show);
 
 protected:

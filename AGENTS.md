@@ -23,7 +23,8 @@
 - State：相关修改必须贯通 `LiveKit SDK -> native/business -> Qt/UI`；API、event 或 UI 单独存在不等于功能完整。
 - Video：首选 `I420 -> bounded latest-frame router -> DX11`，回退 `I420 -> SIMD/libyuv -> QImage -> Qt`。GPU/CPU backend 互斥；callback thread 不访问 QWidget、D3D immediate context 或等待 UI/GPU；正常路径不做 GPU readback。
 - Security：`raw detail -> business/network/state/callback` 与 `raw detail -> typed safe summary -> diagnostics` 分离。不得为日志安全改写业务语义；关注 URL、WebSocket、close/exception、SDP/ICE、Qt cache/clipboard、panic、proxy、region、refresh/reconnect。
-- UI：默认复用 `AppTheme` 和当前统一控件规范；提示框、菜单和选择控件不得定义冲突样式或回退到原生尖角控件。
+- UI：默认复用 `AppTheme` 和当前统一控件规范；提示框、菜单和选择控件不得定义冲突样式或回退到原生尖角控件。所有新增或重构的树、列表、表格均须采用 `View + Delegate + Model` 架构（`QTreeView`/`QListView`/`QTableView` + `QAbstractItemModel` + `QStyledItemDelegate`），禁止使用 `QTreeWidget`/`QListWidget`/`QTableWidget`、布局堆叠行控件或对常规展示项滥用 `setIndexWidget`/常驻编辑器；局部修复历史非 MVD 代码时不擅自大改，但须主动提示是否重构。
+- Cross-Platform：修改代码或新增功能涉及 Linux / macOS / Windows 三端时，(1) 若三端无法统一且存在 2 种及以上可行方案，或 (2) 三端虽可统一但在性能方面（渲染/硬件加速、零拷贝、延迟、音视频/外设 I/O 等）部分端存在明显更优的原生或专属实现方案，均不得擅自选型或默认采用最低公分母实现，须先暂停编码，列出三端覆盖、性能差距、维护成本、兼容性与风险对比及推荐方案交由人工决断（仅存在唯一标准写法或完全沿用既有明确架构约定的除外）；决断后的平台差异须隔离在清晰抽象层与独立平台文件（`*_win.*` / `*_mac.*` / `*_linux.*`）内，并明确 Fallback 路径。
 
 ## 执行与构建
 

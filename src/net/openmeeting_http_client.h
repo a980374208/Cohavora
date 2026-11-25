@@ -11,6 +11,8 @@
 #include <memory>
 #include "http_types.h"
 #include "meeting_types.h"
+#include "contact_types.h"
+#include "call_types.h"
 
 namespace OpenMeeting {
 
@@ -95,6 +97,37 @@ public:
 
     void setMeetingHost(const QString &meetingId, const QString &hostUserId,
                         ResultCallback<bool> callback, HttpRequestContext context = {});
+
+    // 10. 目录与通讯录 API
+    void getUserProfile(const QString &targetUserId, ResultCallback<UserProfileResponse> callback);
+    void updateUserProfile(const std::optional<QString> &nickname,
+                           const std::optional<QString> &signature,
+                           const std::optional<QString> &email,
+                           const std::optional<QString> &phone,
+                           ResultCallback<UserProfile> callback);
+    void searchDirectory(const QString &keyword, const QString &deptId,
+                         const QString &scope, qint64 offset, qint64 limit,
+                         ResultCallback<DirectorySearchResponse> callback);
+    void getOrgTree(qint64 clientVersion, ResultCallback<OrgTreeResponse> callback);
+    void getDeptMembers(const QString &deptId, qint64 offset, qint64 limit,
+                        ResultCallback<DeptMembersResponse> callback);
+    void syncContactSnapshot(qint64 updatedAfterMs, ResultCallback<ContactSnapshotResponse> callback);
+    void upsertContactRelation(const UpsertContactRelationRequest &request,
+                               ResultCallback<ContactRelation> callback);
+    void removeContactRelation(const QString &targetUserId, ResultCallback<bool> callback);
+    void manageContactGroup(const ManageContactGroupRequest &request,
+                            ResultCallback<ManageContactGroupResponse> callback);
+    void sendContactRequest(const QString &toUserId, const QString &greeting,
+                            ResultCallback<SendContactRequestResponse> callback);
+    void handleContactRequest(const QString &requestId, bool accept,
+                              ResultCallback<HandleContactRequestResponse> callback);
+    void listContactRequests(qint64 limit, ResultCallback<ContactRequestsResponse> callback);
+
+    // 11. 呼叫信令 API
+    void startCall(const StartCallRequest &request, ResultCallback<CallSession> callback);
+    void acceptCall(const QString &callId, ResultCallback<AcceptCallResponse> callback);
+    void rejectCall(const QString &callId, const QString &reason, ResultCallback<QString> callback);
+    void cancelCall(const QString &callId, const QString &reason, ResultCallback<QString> callback);
 
 signals:
     void tokenExpired();

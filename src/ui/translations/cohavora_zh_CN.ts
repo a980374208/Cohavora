@@ -7572,6 +7572,306 @@ Password: %6</source>
         <source>The selected protocol or model targets an external streaming endpoint different from &quot;%1&quot;. Switch to &quot;Custom Speech Profiles&quot; above to configure a dedicated endpoint and API key.</source>
         <translation>当前选择的识别协议或模型指向独立第三方流式服务，与「%1」的接口地址不同；请点击上方“自定义语音配置”配置专属端点与密钥。</translation>
     </message>
+    <message><source> · E2EE</source><translation> · 端到端加密</translation></message>
+    <message><source>%1 and %2 more (%3 total)</source><translation>%1 等另 %2 位（共 %3 人）</translation></message>
+    <message><source>%1 has been added to your contacts.</source><translation>已将 %1 添加到通讯录。</translation></message>
+    <message><source>%1 wants to add you</source><translation>%1 请求添加您为联系人</translation></message>
+    <message><source>+ Group</source><translation>+ 分组</translation></message>
+    <message><source>A meeting entry is already in progress.</source><translation>已有会议正在加入中。</translation></message>
+    <message><source>A meeting is already open or a request is in progress.</source><translation>当前已有会议窗口打开或入会请求正在进行中。</translation></message>
+    <message><source>Accept</source><translation>同意</translation></message>
+    <message><source>Accepted</source><translation>已同意</translation></message>
+    <message><source>Account</source><translation>账号</translation></message>
+    <message><source>Add Contact</source><translation>添加联系人</translation></message>
+    <message><source>Add External Contact</source><translation>添加外部联系人</translation></message>
+    <message><source>Added to your contacts.</source><translation>已添加到您的通讯录。</translation></message>
+    <message><source>All Contacts</source><translation>全部联系人</translation></message>
+    <message><source>Another call or meeting entry is already in progress.</source><translation>当前已有其他呼叫或会议正在进行中。</translation></message>
+    <message><source>Assign to Group</source><translation>设置分组</translation></message>
+    <message><source>Away</source><translation>离开</translation></message>
+    <message><source>Bio</source><translation>个性签名</translation></message>
+    <message><source>Block Contact</source><translation>屏蔽联系人</translation></message>
+    <message><source>Blocked</source><translation>已屏蔽</translation></message>
+    <message><source>Call</source><translation>呼叫</translation></message>
+    <message><source>Call Busy</source><translation>对方占线</translation></message>
+    <message><source>Call Contact</source><translation>呼叫联系人</translation></message>
+    <message><source>Call Declined</source><translation>呼叫已拒绝</translation></message>
+    <message><source>Call accepted but credentials missing.</source><translation>呼叫已接听，但缺少房间凭据。</translation></message>
+    <message><source>Call cancelled</source><translation>呼叫已取消</translation></message>
+    <message><source>Call declined</source><translation>呼叫已拒绝</translation></message>
+    <message><source>Caller cancelled the call.</source><translation>主叫已取消呼叫。</translation></message>
+    <message><source>Calling</source><translation>呼叫中</translation></message>
+    <message><source>Calling contact...</source><translation>正在呼叫联系人…</translation></message>
+    <message><source>Cancel Call</source><translation>取消呼叫</translation></message>
+    <message><source>Contact Requests</source><translation>联系人申请</translation></message>
+    <message><source>Contact request sent to %1.</source><translation>已向 %1 发送联系人申请。</translation></message>
+    <message><source>Contact request sent.</source><translation>联系人申请已发送。</translation></message>
+    <message><source>Contacts (%1)</source><translation>通讯录 (%1)</translation></message>
+    <message><source>Copy Meeting ID Invitation</source><translation>复制会议号邀请</translation></message>
+    <message><source>Decline</source><translation>拒绝</translation></message>
+    <message><source>Declined</source><translation>已拒绝</translation></message>
+    <message><source>Delete Current Group</source><translation>删除当前分组</translation></message>
+    <message><source>Delete Group</source><translation>删除分组</translation></message>
+    <message><source>Delete group &quot;%1&quot;? Contacts in this group will not be removed.</source><translation>确认删除分组“%1”？分组内的联系人不会被删除。</translation></message>
+    <message><source>Department</source><translation>部门</translation></message>
+    <message><source>Directory lookup failed.</source><translation>目录查询失败。</translation></message>
+    <message><source>Email</source><translation>邮箱</translation></message>
+    <message><source>Employee No.</source><translation>工号</translation></message>
+    <message><source>End-to-End Encryption Key</source><translation>端到端加密密钥</translation></message>
+    <message><source>Enter 1 to 4096 printable ASCII characters.</source><translation>请输入 1 至 4096 位可打印 ASCII 字符。</translation></message>
+    <message><source>Enter an account, email, or employee number first.</source><translation>请先输入账号、邮箱或工号。</translation></message>
+    <message><source>Enter exact account, email, or employee no.</source><translation>输入精确账号、邮箱或工号</translation></message>
+    <message><source>Failed to save remark.</source><translation>保存备注失败。</translation></message>
+    <message><source>Failed to send contact request.</source><translation>发送联系人申请失败。</translation></message>
+    <message><source>Failed to start call.</source><translation>发起呼叫失败。</translation></message>
+    <message><source>Greeting message (optional)</source><translation>附言（可选）</translation></message>
+    <message><source>Group name:</source><translation>分组名称：</translation></message>
+    <message><source>Group: %1</source><translation>分组：%1</translation></message>
+    <message><source>Group: All</source><translation>分组：全部</translation></message>
+    <message><source>Incoming Call</source><translation>来电提醒</translation></message>
+    <message><source>Incoming video call</source><translation>视频来电</translation></message>
+    <message><source>Incoming voice call</source><translation>语音来电</translation></message>
+    <message><source>Initiated call request.</source><translation>已发起呼叫请求。</translation></message>
+    <message><source>Invalid Encryption Key</source><translation>加密密钥无效</translation></message>
+    <message><source>Invitations Sent</source><translation>邀请已发送</translation></message>
+    <message><source>Invite %1 into the active meeting.</source><translation>邀请 %1 加入当前会议。</translation></message>
+    <message><source>Invite Contact to Meeting</source><translation>邀请联系人入会</translation></message>
+    <message><source>Invite Contacts to Meeting</source><translation>邀请联系人加入会议</translation></message>
+    <message><source>Invite Contacts...</source><translation>邀请通讯录联系人…</translation></message>
+    <message><source>Invited · %1</source><translation>受邀 · %1</translation></message>
+    <message><source>Invitees</source><translation>受邀参会人</translation></message>
+    <message><source>Inviting you to a meeting</source><translation>邀请您加入会议</translation></message>
+    <message><source>Inviting you to: %1</source><translation>邀请您加入会议：%1</translation></message>
+    <message><source>Job Title</source><translation>职位</translation></message>
+    <message><source>Meeting entry already in progress.</source><translation>当前已有会议正在加入中。</translation></message>
+    <message><source>Missed call from %1 (auto-replied Busy while in meeting)</source><translation>收到来自 %1 的未接呼叫（会议中已自动回复占线）</translation></message>
+    <message><source>My Contacts</source><translation>我的联系人</translation></message>
+    <message><source>New Contact Group</source><translation>新建联系人分组</translation></message>
+    <message><source>New group name:</source><translation>新分组名称：</translation></message>
+    <message><source>No Answer</source><translation>无人接听</translation></message>
+    <message><source>No active meeting to invite into.</source><translation>当前没有可邀请加入的进行中会议。</translation></message>
+    <message><source>No answer (timed out).</source><translation>对方超时未接听。</translation></message>
+    <message><source>No blocked contacts.</source><translation>暂无已屏蔽联系人。</translation></message>
+    <message><source>No contact requests yet.</source><translation>暂无联系人申请。</translation></message>
+    <message><source>No contacts yet. Search the directory or open Org Tree to add colleagues.</source><translation>暂无联系人，可搜索目录或从组织架构添加同事。</translation></message>
+    <message><source>No matching user found.</source><translation>未找到匹配用户。</translation></message>
+    <message><source>No matching users found.</source><translation>未找到匹配用户。</translation></message>
+    <message><source>No members in this department.</source><translation>该部门暂无成员。</translation></message>
+    <message><source>Add External Contact...</source><translation>添加外部联系人…</translation></message>
+    <message><source>Lead</source><translation>主管</translation></message>
+    <message><source>Loading members...</source><translation>正在加载成员…</translation></message>
+    <message><source>More actions</source><translation>更多操作</translation></message>
+    <message><source>New Contact Group...</source><translation>新建联系人分组…</translation></message>
+    <message><source>Own dept only</source><translation>仅本部门</translation></message>
+    <message><source>Refresh Contacts</source><translation>刷新通讯录</translation></message>
+    <message><source>Rename Group...</source><translation>重命名分组…</translation></message>
+    <message><source>Search</source><translation>搜索</translation></message>
+    <message><source>Reading personal profile...</source><translation>正在读取个人资料…</translation></message>
+    <message><source>Read personal profile</source><translation>已读取个人资料</translation></message>
+    <message><source>Failed to read personal profile</source><translation>读取个人资料失败</translation></message>
+    <message><source>Updating personal profile...</source><translation>正在更新个人资料…</translation></message>
+    <message><source>Updated personal profile</source><translation>已更新个人资料</translation></message>
+    <message><source>Failed to update personal profile</source><translation>更新个人资料失败</translation></message>
+    <message><source>Update Personal Profile</source><translation>更新个人资料</translation></message>
+    <message><source>Nickname -&gt; %1</source><translation>昵称 -&gt; %1</translation></message>
+    <message><source>Email -&gt; %1</source><translation>邮箱 -&gt; %1</translation></message>
+    <message><source>Email -&gt; Cleared</source><translation>邮箱 -&gt; 已清空</translation></message>
+    <message><source>Phone -&gt; %1</source><translation>手机号 -&gt; %1</translation></message>
+    <message><source>Phone -&gt; Cleared</source><translation>手机号 -&gt; 已清空</translation></message>
+    <message><source>Bio -&gt; %1</source><translation>个性签名 -&gt; %1</translation></message>
+    <message><source>Bio -&gt; Cleared</source><translation>个性签名 -&gt; 已清空</translation></message>
+    <message><source>Failed to update personal profile.</source><translation>更新个人资料失败。</translation></message>
+    <message><source>Your personal profile has been updated.</source><translation>个人资料已更新。</translation></message>
+    <message><source>Your permission only allows viewing members of your own department.</source><translation>当前权限仅允许查看自己所属部门的成员（完整组织架构树仍可查看）。</translation></message>
+    <message><source>No organization directory configured.</source><translation>暂未配置企业组织架构。</translation></message>
+    <message><source>None selected</source><translation>未选择</translation></message>
+    <message><source>Offline</source><translation>离线</translation></message>
+    <message><source>Online</source><translation>在线</translation></message>
+    <message><source>Optional greeting message (organization colleagues are added immediately):</source><translation>附言（可选；同组织同事将直接添加）：</translation></message>
+    <message><source>Org Tree</source><translation>组织架构</translation></message>
+    <message><source>Organization</source><translation>组织架构</translation></message>
+    <message><source>Pending</source><translation>待处理</translation></message>
+    <message><source>Personal Profile</source><translation>个人资料</translation></message>
+    <message><source>Personal Profile...</source><translation>个人资料…</translation></message>
+    <message><source>Personal profile saved.</source><translation>个人资料已保存。</translation></message>
+    <message><source>Phone</source><translation>手机号</translation></message>
+    <message><source>Active</source><translation>在职</translation></message>
+    <message><source>Edit Personal Profile</source><translation>编辑个人资料</translation></message>
+    <message><source>Employee No. is assigned automatically upon joining an organization and cannot be changed. Job title can only be modified by the organization founder.</source><translation>工号在加入组织架构时由系统自动分配且不可修改；职位仅组织创始人可在管理台修改。</translation></message>
+    <message><source>Enter display name</source><translation>请输入昵称</translation></message>
+    <message><source>Enter email address (optional)</source><translation>请输入邮箱地址（可选）</translation></message>
+    <message><source>Enter phone number (optional)</source><translation>请输入手机号（可选）</translation></message>
+    <message><source>Failed to save profile.</source><translation>保存个人资料失败。</translation></message>
+    <message><source>Joined: %1</source><translation>加入时间：%1</translation></message>
+    <message><source>My Employee No. &amp; Organization History (Only Visible to You)</source><translation>我的工号与组织变动记录（仅本人可见）</translation></message>
+    <message><source>Nickname</source><translation>昵称</translation></message>
+    <message><source>Nickname cannot be empty.</source><translation>昵称不能为空。</translation></message>
+    <message><source>Removal reason: %1</source><translation>移出原因：%1</translation></message>
+    <message><source>Removal reason: Not specified</source><translation>移出原因：未填写</translation></message>
+    <message><source>Removed from Org</source><translation>已移出组织</translation></message>
+    <message><source>Removed: %1</source><translation>移出时间：%1</translation></message>
+    <message><source>Saving profile...</source><translation>正在保存个人资料…</translation></message>
+    <message><source>Write a short bio (optional)</source><translation>写一句个性签名（可选）</translation></message>
+    <message><source>Refresh contacts</source><translation>刷新通讯录</translation></message>
+    <message><source>Remark</source><translation>备注名</translation></message>
+    <message><source>Remark saved.</source><translation>备注已保存。</translation></message>
+    <message><source>Remove from Contacts</source><translation>移出通讯录</translation></message>
+    <message><source>Rename Contact Group</source><translation>重命名联系人分组</translation></message>
+    <message><source>Rename Current Group...</source><translation>重命名当前分组…</translation></message>
+    <message><source>Request sent to %1</source><translation>已向 %1 发送申请</translation></message>
+    <message><source>Requests</source><translation>新申请</translation></message>
+    <message><source>Requests (%1)</source><translation>新申请 (%1)</translation></message>
+    <message><source>Ringing... %1s</source><translation>响铃中… %1 秒</translation></message>
+    <message><source>Search contacts or organization members...</source><translation>搜索联系人或组织成员…</translation></message>
+    <message><source>Search contacts, organization, or ID...</source><translation>搜索联系人、组织成员或账号…</translation></message>
+    <message><source>Searching directory...</source><translation>正在搜索目录…</translation></message>
+    <message><source>Select Contacts...</source><translation>选择联系人…</translation></message>
+    <message><source>Select Meeting Invitees</source><translation>选择受邀参会人</translation></message>
+    <message><source>Select a contact or colleague to view details, place a direct call, or schedule a meeting.</source><translation>选择联系人或组织同事查看名片、发起一键音视频通话或预约会议。</translation></message>
+    <message><source>Selected: %1</source><translation>已选择：%1</translation></message>
+    <message><source>Send Invite</source><translation>发送邀请</translation></message>
+    <message><source>Send Request</source><translation>发送申请</translation></message>
+    <message><source>Sent real-time meeting invitations to %1 contact(s).</source><translation>已向 %1 位联系人发送实时入会邀请。</translation></message>
+    <message><source>Set a personal alias / remark...</source><translation>设置个人备注名…</translation></message>
+    <message><source>Starred</source><translation>常用星标</translation></message>
+    <message><source>Start a %1 call with %2.</source><translation>向 %2 发起 %1 通话。</translation></message>
+    <message><source>The call was declined.</source><translation>对方已拒绝此次呼叫。</translation></message>
+    <message><source>The call was not answered in time.</source><translation>对方超时未接听。</translation></message>
+    <message><source>The callee is currently in another meeting or call.</source><translation>对方正在会议或通话中。</translation></message>
+    <message><source>The caller cancelled or the call timed out.</source><translation>主叫已取消或呼叫已超时。</translation></message>
+    <message><source>The contact declined the call.</source><translation>对方已拒绝呼叫。</translation></message>
+    <message><source>The contact is busy.</source><translation>对方正忙。</translation></message>
+    <message><source>The contact is currently busy or in another meeting.</source><translation>对方正忙或正在其他会议中。</translation></message>
+    <message><source>This meeting requires end-to-end encryption. Enter the shared ASCII encryption key:</source><translation>该会议已开启端到端加密，请输入共享 ASCII 加密密钥：</translation></message>
+    <message><source>This user is blocked. Direct calls and contact requests from them are muted.</source><translation>该用户已被屏蔽，来自对方的直呼和好友申请将被拦截。</translation></message>
+    <message><source>Unable to accept call.</source><translation>无法接听呼叫。</translation></message>
+    <message><source>Unable to reach this user right now.</source><translation>暂时无法呼叫该用户。</translation></message>
+    <message><source>Unable to send contact request.</source><translation>无法发送联系人申请。</translation></message>
+    <message><source>Unblock</source><translation>取消屏蔽</translation></message>
+    <message><source>Unblock Contact</source><translation>取消屏蔽</translation></message>
+    <message><source>Video Call</source><translation>视频呼叫</translation></message>
+    <message><source>Voice Call</source><translation>语音呼叫</translation></message>
+    <message><source>Waiting for answer... %1s</source><translation>等待对方接听… %1 秒</translation></message>
+    <message><source>★ Starred</source><translation>★ 已星标</translation></message>
+    <message><source>☆ Star</source><translation>☆ 设为常用</translation></message>
+    <message><source>%1 has been removed from your contacts.</source><translation>已将 %1 移出通讯录。</translation></message>
+    <message><source>%1 is already in your contacts.</source><translation>%1 已经在您的通讯录中。</translation></message>
+    <message><source>Accept Contact Request</source><translation>同意联系人申请</translation></message>
+    <message><source>Accept the contact request from %1.</source><translation>同意来自 %1 的联系人申请。</translation></message>
+    <message><source>Accepted contact request</source><translation>已同意联系人申请</translation></message>
+    <message><source>Accepted request from %1.</source><translation>已同意 %1 的申请。</translation></message>
+    <message><source>Accepting contact request...</source><translation>正在同意联系人申请…</translation></message>
+    <message><source>Already in an active meeting; invite the contact to the meeting instead.</source><translation>当前正在进行会议，请改为邀请联系人加入会议。</translation></message>
+    <message><source>Called contact</source><translation>已呼叫联系人</translation></message>
+    <message><source>Checked contact requests</source><translation>已查看联系人申请</translation></message>
+    <message><source>Checking contact requests...</source><translation>正在查看联系人申请…</translation></message>
+    <message><source>Contact group &quot;%1&quot; has been created.</source><translation>已创建联系人分组“%1”。</translation></message>
+    <message><source>Contact group &quot;%1&quot; has been deleted.</source><translation>已删除联系人分组“%1”。</translation></message>
+    <message><source>Contact group &quot;%1&quot; has been renamed to &quot;%2&quot;.</source><translation>已将联系人分组“%1”重命名为“%2”。</translation></message>
+    <message><source>Contact group &quot;%1&quot; sort order has been updated to %2.</source><translation>已将联系人分组“%1”的排序调整为 %2。</translation></message>
+    <message><source>Contact group has been renamed to &quot;%1&quot;.</source><translation>已将联系人分组重命名为“%1”。</translation></message>
+    <message><source>Contact request from %1 has been accepted.</source><translation>已同意来自 %1 的联系人申请。</translation></message>
+    <message><source>Contact request from %1 has been declined.</source><translation>已拒绝来自 %1 的联系人申请。</translation></message>
+    <message><source>Contact settings for %1 have been updated.</source><translation>已更新联系人 %1 的设置。</translation></message>
+    <message><source>Contact: %1
+%2</source><translation>联系人：%1
+%2</translation></message>
+    <message><source>Create Contact Group</source><translation>新建联系人分组</translation></message>
+    <message><source>Create a new contact group named &quot;%1&quot;.</source><translation>新建名为“%1”的联系人分组。</translation></message>
+    <message><source>Created contact group</source><translation>已创建联系人分组</translation></message>
+    <message><source>Created contact group &quot;%1&quot;</source><translation>已创建联系人分组“%1”</translation></message>
+    <message><source>Creating contact group &quot;%1&quot;...</source><translation>正在创建联系人分组“%1”…</translation></message>
+    <message><source>Creating contact group...</source><translation>正在创建联系人分组…</translation></message>
+    <message><source>Decline Contact Request</source><translation>拒绝联系人申请</translation></message>
+    <message><source>Decline the contact request from %1.</source><translation>拒绝来自 %1 的联系人申请。</translation></message>
+    <message><source>Declined contact request</source><translation>已拒绝联系人申请</translation></message>
+    <message><source>Declined request from %1.</source><translation>已拒绝 %1 的申请。</translation></message>
+    <message><source>Declining contact request...</source><translation>正在拒绝联系人申请…</translation></message>
+    <message><source>Delete Contact Group</source><translation>删除联系人分组</translation></message>
+    <message><source>Delete contact group &quot;%1&quot;. Contacts in this group will not be removed.</source><translation>删除联系人分组“%1”。分组内的联系人不会被删除。</translation></message>
+    <message><source>Deleted contact group</source><translation>已删除联系人分组</translation></message>
+    <message><source>Deleting contact group...</source><translation>正在删除联系人分组…</translation></message>
+    <message><source>Failed to accept contact request</source><translation>同意联系人申请失败</translation></message>
+    <message><source>Failed to call contact</source><translation>呼叫联系人失败</translation></message>
+    <message><source>Failed to check contact requests</source><translation>查看联系人申请失败</translation></message>
+    <message><source>Failed to create contact group</source><translation>创建联系人分组失败</translation></message>
+    <message><source>Failed to create contact group &quot;%1&quot;</source><translation>创建联系人分组“%1”失败</translation></message>
+    <message><source>Failed to decline contact request</source><translation>拒绝联系人申请失败</translation></message>
+    <message><source>Failed to delete contact group</source><translation>删除联系人分组失败</translation></message>
+    <message><source>Failed to invite contact</source><translation>邀请联系人入会失败</translation></message>
+    <message><source>Failed to list contact groups</source><translation>获取联系人分组失败</translation></message>
+    <message><source>Failed to process contact request.</source><translation>处理联系人申请失败。</translation></message>
+    <message><source>Failed to read organization directory</source><translation>读取组织架构目录失败</translation></message>
+    <message><source>Failed to remove contact</source><translation>移出联系人失败</translation></message>
+    <message><source>Failed to remove contact.</source><translation>移出联系人失败。</translation></message>
+    <message><source>Failed to rename contact group</source><translation>重命名联系人分组失败</translation></message>
+    <message><source>Failed to reorder contact group</source><translation>调整联系人分组排序失败</translation></message>
+    <message><source>Failed to search contacts</source><translation>搜索联系人失败</translation></message>
+    <message><source>Failed to send contact request</source><translation>发送联系人申请失败</translation></message>
+    <message><source>Failed to send meeting invitation.</source><translation>发送入会邀请失败。</translation></message>
+    <message><source>Failed to update contact group.</source><translation>更新联系人分组失败。</translation></message>
+    <message><source>Failed to update contact groups</source><translation>更新联系人分组失败</translation></message>
+    <message><source>Failed to update contact relation</source><translation>更新联系人信息失败</translation></message>
+    <message><source>Failed to update contact.</source><translation>更新联系人失败。</translation></message>
+    <message><source>Group &quot;%1&quot; created.</source><translation>已创建分组“%1”。</translation></message>
+    <message><source>Group &quot;%1&quot; deleted.</source><translation>已删除分组“%1”。</translation></message>
+    <message><source>Group order updated.</source><translation>分组排序已更新。</translation></message>
+    <message><source>Group renamed to &quot;%1&quot;.</source><translation>分组已重命名为“%1”。</translation></message>
+    <message><source>Groups -&gt; %1</source><translation>分组 -&gt; %1</translation></message>
+    <message><source>Groups -&gt; None</source><translation>分组 -&gt; 无</translation></message>
+    <message><source>Invited contact to meeting</source><translation>已邀请联系人入会</translation></message>
+    <message><source>Invitees -&gt; %1</source><translation>受邀参会人 -&gt; %1</translation></message>
+    <message><source>Invitees -&gt; Cleared</source><translation>受邀参会人 -&gt; 已清空</translation></message>
+    <message><source>Invitees: %1</source><translation>受邀参会人：%1</translation></message>
+    <message><source>Inviting contact to meeting...</source><translation>正在邀请联系人入会…</translation></message>
+    <message><source>Listed contact groups</source><translation>已列出联系人分组</translation></message>
+    <message><source>Listing contact groups...</source><translation>正在列出联系人分组…</translation></message>
+    <message><source>Look up &quot;%1&quot; and send a contact request.</source><translation>查找“%1”并发送联系人申请。</translation></message>
+    <message><source>Look up &quot;%1&quot; and send a contact request.
+Greeting: &quot;%2&quot;</source><translation>查找“%1”并发送联系人申请。
+附言：“%2”</translation></message>
+    <message><source>Multiple users matched &quot;%1&quot;. Please specify the exact user ID or account.</source><translation>找到多位与“%1”匹配的用户，请提供精确的用户 ID 或账号。</translation></message>
+    <message><source>Read organization directory</source><translation>已读取组织架构目录</translation></message>
+    <message><source>Reading organization directory...</source><translation>正在读取组织架构目录…</translation></message>
+    <message><source>Remark -&gt; %1</source><translation>备注名 -&gt; %1</translation></message>
+    <message><source>Remark -&gt; Cleared</source><translation>备注名 -&gt; 已清空</translation></message>
+    <message><source>Remove %1 from your contacts.</source><translation>将 %1 移出通讯录。</translation></message>
+    <message><source>Remove Contact</source><translation>移出联系人</translation></message>
+    <message><source>Removed %1 from contacts.</source><translation>已将 %1 移出通讯录。</translation></message>
+    <message><source>Removed contact</source><translation>已移出联系人</translation></message>
+    <message><source>Removing contact...</source><translation>正在移出联系人…</translation></message>
+    <message><source>Rename contact group &quot;%1&quot; to &quot;%2&quot;.</source><translation>将联系人分组“%1”重命名为“%2”。</translation></message>
+    <message><source>Renamed contact group</source><translation>已重命名联系人分组</translation></message>
+    <message><source>Renaming contact group...</source><translation>正在重命名联系人分组…</translation></message>
+    <message><source>Reorder Contact Group</source><translation>调整联系人分组排序</translation></message>
+    <message><source>Reordered contact group</source><translation>已调整联系人分组排序</translation></message>
+    <message><source>Reordering contact group...</source><translation>正在调整联系人分组排序…</translation></message>
+    <message><source>Searched contacts</source><translation>已搜索联系人</translation></message>
+    <message><source>Searching contacts...</source><translation>正在搜索联系人…</translation></message>
+    <message><source>Send a contact request to %1 (organization colleagues are added immediately).</source><translation>向 %1 发送联系人申请（同组织同事将直接添加）。</translation></message>
+    <message><source>Send a contact request to %1.
+Greeting: &quot;%2&quot;</source><translation>向 %1 发送联系人申请。
+附言：“%2”</translation></message>
+    <message><source>Sending contact request...</source><translation>正在发送联系人申请…</translation></message>
+    <message><source>Sending meeting invitation...</source><translation>正在发送入会邀请…</translation></message>
+    <message><source>Sent contact request</source><translation>已发送联系人申请</translation></message>
+    <message><source>Sent meeting invitation to %1.</source><translation>已向 %1 发送入会邀请。</translation></message>
+    <message><source>Set sort order of contact group &quot;%1&quot; to %2.</source><translation>将联系人分组“%1”的排序设为 %2。</translation></message>
+    <message><source>Starred -&gt; No</source><translation>常用星标 -&gt; 否</translation></message>
+    <message><source>Starred -&gt; Yes</source><translation>常用星标 -&gt; 是</translation></message>
+    <message><source>Start a video call with %1.</source><translation>向 %1 发起视频通话。</translation></message>
+    <message><source>Start a voice call with %1.</source><translation>向 %1 发起语音通话。</translation></message>
+    <message><source>Started video call with %1.</source><translation>已向 %1 发起视频通话。</translation></message>
+    <message><source>Started voice call with %1.</source><translation>已向 %1 发起语音通话。</translation></message>
+    <message><source>Status -&gt; Blocked</source><translation>状态 -&gt; 已屏蔽</translation></message>
+    <message><source>Status -&gt; Unblocked</source><translation>状态 -&gt; 取消屏蔽</translation></message>
+    <message><source>This user is currently blocked. Unblock them first.</source><translation>该用户当前已被屏蔽，请先取消屏蔽。</translation></message>
+    <message><source>Update Contact</source><translation>更新联系人</translation></message>
+    <message><source>Updated %1.</source><translation>已更新 %1。</translation></message>
+    <message><source>Updated contact groups</source><translation>已更新联系人分组</translation></message>
+    <message><source>Updated contact relation</source><translation>已更新联系人信息</translation></message>
+    <message><source>Updating contact groups...</source><translation>正在更新联系人分组…</translation></message>
+    <message><source>Updating contact relation...</source><translation>正在更新联系人信息…</translation></message>
 </context>
 <context>
     <name>MeetingUI::AnnotationOverlayWindow</name>

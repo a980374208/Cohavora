@@ -145,6 +145,7 @@ public:
     QString token() const;
     QString userId() const;
     QString nickname() const;
+    void updateCurrentUserNickname(const QString &nickname);
 
     // 持久化的登录与网络配置
     QString savedAccount() const { return _savedAccount; }
@@ -250,6 +251,7 @@ signals:
     // including service changes and the beginning of a replacement login.
     void authenticationReset(quint64 generation);
     void loggedIn(const UserInfo &user);
+    void currentUserProfileChanged(const UserInfo &user);
     void loggedOut();
     void sessionInvalidated(SessionInvalidationReason reason);
     // 兼容已有 TokenExpired/TokenInvalid UI 订阅；新逻辑优先监听

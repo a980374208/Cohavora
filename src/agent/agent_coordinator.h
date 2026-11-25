@@ -21,8 +21,11 @@
 
 namespace OpenMeeting {
 
+class CallInviteController;
+class ContactCatalogController;
 class MeetingCatalogController;
 class MeetingCoordinator;
+class PresenceWatchController;
 class SessionManager;
 
 struct AgentSpeechProbeConfig {
@@ -80,6 +83,9 @@ public:
 	[[nodiscard]] MeetingCoordinator *attachedMeeting() const;
 	void attachCatalog(MeetingCatalogController *catalog);
 	[[nodiscard]] MeetingCatalogController *attachedCatalog() const;
+	void attachContacts(ContactCatalogController *contacts,
+	                    PresenceWatchController *presence = nullptr,
+	                    CallInviteController *callInvite = nullptr);
 	void setHostSettingsBridge(AgentHostSettingsBridge bridge);
 	[[nodiscard]] bool isInMeeting() const;
 	[[nodiscard]] bool isEncryptedMeeting() const;
@@ -318,6 +324,7 @@ private:
 	void expireAllPendingActions(const QString &reason, bool meetingScopedOnly = false);
 	void onCatalogWriteStateChanged();
 	void finalizeCatalogAction(AgentPendingToolAction &action);
+	bool finalizeActionOutcome(const QString &actionId, const ToolExecutionOutcome &outcome);
 	void updateToolMessageForAction(const QString &actionId, const QString &statusJson);
 	void finalizeThinkingForMessage(AgentChatMessage &message);
 	void updateToolInvocationPartForAction(
@@ -365,6 +372,10 @@ private:
 	QVector<QMetaObject::Connection> _meetingConnections;
 	QPointer<MeetingCatalogController> _catalog;
 	QVector<QMetaObject::Connection> _catalogConnections;
+	QPointer<ContactCatalogController> _contacts;
+	QPointer<PresenceWatchController> _presence;
+	QPointer<CallInviteController> _callInvite;
+	QVector<QMetaObject::Connection> _contactConnections;
 	AgentHostSettingsBridge _hostSettings;
 	QHash<int, QString> _inFlightActionByGroup;
 

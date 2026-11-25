@@ -1,9 +1,12 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_booking_dialog.h"
 
+#include "src/core/contact_catalog_controller.h"
 #include "src/core/meeting_catalog_controller.h"
+#include "src/core/presence_watch_controller.h"
 #include "src/net/session_manager.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/contacts/contact_picker_dialog.h"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QTimeZone>
@@ -80,27 +83,46 @@ QString readOnlyRepeatName(const OpenMeeting::MeetingRepeatRule &rule) {
 MeetingBookingDialog::MeetingBookingDialog(
 		OpenMeeting::MeetingCatalogController &controller,
 		OpenMeeting::SessionManager &session,
-		QWidget *parent)
+		QWidget *parent,
+		OpenMeeting::ContactCatalogController *contacts,
+		OpenMeeting::PresenceWatchController *presence)
 	: QDialog(parent)
 	, _controller(controller)
-	, _session(session) {
+	, _session(session)
+	, _contacts(contacts)
+	, _presence(presence) {
 	initUi();
 	populateCreateDefaults();
-	AppTheme::makeDialogAdaptive(*this, QSize(560, 620));
+	AppTheme::makeDialogAdaptive(*this, QSize(560, 660));
 }
 
 MeetingBookingDialog::MeetingBookingDialog(
 		OpenMeeting::MeetingCatalogController &controller,
 		OpenMeeting::SessionManager &session,
 		const OpenMeeting::MeetingCatalogDetail &detail,
-		QWidget *parent)
+		QWidget *parent,
+		OpenMeeting::ContactCatalogController *contacts,
+		OpenMeeting::PresenceWatchController *presence)
 	: QDialog(parent)
 	, _controller(controller)
 	, _session(session)
+	, _contacts(contacts)
+	, _presence(presence)
 	, _original(detail) {
 	initUi();
 	populateEditValues();
-	AppTheme::makeDialogAdaptive(*this, QSize(560, 620));
+	AppTheme::makeDialogAdaptive(*this, QSize(560, 660));
+}
+
+void MeetingBookingDialog::setPreselectedInvitees(const QStringList &userIds) {
+	_selectedInviteeIds.clear();
+	for (const auto &uid : userIds) {
+		const QString clean = uid.trimmed();
+		if (!clean.isEmpty() && clean != _session.userId() && !_selectedInviteeIds.contains(clean)) {
+			_selectedInviteeIds.push_back(clean);
+		}
+	}
+	updateInviteesDisplay();
 }
 
 void MeetingBookingDialog::initUi() {
@@ -187,10 +209,29 @@ void MeetingBookingDialog::initUi() {
 	_passwordEdit->setEchoMode(QLineEdit::Password);
 	_passwordEdit->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Optional; clear this field to remove the password"));
 	form->addRow(QCoreApplication::translate("MeetingUI", "Meeting Password"), _passwordEdit);
+
+	if (_contacts) {
+		auto *inviteesRow = new QWidget(this);
+		auto *inviteesLayout = new QHBoxLayout(inviteesRow);
+		inviteesLayout->setContentsMargins(0, 0, 0, 0);
+		inviteesLayout->setSpacing(10);
+		_inviteesLabel = new QLabel(QCoreApplication::translate("MeetingUI", "None selected"), inviteesRow);
+		_inviteesLabel->setWordWrap(true);
+		_inviteesLabel->setTextFormat(Qt::PlainText);
+		_selectInviteesButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Select Contacts..."), inviteesRow);
+		_selectInviteesButton->setObjectName(QStringLiteral("secondary"));
+		_selectInviteesButton->setCursor(Qt::PointingHandCursor);
+		connect(_selectInviteesButton, &QPushButton::clicked, this, [this] { openInviteePicker(); });
+		inviteesLayout->addWidget(_inviteesLabel, 1);
+		inviteesLayout->addWidget(_selectInviteesButton);
+		form->addRow(QCoreApplication::translate("MeetingUI", "Invitees"), inviteesRow);
+	}
 	root->addLayout(form);
 
 	_cameraOnJoin = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), this);
+	_cameraOnJoin->setObjectName(QStringLiteral("bookingCameraOnJoin"));
 	_microphoneOnJoin = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), this);
+	_microphoneOnJoin->setObjectName(QStringLiteral("bookingMicrophoneOnJoin"));
 	root->addWidget(_cameraOnJoin);
 	root->addWidget(_microphoneOnJoin);
 
@@ -246,8 +287,9 @@ void MeetingBookingDialog::populateCreateDefaults() {
 	_repeatEndEdit->setDate(_startEdit->date().addMonths(1));
 	_durationEdit->setValue(60);
 	_initialDurationMinutes = _durationEdit->value();
-	_cameraOnJoin->setChecked(true);
-	_microphoneOnJoin->setChecked(true);
+	const auto &mediaPrefs = _session.mediaPreferences();
+	_cameraOnJoin->setChecked(mediaPrefs.enableVideo);
+	_microphoneOnJoin->setChecked(mediaPrefs.enableMicrophone);
 }
 
 void MeetingBookingDialog::populateEditValues() {
@@ -280,6 +322,55 @@ void MeetingBookingDialog::populateEditValues() {
 	_passwordEdit->setText(_original->password);
 	_cameraOnJoin->setChecked(!record.settings.disableCameraOnJoin);
 	_microphoneOnJoin->setChecked(!record.settings.disableMicrophoneOnJoin);
+	_selectedInviteeIds.clear();
+	for (const auto &uid : record.inviteeUserIds) {
+		if (!uid.trimmed().isEmpty() && !_selectedInviteeIds.contains(uid.trimmed())) {
+			_selectedInviteeIds.push_back(uid.trimmed());
+		}
+	}
+	updateInviteesDisplay();
+}
+
+void MeetingBookingDialog::updateInviteesDisplay() {
+	if (!_inviteesLabel) return;
+	if (_selectedInviteeIds.isEmpty()) {
+		_inviteesLabel->setText(QCoreApplication::translate("MeetingUI", "None selected"));
+		return;
+	}
+	QStringList names;
+	for (int i = 0; i < _selectedInviteeIds.size() && i < 3; ++i) {
+		names.push_back(_contacts
+			? _contacts->displayNameForUser(_selectedInviteeIds[i])
+			: _selectedInviteeIds[i]);
+	}
+	if (_selectedInviteeIds.size() > 3) {
+		_inviteesLabel->setText(QCoreApplication::translate("MeetingUI", "%1 and %2 more (%3 total)")
+			.arg(names.join(QStringLiteral(", ")))
+			.arg(_selectedInviteeIds.size() - 3)
+			.arg(_selectedInviteeIds.size()));
+	} else {
+		_inviteesLabel->setText(names.join(QStringLiteral(", ")));
+	}
+}
+
+void MeetingBookingDialog::openInviteePicker() {
+	if (!_contacts) return;
+	QSet<QString> excluded;
+	if (!_session.userId().isEmpty()) {
+		excluded.insert(_session.userId());
+	}
+	ContactPickerDialog picker(
+		*_contacts,
+		_presence,
+		QCoreApplication::translate("MeetingUI", "Select Meeting Invitees"),
+		QCoreApplication::translate("MeetingUI", "Confirm"),
+		_selectedInviteeIds,
+		excluded,
+		this);
+	if (picker.exec() == QDialog::Accepted) {
+		_selectedInviteeIds = picker.selectedUserIds();
+		updateInviteesDisplay();
+	}
 }
 
 bool MeetingBookingDialog::collectCommon(
@@ -375,6 +466,7 @@ OpenMeeting::MeetingBookingRequest MeetingBookingDialog::createRequest(
 	request.settings.disableCameraOnJoin = !_cameraOnJoin->isChecked();
 	request.settings.disableMicrophoneOnJoin = !_microphoneOnJoin->isChecked();
 	request.repeatRule = repeatRule;
+	request.inviteeUserIds.assign(_selectedInviteeIds.begin(), _selectedInviteeIds.end());
 	return request;
 }
 
@@ -409,6 +501,16 @@ std::optional<OpenMeeting::MeetingUpdateRequest> MeetingBookingDialog::updateReq
 	}
 	if (disableMicrophone != record.settings.disableMicrophoneOnJoin) {
 		request.disableMicrophoneOnJoin = disableMicrophone;
+	}
+	if (_contacts) {
+		QStringList currentSorted = _selectedInviteeIds;
+		QStringList origSorted;
+		for (const auto &uid : record.inviteeUserIds) origSorted.push_back(uid);
+		currentSorted.sort();
+		origSorted.sort();
+		if (currentSorted != origSorted) {
+			request.inviteeUserIds = std::vector<QString>(_selectedInviteeIds.begin(), _selectedInviteeIds.end());
+		}
 	}
 
 	QString validationMessage;
@@ -482,6 +584,7 @@ void MeetingBookingDialog::setBusy(bool busy) {
 	_timeZoneEdit->setEnabled(!busy);
 	updateRepeatControls();
 	_passwordEdit->setEnabled(!busy);
+	if (_selectInviteesButton) _selectInviteesButton->setEnabled(!busy);
 	_cameraOnJoin->setEnabled(!busy);
 	_microphoneOnJoin->setEnabled(!busy);
 	_submitButton->setEnabled(!busy);

@@ -2,8 +2,11 @@
 
 #include "src/agent/agent_speech_probe_audio.h"
 #include "src/agent/openai_compatible_transport.h"
+#include "src/core/call_invite_controller.h"
+#include "src/core/contact_catalog_controller.h"
 #include "src/core/meeting_catalog_controller.h"
 #include "src/core/meeting_coordinator.h"
+#include "src/core/presence_watch_controller.h"
 #include "src/net/session_manager.h"
 
 #include <QtCore/QDateTime>
@@ -1201,6 +1204,44 @@ void AgentCoordinator::attachCatalog(MeetingCatalogController *catalog) {
 			this, [this] {
 				_catalog.clear();
 				_inFlightActionByGroup.remove(static_cast<int>(AgentConcurrencyGroup::CatalogWrite));
+			}));
+	}
+}
+
+void AgentCoordinator::attachContacts(
+		ContactCatalogController *contacts,
+		PresenceWatchController *presence,
+		CallInviteController *callInvite) {
+	if (_contacts == contacts && _presence == presence && _callInvite == callInvite) {
+		return;
+	}
+	for (const auto &conn : _contactConnections) {
+		disconnect(conn);
+	}
+	_contactConnections.clear();
+	_inFlightActionByGroup.remove(static_cast<int>(AgentConcurrencyGroup::ContactWrite));
+	_contacts = contacts;
+	_presence = presence;
+	_callInvite = callInvite;
+
+	if (_contacts) {
+		_contactConnections.push_back(connect(_contacts, &QObject::destroyed,
+			this, [this] {
+				_contacts.clear();
+				_inFlightActionByGroup.remove(static_cast<int>(AgentConcurrencyGroup::ContactWrite));
+			}));
+	}
+	if (_presence) {
+		_contactConnections.push_back(connect(_presence, &QObject::destroyed,
+			this, [this] {
+				_presence.clear();
+			}));
+	}
+	if (_callInvite) {
+		_contactConnections.push_back(connect(_callInvite, &QObject::destroyed,
+			this, [this] {
+				_callInvite.clear();
+				_inFlightActionByGroup.remove(static_cast<int>(AgentConcurrencyGroup::ContactWrite));
 			}));
 	}
 }
@@ -2981,6 +3022,9 @@ AgentToolViewContext AgentCoordinator::buildToolViewContext() const {
 	ctx.meetingOverview = buildCurrentMeetingContext();
 	ctx.meeting = _meeting.data();
 	ctx.catalog = _catalog.data();
+	ctx.contacts = _contacts.data();
+	ctx.presence = _presence.data();
+	ctx.callInvite = _callInvite.data();
 	ctx.sessionManager = &_sessionManager;
 	ctx.agentCoordinator = this;
 	ctx.hostSettings = &_hostSettings;
@@ -2989,6 +3033,7 @@ AgentToolViewContext AgentCoordinator::buildToolViewContext() const {
 	ctx.telemetrySnapshot = &_latestTelemetrySnapshot;
 	ctx.canShareMeetingData = isInMeeting() && (!isEncryptedMeeting() || isE2eeContextAuthorized());
 	ctx.canUseCatalogTools = _sessionManager.isLoggedIn() && (_catalog != nullptr);
+	ctx.canUseContactTools = _sessionManager.isLoggedIn() && (_contacts != nullptr || _callInvite != nullptr);
 	ctx.canUseClientPrefTools = true;
 	return ctx;
 }
@@ -3077,7 +3122,8 @@ void AgentCoordinator::dispatchChatRequest(
 	if (_sendMeetingContext && viewCtx.canShareMeetingData) {
 		req.meetingContext = viewCtx.meetingOverview;
 	}
-	if ((viewCtx.canShareMeetingData || viewCtx.canUseCatalogTools || viewCtx.canUseClientPrefTools) &&
+	if ((viewCtx.canShareMeetingData || viewCtx.canUseCatalogTools ||
+			viewCtx.canUseContactTools || viewCtx.canUseClientPrefTools) &&
 		(_profile.protocol == AgentProtocolDialect::OpenAiChatCompletionsSse ||
 		 _profile.protocol == AgentProtocolDialect::OpenAiResponsesSse ||
 		 _profile.protocol == AgentProtocolDialect::AnthropicMessagesSse ||
@@ -3402,7 +3448,8 @@ void AgentCoordinator::handleCompletedToolCalls(
 		action.concurrencyGroup = def->concurrencyGroup;
 		action.generationToken = token;
 		if (def->scope == AgentToolScope::ClientGlobal ||
-			def->scope == AgentToolScope::AccountCatalog) {
+			def->scope == AgentToolScope::AccountCatalog ||
+			def->scope == AgentToolScope::AccountContacts) {
 			action.generationToken.coordinatorSession = 0;
 			action.generationToken.nativeRoomGeneration = 0;
 		}
@@ -3628,6 +3675,16 @@ bool AgentCoordinator::approvePendingAction(const QString &actionId) {
 
 	action.status = AgentPendingActionStatus::Approved;
 	const auto toolDef = _toolRegistry.findTool(action.toolName);
+	struct AsyncCompletionBridge {
+		bool returned = false;
+		bool completedSync = false;
+		ToolExecutionOutcome syncOutcome;
+	};
+	auto asyncBridge = std::make_shared<AsyncCompletionBridge>();
+	const QString actionIdCopy = action.actionId;
+	const SessionGenerationToken expectedToken = action.generationToken;
+	const uint64_t expectedConversationNonce = _conversationNonce;
+
 	ToolExecutionOutcome outcome;
 	if (toolDef.has_value() && toolDef->risk == AgentToolRisk::ReadOnly) {
 		outcome.toolResult = _toolRegistry.executeReadOnly(
@@ -3641,13 +3698,44 @@ bool AgentCoordinator::approvePendingAction(const QString &actionId) {
 		AgentToolExecuteContext execCtx;
 		execCtx.meeting = _meeting.data();
 		execCtx.catalog = _catalog.data();
+		execCtx.contacts = _contacts.data();
+		execCtx.callInvite = _callInvite.data();
 		execCtx.sessionManager = &_sessionManager;
 		execCtx.agentCoordinator = this;
 		execCtx.hostSettings = &_hostSettings;
+		const QPointer<AgentCoordinator> self(this);
+		execCtx.completeAsync = [self, asyncBridge, actionIdCopy, groupKey, expectedToken, expectedConversationNonce](
+				const ToolExecutionOutcome &finalOutcome) {
+			if (!asyncBridge->returned) {
+				asyncBridge->syncOutcome = finalOutcome;
+				asyncBridge->syncOutcome.asyncInFlight = false;
+				asyncBridge->completedSync = true;
+				return;
+			}
+			if (!self) {
+				return;
+			}
+			if (groupKey != static_cast<int>(AgentConcurrencyGroup::None)) {
+				if (self->_inFlightActionByGroup.value(groupKey) != actionIdCopy) {
+					return;
+				}
+				self->_inFlightActionByGroup.remove(groupKey);
+			}
+			if (self->_conversationNonce != expectedConversationNonce ||
+				!self->isGenerationCurrent(expectedToken)) {
+				return;
+			}
+			self->finalizeActionOutcome(actionIdCopy, finalOutcome);
+		};
 		outcome = _toolRegistry.executeConfirmedActionWithOutcome(
 			action.toolName,
 			action.arguments,
 			execCtx);
+	}
+	asyncBridge->returned = true;
+	if (asyncBridge->completedSync) {
+		outcome = std::move(asyncBridge->syncOutcome);
+		outcome.asyncInFlight = false;
 	}
 	const AgentToolResult &res = outcome.toolResult;
 
@@ -3682,6 +3770,33 @@ bool AgentCoordinator::approvePendingAction(const QString &actionId) {
 		return action.status == AgentPendingActionStatus::Executed;
 	}
 
+	if (outcome.asyncInFlight && res.success) {
+		if (action.concurrencyGroup != AgentConcurrencyGroup::None) {
+			_inFlightActionByGroup.insert(groupKey, action.actionId);
+		}
+		action.resultMessage = outcome.uiStatusMessage.isEmpty()
+			? QCoreApplication::translate("MeetingUI", "Submitting request...")
+			: outcome.uiStatusMessage;
+		const auto pres = MeetingToolRegistry::describeToolInvocation(action.toolName, action.arguments, true);
+		updateToolInvocationPartForAction(
+			action.actionId,
+			AgentResponsePart::ToolState::Running,
+			pres.invocationMessage,
+			action.resultMessage);
+		emit pendingActionUpdated(action);
+		return true;
+	}
+
+	return finalizeActionOutcome(actionIdCopy, outcome);
+}
+
+bool AgentCoordinator::finalizeActionOutcome(const QString &actionId, const ToolExecutionOutcome &outcome) {
+	const int idx = indexOfPendingAction(actionId);
+	if (idx < 0) {
+		return false;
+	}
+	AgentPendingToolAction &action = _pendingActions[idx];
+	const AgentToolResult &res = outcome.toolResult;
 	if (res.success) {
 		action.status = AgentPendingActionStatus::Executed;
 		action.resultMessage = outcome.uiStatusMessage.isEmpty()
@@ -3689,7 +3804,9 @@ bool AgentCoordinator::approvePendingAction(const QString &actionId) {
 			: outcome.uiStatusMessage;
 	} else {
 		action.status = AgentPendingActionStatus::Failed;
-		action.resultMessage = res.errorMessage;
+		action.resultMessage = res.errorMessage.isEmpty()
+			? QCoreApplication::translate("MeetingUI", "Operation failed.")
+			: res.errorMessage;
 	}
 	const bool isMeetingTransition =
 		(action.concurrencyGroup == AgentConcurrencyGroup::MeetingTransition) && res.success;

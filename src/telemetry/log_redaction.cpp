@@ -155,6 +155,7 @@ std::string RouteName(std::string_view path) {
     if (path == "/rtc/validate") return "rtc_validate";
     if (path == "/rtc/v1/validate") return "rtc_v1_validate";
     if (path == "/settings/regions") return "settings_regions";
+    if (path == "/ws/events") return "ws_events";
     return "other";
 }
 

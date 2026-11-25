@@ -14,8 +14,11 @@
 namespace OpenMeeting {
 
 class AgentCoordinator;
+class CallInviteController;
+class ContactCatalogController;
 class MeetingCatalogController;
 class MeetingCoordinator;
+class PresenceWatchController;
 class SessionManager;
 
 struct AgentHostSettingsBridge {
@@ -33,6 +36,9 @@ struct AgentToolViewContext {
 	AgentMeetingContext meetingOverview;
 	MeetingCoordinator *meeting = nullptr;
 	MeetingCatalogController *catalog = nullptr;
+	ContactCatalogController *contacts = nullptr;
+	PresenceWatchController *presence = nullptr;
+	CallInviteController *callInvite = nullptr;
 	const SessionManager *sessionManager = nullptr;
 	const AgentCoordinator *agentCoordinator = nullptr;
 	const AgentHostSettingsBridge *hostSettings = nullptr;
@@ -41,15 +47,21 @@ struct AgentToolViewContext {
 	const QVariantMap *telemetrySnapshot = nullptr;
 	bool canShareMeetingData = false;
 	bool canUseCatalogTools = false;
+	bool canUseContactTools = false;
 	bool canUseClientPrefTools = false;
 };
+
+struct ToolExecutionOutcome;
 
 struct AgentToolExecuteContext {
 	MeetingCoordinator *meeting = nullptr;
 	MeetingCatalogController *catalog = nullptr;
+	ContactCatalogController *contacts = nullptr;
+	CallInviteController *callInvite = nullptr;
 	SessionManager *sessionManager = nullptr;
 	AgentCoordinator *agentCoordinator = nullptr;
 	const AgentHostSettingsBridge *hostSettings = nullptr;
+	std::function<void(const ToolExecutionOutcome &finalOutcome)> completeAsync;
 };
 
 struct PreparedPendingAction {
@@ -107,6 +119,7 @@ public:
 	[[nodiscard]] bool isToolAvailable(const QString &name, const AgentToolViewContext &ctx) const;
 	[[nodiscard]] bool isReadOnlyTool(const QString &name) const;
 	[[nodiscard]] static bool isCatalogTool(const QString &name);
+	[[nodiscard]] static bool isContactTool(const QString &name);
 	[[nodiscard]] static bool isClientPreferenceTool(const QString &name);
 
 	[[nodiscard]] static bool parseToolArguments(
@@ -170,6 +183,7 @@ public:
 
 private:
 	void registerCatalogTools();
+	void registerContactTools();
 	void registerMeetingControlTools();
 	void registerHostModerationTools();
 	void registerClientSettingsTools();

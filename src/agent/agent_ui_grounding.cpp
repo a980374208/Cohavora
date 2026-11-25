@@ -427,27 +427,103 @@ QString buildClientUiNavigationGuidePrompt() {
 	lines.push_back(QStringLiteral(
 		"Grounding Rule: When explaining how to perform an operation in Cohavora or reporting current client settings, "
 		"ALWAYS quote the exact localized menu paths, tab names, button/control labels, and option names below (or in tool 'uiDetails'). "
-		"NEVER invent non-existent or removed menu names (e.g., 'Contacts', 'User Center', 'Account / Billing'). "
+		"NEVER invent non-existent or removed menu names (e.g., 'User Center', 'Account / Billing', or removed legacy Contacts controls such as 'Group: All', '+ Group', 'Rename Current Group...', 'Delete Current Group'). "
 		"NEVER show raw internal enum IDs (such as 'system', 'light', 'dark', 'teal', 'zh_CN', 'en_US', 'on_hover', 'local_only', 'local_and_remote', 'nvenc', 'qsv', 'amf', 'vaapi') "
 		"as user-facing UI option labels unless the user explicitly asks for internal parameter values."));
 
-	// 1. Main Window & Copilot Drawer
+	// 1. Main Window, Contacts Workspace & Copilot Drawer
 	const QString accountMenuItems = bracketedList({
+		uiTr("Personal Profile..."),
 		uiTr("Switch Account / Sign In"),
 		uiTr("Sign Out"),
 	});
+	const QString mainNavTabs = QStringLiteral("[%1] / [%2]")
+		.arg(uiTr("Meetings"), uiTr("Contacts"));
 	const QString secondaryActions = bracketedList({
 		uiTr("Schedule Meeting"),
 		uiTr("Share Screen"),
 		uiTr("All Meetings"),
 	}, QStringLiteral(" / "));
 	lines.push_back(
-		QStringLiteral("- Main Window: Top bar ([%1], [%2], [%3]: %4); command bar ([%5] + 9-digit meeting ID input + [%6]); ")
-			.arg(uiTr("AI Copilot"), kSettings, uiTr("Account menu"), accountMenuItems,
+		QStringLiteral("- Main Window: Top bar (workspace switcher %1; [%2], [%3], [%4]: %5); command bar ([%6] + 9-digit meeting ID input + [%7]); ")
+			.arg(mainNavTabs, uiTr("AI Copilot"), kSettings, uiTr("Account menu"), accountMenuItems,
 				uiTr("Start Instant Meeting"), uiTr("Join"))
-		+ QStringLiteral("secondary row (%1); schedule card ([%2] with [%3]); bottom [%4] strip (Mic / Camera / Encryption quick toggles, [%5]).")
-			.arg(secondaryActions, uiTr("Upcoming Meetings"), uiTr("Refresh"),
-				uiTr("Join Presets"), uiTr("More Settings")));
+		+ QStringLiteral("secondary row (%1; [%2] supports [%3] -> [%4], and its [%5] / [%6] checkboxes default to current [%7 > %8 > %9]); ")
+			.arg(secondaryActions, uiTr("Schedule Meeting"), uiTr("Invitees"), uiTr("Select Contacts..."),
+				uiTr("Enable camera on joining"), uiTr("Enable microphone on joining"),
+				kSettings, kGeneral, uiTr("Default Join Preferences"))
+		+ QStringLiteral("schedule card ([%1] with [%2]); bottom [%3] strip (Mic / Camera / Encryption quick toggles, [%4]).")
+			.arg(uiTr("Upcoming Meetings"), uiTr("Refresh"), uiTr("Join Presets"), uiTr("More Settings")));
+
+	const QString personalProfileReadOnly = bracketedList({
+		uiTr("Account"),
+		uiTr("Employee No."),
+		uiTr("Department"),
+		uiTr("Job Title"),
+	});
+	const QString personalProfileEditable = bracketedList({
+		uiTr("Nickname"),
+		uiTr("Email"),
+		uiTr("Phone"),
+		uiTr("Bio"),
+	});
+	lines.push_back(
+		QStringLiteral("- [%1] Dialog (open via [%2] > [%3] or [%4] on self detail card): read-only org/identity fields (%5; Employee No. is auto-assigned on joining an organization, immutable and never reused; Job Title can only be changed by the organization founder); ")
+			.arg(uiTr("Personal Profile"), uiTr("Account menu"), uiTr("Personal Profile..."),
+				uiTr("Edit Personal Profile"), personalProfileReadOnly)
+		+ QStringLiteral("editable personal fields (%1 + [%2], editable anytime whether in an organization or not); self-only [%3] list (shows active/historical employee numbers and removal reasons).")
+			.arg(personalProfileEditable, uiTr("Save Changes"),
+				uiTr("My Employee No. & Organization History (Only Visible to You)")));
+
+	const QString contactsPlusMenu = bracketedList({
+		uiTr("Add External Contact..."),
+		uiTr("New Contact Group..."),
+		uiTr("Refresh Contacts"),
+	});
+	const QString contactsSegmentedTabs = QStringLiteral("[%1] / [%2]")
+		.arg(uiTr("Contacts"), uiTr("Org Tree"));
+	const QString contactsTreeGroups = QStringLiteral("[%1] -> [%2] -> custom groups (right-click: [%3] / [%4] / [%5]) -> [%6] (collapsed at bottom)")
+		.arg(uiTr("Starred"), uiTr("My Contacts"), uiTr("Rename Group..."),
+			uiTr("Delete Group"), uiTr("New Contact Group..."), uiTr("Blocked"));
+	const QString contactDetailFields = bracketedList({
+		uiTr("Account"),
+		uiTr("Employee No."),
+		uiTr("Department"),
+		uiTr("Job Title"),
+		uiTr("Email"),
+		uiTr("Phone"),
+		uiTr("Bio"),
+		uiTr("Remark"),
+	});
+	const QString contactDetailActions = bracketedList({
+		uiTr("Voice Call"),
+		uiTr("Video Call"),
+		uiTr("Schedule Meeting"),
+		uiTr("Add Contact"),
+		uiTr("Unblock"),
+		uiTr("Edit Personal Profile"),
+		uiTr("☆ Star"),
+		uiTr("Assign to Group"),
+		uiTr("Block Contact"),
+		uiTr("Unblock Contact"),
+		uiTr("Remove from Contacts"),
+	});
+	lines.push_back(
+		QStringLiteral("- [%1] Workspace: left sidebar has top [%2] input + '+' ([%3]: %4); ")
+			.arg(uiTr("Contacts"), uiTr("Search"), uiTr("More actions"), contactsPlusMenu)
+		+ QStringLiteral("standalone [%1] entry row (unread badge; opens right-pane [%2] with [%3] and [%4] inbox: [%5] / [%6]); ")
+			.arg(uiTr("Requests"), uiTr("Add External Contact"), uiTr("Send Request"),
+				uiTr("Contact Requests"), uiTr("Accept"), uiTr("Decline"))
+		+ QStringLiteral("segmented 2-tab pill %1 (auto-hidden when user has no organization or during search): ")
+			.arg(contactsSegmentedTabs)
+		+ QStringLiteral("[%1] unified collapsible tree with online/total counters (%2); ")
+			.arg(uiTr("Contacts"), contactsTreeGroups)
+		+ QStringLiteral("[%1] unified collapsible tree where expanding a department loads sub-departments and inline members ([%2] badge; supports global/per-department visibility policy showing [%3] when restricted to own department while keeping the full department tree visible); ")
+			.arg(uiTr("Org Tree"), uiTr("Lead"), uiTr("Own dept only"))
+		+ QStringLiteral("right contact detail card (fields: %1; actions: %2; self card hides [%3] and shows [%4] + self-only [%5]).")
+			.arg(contactDetailFields, contactDetailActions, uiTr("Remark"),
+				uiTr("Edit Personal Profile"),
+				uiTr("My Employee No. & Organization History (Only Visible to You)")));
 
 	lines.push_back(QStringLiteral("- [%1] Dialog: %2 / %3, [%4] / [%5], expandable [%6] & [%7].")
 		.arg(uiTr("Join Meeting"), uiTr("Meeting ID"), uiTr("Display Name"),
@@ -651,8 +727,9 @@ QString buildClientUiNavigationGuidePrompt() {
 		+ QStringLiteral("active share banner: [%1], [%2], [%3])")
 			.arg(uiTr("Share quality"), uiTr("Annotate"), uiTr("Shared audio"));
 	lines.push_back(
-		QStringLiteral("  * Bottom Toolbar: %1 (click icon to toggle; dropdown arrow or right-click to pick device; hold Space to temporarily unmute); %2; [%3] (copy invite); [%4]; [%5] (text/image/file); [%6]; [%7]; ")
-			.arg(mediaToggles, shareControls, uiTr("Invite"), uiTr("Participants"), uiTr("Chat"),
+		QStringLiteral("  * Bottom Toolbar: %1 (click icon to toggle; dropdown arrow or right-click to pick device; hold Space to temporarily unmute); %2; [%3] ([%4] / [%5]); [%6]; [%7] (text/image/file); [%8]; [%9]; ")
+			.arg(mediaToggles, shareControls, uiTr("Invite"), uiTr("Copy Meeting ID Invitation"),
+				uiTr("Invite Contacts..."), uiTr("Participants"), uiTr("Chat"),
 				uiTr("Whiteboard"), uiTr("Copilot"))
 		+ QStringLiteral("[%1] (host: [%2] / [%3]; participant: [%4]).")
 			.arg(uiTr("End Meeting"), uiTr("Leave Only"), uiTr("End for Everyone"), uiTr("Leave Meeting")));

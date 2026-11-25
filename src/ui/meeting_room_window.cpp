@@ -14,6 +14,10 @@
 #include "src/ui/whiteboard/accessible_combo_box.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/app_icons.h"
+#include "src/core/call_invite_controller.h"
+#include "src/core/contact_catalog_controller.h"
+#include "src/core/presence_watch_controller.h"
+#include "src/ui/contacts/contact_picker_dialog.h"
 #include "src/ui/whiteboard/annotation_overlay_window.h"
 #include "src/ui/whiteboard/whiteboard_panel.h"
 #include "src/ui/meeting_log_console.h"
@@ -48,6 +52,7 @@
 #include <QtGui/QPainterPath>
 #include <QtGui/QFont>
 #include <QtGui/QClipboard>
+#include <QtGui/QCursor>
 #include <QtGui/QWindow>
 #include <QtCore/QDateTime>
 #include <QtCore/QDebug>
@@ -7244,6 +7249,15 @@ void MeetingRoomWindow::updateVideoLayout() {
 		_recoveryBanner->setGeometry((stageW - recBannerW) / 2, 16, recBannerW, recBannerH);
 		_recoveryBanner->raise();
 	}
+	if (_missedCallBanner && _missedCallBanner->isVisible()) {
+		const auto missedSize = bannerSize(*_missedCallBanner, stageW, 380);
+		_missedCallBanner->setGeometry(
+			std::max(12, stageW - missedSize.width() - 16),
+			16,
+			missedSize.width(),
+			missedSize.height());
+		_missedCallBanner->raise();
+	}
 
 	// Both subscription pixel demand and QWidget/GPU placement use this geometry.
 	size_t mainIndex = 0;
@@ -9099,13 +9113,126 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 }
 
 void MeetingRoomWindow::setupInvitationBinding() {
-	if (!_bottomBar) return;
-	_bottomBar->inviteClicked() | rpl::on_next([this] {
-		handleInviteClicked();
-	}, lifetime());
+	if (_bottomBar) {
+		_bottomBar->inviteClicked() | rpl::on_next([this] {
+			handleInviteClicked();
+		}, lifetime());
+	}
+	if (_config.callInvite) {
+		connect(_config.callInvite, &OpenMeeting::CallInviteController::silentMissedCallWhileInMeeting,
+			this, [this](const OpenMeeting::CallSession &session) {
+				showSilentMissedCallBanner(session);
+			});
+	}
+}
+
+void MeetingRoomWindow::showSilentMissedCallBanner(const OpenMeeting::CallSession &session) {
+	if (!_stageContainer || _closeRequested) return;
+	if (!_missedCallBanner) {
+		_missedCallBanner = new QLabel(_stageContainer);
+		_missedCallBanner->setObjectName(QStringLiteral("MeetingMissedCallBanner"));
+		_missedCallBanner->setTextFormat(Qt::PlainText);
+		_missedCallBanner->setWordWrap(true);
+		_missedCallBanner->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+		_missedCallBanner->setStyleSheet(QStringLiteral(
+			"background: rgba(24, 24, 28, 225); color: #ffffff; border-radius: 8px; padding: 8px 14px; font-size: 12px;"));
+		_missedCallBanner->hide();
+	}
+	if (!_missedCallBannerTimer) {
+		_missedCallBannerTimer = new QTimer(this);
+		_missedCallBannerTimer->setSingleShot(true);
+		connect(_missedCallBannerTimer, &QTimer::timeout, this, [this] {
+			if (_missedCallBanner) _missedCallBanner->hide();
+		});
+	}
+	const QString caller = !session.callerNickname.trimmed().isEmpty()
+		? session.callerNickname.trimmed()
+		: session.callerUserId;
+	_missedCallBanner->setText(QCoreApplication::translate(
+		"MeetingUI", "Missed call from %1 (auto-replied Busy while in meeting)").arg(caller));
+	_missedCallBanner->adjustSize();
+	const int stageW = _stageContainer->width();
+	const int bannerW = std::min(std::max(240, _missedCallBanner->sizeHint().width() + 8), std::max(240, stageW - 32));
+	const int bannerH = std::max(34, _missedCallBanner->heightForWidth(bannerW));
+	_missedCallBanner->setGeometry(std::max(12, stageW - bannerW - 16), 16, bannerW, bannerH);
+	_missedCallBanner->show();
+	_missedCallBanner->raise();
+	_missedCallBannerTimer->start(4000);
 }
 
 void MeetingRoomWindow::handleInviteClicked() {
+	if (_config.invitationMode != InvitationMode::BusinessMeetingId) {
+		copyMeetingIdInvitation();
+		return;
+	}
+	const auto ready = _coordinator
+		&& _coordinator->state() == OpenMeeting::MeetingState::InMeeting
+		&& !_coordinator->currentMeetingId().trimmed().isEmpty();
+	if (ready && _config.contacts && _config.callInvite) {
+		auto *menu = new QMenu(this);
+		menu->setAttribute(Qt::WA_DeleteOnClose);
+		AppTheme::styleMenu(
+			*menu,
+			AppTheme::effectiveTheme() == AppTheme::Theme::Dark
+				? AppTheme::Tone::Dark
+				: AppTheme::Tone::Light);
+		auto *inviteContactsAct = menu->addAction(
+			AppTheme::icon(AppTheme::Icon::Plus),
+			QCoreApplication::translate("MeetingUI", "Invite Contacts..."));
+		auto *copyIdAct = menu->addAction(
+			AppTheme::icon(AppTheme::Icon::Copy),
+			QCoreApplication::translate("MeetingUI", "Copy Meeting ID Invitation"));
+		connect(inviteContactsAct, &QAction::triggered, this, [this] {
+			openInMeetingContactInviteDialog();
+		}, Qt::QueuedConnection);
+		connect(copyIdAct, &QAction::triggered, this, [this] {
+			copyMeetingIdInvitation();
+		}, Qt::QueuedConnection);
+		menu->popup(QCursor::pos());
+		return;
+	}
+	copyMeetingIdInvitation();
+}
+
+void MeetingRoomWindow::openInMeetingContactInviteDialog() {
+	if (!_config.contacts || !_config.callInvite || !_coordinator) return;
+	QSet<QString> excluded;
+	const auto selfId = OpenMeeting::SessionManager::instance().userId();
+	if (!selfId.isEmpty()) excluded.insert(selfId);
+	for (const auto &p : _coordinator->participants()) {
+		if (!p.identity.isEmpty()) excluded.insert(p.identity);
+	}
+
+	ContactPickerDialog picker(
+		*_config.contacts,
+		_config.presence,
+		QCoreApplication::translate("MeetingUI", "Invite Contacts to Meeting"),
+		QCoreApplication::translate("MeetingUI", "Send Invite"),
+		{},
+		excluded,
+		this);
+	if (picker.exec() != QDialog::Accepted) return;
+
+	const auto selected = picker.selectedUserIds();
+	if (selected.isEmpty()) return;
+
+	int sentCount = 0;
+	for (const auto &uid : selected) {
+		if (_config.callInvite->inviteToActiveMeeting(uid)) {
+			++sentCount;
+		}
+	}
+	if (sentCount > 0) {
+		LogToConsole(LogCategory::General, "INVITE",
+			QStringLiteral("in_meeting_contact_invites_dispatched=%1").arg(sentCount));
+		showInvitationNotice(
+			true,
+			QCoreApplication::translate("MeetingUI", "Invitations Sent"),
+			QCoreApplication::translate("MeetingUI", "Sent real-time meeting invitations to %1 contact(s).").arg(sentCount));
+	}
+}
+
+void MeetingRoomWindow::copyMeetingIdInvitation() {
 	if (_config.invitationMode != InvitationMode::BusinessMeetingId) {
 		QPointer<MeetingRoomWindow> guard(this);
 		LogToConsole(LogCategory::General, "INVITE", QCoreApplication::translate("MeetingUI", "This connection does not support meeting ID invitations"));

@@ -803,7 +803,10 @@ QString formatMeetingContextPrompt(const AgentMeetingContext &ctx) {
 	return QStringLiteral("[Meeting Context]\n") + lines.join(QLatin1Char('\n'));
 }
 
-QString formatSchedulingClockPrompt(bool includeSchedulingRules, bool includeJoinPreferencesRule) {
+QString formatSchedulingClockPrompt(
+		bool includeSchedulingRules,
+		bool includeJoinPreferencesRule,
+		bool includeContactsProfileRules) {
 	QStringList lines;
 	if (includeSchedulingRules) {
 		const QDateTime now = QDateTime::currentDateTime();
@@ -828,7 +831,8 @@ QString formatSchedulingClockPrompt(bool includeSchedulingRules, bool includeJoi
 			"Both standard recurrence (None, Daily, Weekly, WeekDay, Monthly) and custom recurrence "
 			"(repeat_type='Custom' with repeat_unit='Day'|'Week'|'Month', repeat_interval>=1, optional repeat_days_of_week [0=Sun..6=Sat], "
 			"optional repeat_end_time or repeat_times) are supported. "
-			"If the user does not explicitly ask for a password, omit 'password' (default to no password)."));
+			"If the user does not explicitly ask for a password, omit 'password' (default to no password). "
+			"If the user does not explicitly specify camera/microphone join restrictions for a new scheduled meeting, omit disable_camera_on_join / disable_microphone_on_join so the meeting defaults to the user's current client media preferences."));
 	}
 	if (includeJoinPreferencesRule) {
 		const QString audioPrefPath = QStringLiteral("%1 -> %2 -> '%3'")
@@ -842,6 +846,14 @@ QString formatSchedulingClockPrompt(bool includeSchedulingRules, bool includeJoi
 			"ALWAYS call 'get_client_preferences' or 'update_client_preferences' (pass enable_microphone_on_join=false for '默认静音入会') "
 			"to inspect or modify the local client %1 option, NOT 'update_scheduled_meeting'.")
 			.arg(audioPrefPath));
+	}
+	if (includeContactsProfileRules) {
+		lines.push_back(QStringLiteral(
+			"Contacts, Organization & Personal Profile Rules: "
+			"1) Use 'get_my_profile' to inspect the signed-in user's own profile (account, employee number, department, job title, email, phone, bio/signature) and self-only historical employee numbers / organization removal reasons. "
+			"2) Use 'update_my_profile' to edit the signed-in user's own nickname, email, phone, or bio/signature (allowed whether in an organization or not; requires user confirmation). "
+			"NEVER claim to edit employeeNo (auto-assigned on joining an organization, immutable and never reused) or jobTitle (only editable by the organization founder in the Web Org Admin Console). "
+			"3) When 'list_org_departments' or 'search_contacts' reports 'membersRestricted=true' for a department, explain clearly that organization visibility settings restrict viewing members outside the user's own department (the full department tree remains visible) rather than reporting the department as empty."));
 	}
 	return lines.join(QLatin1Char('\n'));
 }
@@ -986,8 +998,14 @@ QString buildCombinedSystemPrompt(const AgentChatRequest &req, bool includeClien
 			return t.name == QStringLiteral("update_client_preferences") ||
 				t.name == QStringLiteral("set_join_media_preferences");
 		});
-	if (hasSchedulingTools || hasJoinPrefTools) {
-		appendBlock(formatSchedulingClockPrompt(hasSchedulingTools, hasJoinPrefTools));
+	const bool hasContactProfileTools = std::any_of(
+		req.tools.cbegin(),
+		req.tools.cend(),
+		[](const AgentToolDefinition &t) {
+			return t.scope == AgentToolScope::AccountContacts;
+		});
+	if (hasSchedulingTools || hasJoinPrefTools || hasContactProfileTools) {
+		appendBlock(formatSchedulingClockPrompt(hasSchedulingTools, hasJoinPrefTools, hasContactProfileTools));
 	}
 	if (includeClientUiGuide) {
 		appendBlock(buildClientUiNavigationGuidePrompt());

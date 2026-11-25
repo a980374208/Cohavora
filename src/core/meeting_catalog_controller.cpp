@@ -120,7 +120,9 @@ MeetingList MeetingCatalogController::projectUpcomingMeetings(
             if (meeting.status != MeetingStatus::InProgress) return false;
             const auto &host = meeting.hostUserId.isEmpty()
                 ? meeting.creatorUserId : meeting.hostUserId;
-            return host.isEmpty() || host != context.userId;
+            if (!host.isEmpty() && host == context.userId) return false;
+            return std::find(meeting.inviteeUserIds.begin(), meeting.inviteeUserIds.end(),
+                             context.userId) == meeting.inviteeUserIds.end();
         }), projected.end());
     return projected;
 }

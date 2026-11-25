@@ -110,6 +110,11 @@ QVariant MeetingListModel::data(const QModelIndex &index, int role) const {
 		return row.dateGroup;
 	case MeetingShowDateHeaderRole:
 		return row.showDateHeader;
+	case MeetingIsInvitedRole: {
+		if (_currentUserId.isEmpty() || meeting.creatorUserId == _currentUserId) return false;
+		return std::find(meeting.inviteeUserIds.begin(), meeting.inviteeUserIds.end(), _currentUserId) !=
+			meeting.inviteeUserIds.end();
+	}
 	default:
 		return {};
 	}
@@ -127,7 +132,16 @@ QHash<int, QByteArray> MeetingListModel::roleNames() const {
 	result.insert(MeetingRepeatRole, "meetingRepeat");
 	result.insert(MeetingDateGroupRole, "meetingDateGroup");
 	result.insert(MeetingShowDateHeaderRole, "meetingShowDateHeader");
+	result.insert(MeetingIsInvitedRole, "meetingIsInvited");
 	return result;
+}
+
+void MeetingListModel::setCurrentUserId(const QString &userId) {
+	if (_currentUserId == userId) return;
+	_currentUserId = userId;
+	if (!_rows.empty()) {
+		emit dataChanged(index(0, 0), index(rowCount() - 1, 0), {MeetingIsInvitedRole});
+	}
 }
 
 void MeetingListModel::setMeetings(

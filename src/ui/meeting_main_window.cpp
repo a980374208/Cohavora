@@ -16,18 +16,28 @@
 #include "src/ui/ui_timing_observer.h"
 #include "src/ui/shadow_helper.h"
 #include "src/ui/telemetry_dialogs.h"
+#include "src/core/call_invite_controller.h"
+#include "src/core/contact_catalog_controller.h"
 #include "src/core/meeting_catalog_controller.h"
 #include "src/core/meeting_coordinator.h"
+#include "src/core/presence_watch_controller.h"
 #include "src/media/desktop_capture.h"
 #include "src/net/session_manager.h"
+#include "src/net/user_event_stream_client.h"
+#include "src/ui/call/incoming_call_window.h"
+#include "src/ui/call/outgoing_call_overlay.h"
+#include "src/ui/contacts/contacts_page_widget.h"
+#include "src/ui/contacts/user_profile_dialog.h"
 #include "src/telemetry/telemetry_report.h"
 #include "styles/style_widgets.h"
+#include <openssl/crypto.h>
 #include <QtCore/QDate>
 #include <QtCore/QLocale>
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include <QtCore/qscopeguard.h>
 #include <QtWidgets/QAbstractButton>
+#include <QtWidgets/QInputDialog>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QCheckBox>
@@ -67,8 +77,14 @@ namespace {
 void populateCopilotConfig(
 		MeetingRoomWindow::Config &config,
 		MeetingMainWindow *mainWin,
-		const std::shared_ptr<OpenMeeting::AgentCoordinator> &agentCoordinator) {
+		const std::shared_ptr<OpenMeeting::AgentCoordinator> &agentCoordinator,
+		OpenMeeting::ContactCatalogController *contacts = nullptr,
+		OpenMeeting::PresenceWatchController *presence = nullptr,
+		OpenMeeting::CallInviteController *callInvite = nullptr) {
 	config.agentCoordinator = agentCoordinator;
+	config.contacts = contacts;
+	config.presence = presence;
+	config.callInvite = callInvite;
 	QPointer<MeetingMainWindow> owner(mainWin);
 	config.openCopilotSettings = [owner](QWidget *dialogParent) {
 		if (owner) {
@@ -871,6 +887,7 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	_meetingCatalog = new OpenMeeting::MeetingCatalogController(session, this);
 	_agentCoordinator = std::make_shared<OpenMeeting::AgentCoordinator>(session);
 	_agentCoordinator->attachCatalog(_meetingCatalog);
+	setupContactsAndCallRuntime();
 	OpenMeeting::AgentHostSettingsBridge hostBridge;
 	hostBridge.getTheme = []() {
 		return AppTheme::themeId(AppTheme::selectedTheme());
@@ -1047,7 +1064,8 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 		config.audioMuted = !preferences.enableMicrophone;
 		config.videoEnabled = preferences.enableVideo;
 		config.invitationMode = InvitationMode::BusinessMeetingId;
-		populateCopilotConfig(config, mainWinOwner.data(), mainWinOwner->_agentCoordinator);
+		populateCopilotConfig(config, mainWinOwner.data(), mainWinOwner->_agentCoordinator,
+			mainWinOwner->_contactCatalog, mainWinOwner->_presenceWatch, mainWinOwner->_callInvite);
 
 		auto coordinator = OpenMeeting::MeetingCoordinator::create();
 		mainWinOwner->bindMeetingCatalog(coordinator.get());
@@ -1118,7 +1136,8 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 		config.audioMuted = !preferences.enableMicrophone;
 		config.videoEnabled = preferences.enableVideo;
 		config.invitationMode = InvitationMode::BusinessMeetingId;
-		populateCopilotConfig(config, mainWinOwner.data(), mainWinOwner->_agentCoordinator);
+		populateCopilotConfig(config, mainWinOwner.data(), mainWinOwner->_agentCoordinator,
+			mainWinOwner->_contactCatalog, mainWinOwner->_presenceWatch, mainWinOwner->_callInvite);
 
 		auto coordinator = OpenMeeting::MeetingCoordinator::create();
 		mainWinOwner->bindMeetingCatalog(coordinator.get());
@@ -1170,18 +1189,36 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	connect(&session, &OpenMeeting::SessionManager::authenticationReset,
 		this, [this](quint64) {
 			clearPendingMeetingEntry();
+			if (_eventStream) _eventStream->stop();
+			if (_incomingCallWindow) _incomingCallWindow->dismiss();
+			if (_outgoingCallOverlay) _outgoingCallOverlay->dismiss();
+			_activeMeetingCoordinator = nullptr;
+			if (_presenceWatch) _presenceWatch->setLocalInMeeting(false);
 			syncAccountBadge();
 			syncJoinPresets();
+			updateContactsNavBadge();
 		});
 	connect(&session, &OpenMeeting::SessionManager::loggedIn,
 		this, [this](const OpenMeeting::UserInfo &) {
 			syncAccountBadge();
 			syncJoinPresets();
+			startEventStreamForSession();
+			if (_contactCatalog) _contactCatalog->refreshAll();
+		});
+	connect(&session, &OpenMeeting::SessionManager::currentUserProfileChanged,
+		this, [this](const OpenMeeting::UserInfo &) {
+			syncAccountBadge();
 		});
 	connect(&session, &OpenMeeting::SessionManager::loggedOut,
 		this, [this] {
+			if (_eventStream) _eventStream->stop();
+			if (_incomingCallWindow) _incomingCallWindow->dismiss();
+			if (_outgoingCallOverlay) _outgoingCallOverlay->dismiss();
+			_activeMeetingCoordinator = nullptr;
+			if (_presenceWatch) _presenceWatch->setLocalInMeeting(false);
 			syncAccountBadge();
 			syncJoinPresets();
+			updateContactsNavBadge();
 		});
 	connect(&session, &OpenMeeting::SessionManager::preferencesChanged,
 		this, [this](const OpenMeeting::MediaPreferences &) {
@@ -1206,6 +1243,9 @@ void MeetingMainWindow::showEvent(QShowEvent *e) {
 
 void MeetingMainWindow::closeEvent(QCloseEvent *e) {
 	clearPendingMeetingEntry();
+	if (_eventStream) _eventStream->stop();
+	if (_incomingCallWindow) _incomingCallWindow->dismiss();
+	if (_outgoingCallOverlay) _outgoingCallOverlay->dismiss();
 	closeMeetingWindows();
 	hideLogConsole();
 	Ui::RpWidget::closeEvent(e);
@@ -1261,6 +1301,39 @@ void MeetingMainWindow::initLayout() {
 	_dateBadge->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 	_dateBadge->setAttribute(Qt::WA_TransparentForMouseEvents);
 	headerLayout->addWidget(_dateBadge, 0, Qt::AlignVCenter);
+
+	headerLayout->addStretch(1);
+
+	_mainNavCapsule = new QFrame(_headerBar);
+	_mainNavCapsule->setObjectName(QStringLiteral("mainNavCapsule"));
+	_mainNavCapsule->setFixedHeight(30);
+	auto *navLayout = new QHBoxLayout(_mainNavCapsule);
+	navLayout->setContentsMargins(3, 3, 3, 3);
+	navLayout->setSpacing(2);
+
+	_navMeetingsButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "Meetings"), _mainNavCapsule);
+	_navMeetingsButton->setObjectName(QStringLiteral("mainNavMeetings"));
+	_navMeetingsButton->setCheckable(true);
+	_navMeetingsButton->setChecked(true);
+	_navMeetingsButton->setCursor(Qt::PointingHandCursor);
+	_navMeetingsButton->setFixedHeight(24);
+	connect(_navMeetingsButton, &QPushButton::clicked, this, [this] {
+		switchMainTab(false);
+	});
+	navLayout->addWidget(_navMeetingsButton);
+
+	_navContactsButton = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "Contacts"), _mainNavCapsule);
+	_navContactsButton->setObjectName(QStringLiteral("mainNavContacts"));
+	_navContactsButton->setCheckable(true);
+	_navContactsButton->setCursor(Qt::PointingHandCursor);
+	_navContactsButton->setFixedHeight(24);
+	connect(_navContactsButton, &QPushButton::clicked, this, [this] {
+		switchMainTab(true);
+	});
+	navLayout->addWidget(_navContactsButton);
+	headerLayout->addWidget(_mainNavCapsule, 0, Qt::AlignVCenter);
 
 	headerLayout->addStretch(1);
 
@@ -1518,6 +1591,24 @@ void MeetingMainWindow::initLayout() {
 
 	centerLayout->addWidget(_presetStrip);
 
+	// 2b. 通讯录工作区（与居中会议工作台互斥展示，兼容右侧 Copilot 抽屉）
+	_contactsPage = new ContactsPageWidget(
+		*_contactCatalog, *_presenceWatch, OpenMeeting::SessionManager::instance(), this);
+	_contactsPage->hide();
+	connect(_contactsPage, &ContactsPageWidget::voiceCallRequested, this, [this](const QString &userId) {
+		if (_callInvite) {
+			_callInvite->startDirectCall(userId, OpenMeeting::CallMediaType::Audio);
+		}
+	});
+	connect(_contactsPage, &ContactsPageWidget::videoCallRequested, this, [this](const QString &userId) {
+		if (_callInvite) {
+			_callInvite->startDirectCall(userId, OpenMeeting::CallMediaType::Video);
+		}
+	});
+	connect(_contactsPage, &ContactsPageWidget::scheduleMeetingWithContactRequested, this, [this](const QString &userId) {
+		showBookingDialog({userId});
+	});
+
 	// 3. 右侧可选 AI Copilot 抽屉
 	_copilotSidebar = new OpenMeeting::CopilotSidebarWidget(_agentCoordinator.get(), this);
 	_copilotSidebar->setLeftEdgeShadowEnabled(true);
@@ -1572,8 +1663,11 @@ void MeetingMainWindow::initLayout() {
 	Theme::setStyleVariant(*_headerBar, "main-home-window");
 	Theme::setStyleVariant(*_centerColumn, "main-home-window");
 	syncSchedule();
+	updateContactsNavBadge();
 	if (OpenMeeting::SessionManager::instance().isLoggedIn()) {
 		_meetingCatalog->refreshUpcoming();
+		startEventStreamForSession();
+		if (_contactCatalog) _contactCatalog->refreshAll();
 	}
 }
 
@@ -1753,6 +1847,7 @@ void MeetingMainWindow::refreshThemeVisuals() {
 	}
 	if (_brandBadge) _brandBadge->update();
 	if (_windowControls) _windowControls->update();
+	if (_contactsPage) _contactsPage->refreshTheme();
 	syncAccountBadge();
 	syncJoinPresets();
 	update();
@@ -1772,6 +1867,17 @@ void MeetingMainWindow::showAccountMenu() {
 		: QCoreApplication::translate("MeetingUI", "Not Signed In");
 	menu->addAction(statusStr)->setEnabled(false);
 	menu->addSeparator();
+
+	if (session.isLoggedIn() && _contactCatalog) {
+		auto *profileAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Personal Profile..."));
+		profileAction->setObjectName(QStringLiteral("mainPersonalProfile"));
+		connect(profileAction, &QAction::triggered, this, [this] {
+			if (!_contactCatalog) return;
+			MeetingUI::UserProfileDialog dlg(*_contactCatalog, OpenMeeting::SessionManager::instance(), this);
+			dlg.exec();
+		}, Qt::QueuedConnection);
+		menu->addSeparator();
+	}
 
 	auto *switchAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Switch Account / Sign In"));
 	auto *logoutAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Sign Out"));
@@ -1839,6 +1945,8 @@ void MeetingMainWindow::showLoginDialog() {
 		syncAccountBadge();
 		syncJoinPresets();
 		if (_meetingCatalog) _meetingCatalog->refreshUpcoming();
+		startEventStreamForSession();
+		if (_contactCatalog) _contactCatalog->refreshAll();
 		show();
 		raise();
 		activateWindow();
@@ -1958,7 +2066,7 @@ void MeetingMainWindow::openQuickMeeting(
 	config.audioMuted = !prefs.enableMicrophone;
 	config.videoEnabled = prefs.enableVideo;
 	config.invitationMode = InvitationMode::BusinessMeetingId;
-	populateCopilotConfig(config, this, _agentCoordinator);
+	populateCopilotConfig(config, this, _agentCoordinator, _contactCatalog, _presenceWatch, _callInvite);
 
 	if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
 		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
@@ -2058,7 +2166,7 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	config.invitationMode = dialog.isManualConnection()
 		? InvitationMode::Disabled
 		: InvitationMode::BusinessMeetingId;
-	populateCopilotConfig(config, this, _agentCoordinator);
+	populateCopilotConfig(config, this, _agentCoordinator, _contactCatalog, _presenceWatch, _callInvite);
 
 	if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
 		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
@@ -2122,14 +2230,17 @@ void MeetingMainWindow::clearPendingMeetingEntry() {
 	}
 }
 
-void MeetingMainWindow::showBookingDialog() {
+void MeetingMainWindow::showBookingDialog(const QStringList &preselectedInvitees) {
 	auto &session = OpenMeeting::SessionManager::instance();
 	if (!session.isLoggedIn()) {
 		QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Sign-In Required"),
 			QCoreApplication::translate("MeetingUI", "Sign in to schedule a meeting."));
 		return;
 	}
-	MeetingBookingDialog dialog(*_meetingCatalog, session, this);
+	MeetingBookingDialog dialog(*_meetingCatalog, session, this, _contactCatalog, _presenceWatch);
+	if (!preselectedInvitees.isEmpty()) {
+		dialog.setPreselectedInvitees(preselectedInvitees);
+	}
 	dialog.exec();
 }
 
@@ -2163,7 +2274,9 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		meetingId,
 		*_meetingCatalog,
 		session,
-		this);
+		this,
+		_contactCatalog,
+		_presenceWatch);
 	if (dialog.exec() != QDialog::Accepted || !session.isLoggedIn() ||
 		session.authGeneration() != authGeneration) return;
 	if (const auto detail = dialog.detailForJoin()) {
@@ -2193,7 +2306,7 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		config.audioMuted = !preferences.enableMicrophone;
 		config.videoEnabled = preferences.enableVideo;
 		config.invitationMode = InvitationMode::BusinessMeetingId;
-	populateCopilotConfig(config, this, _agentCoordinator);
+	populateCopilotConfig(config, this, _agentCoordinator, _contactCatalog, _presenceWatch, _callInvite);
 
 		auto coordinator = OpenMeeting::MeetingCoordinator::create();
 		bindMeetingCatalog(coordinator.get());
@@ -2220,11 +2333,14 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 
 void MeetingMainWindow::bindMeetingCatalog(OpenMeeting::MeetingCoordinator *coordinator) {
 	using namespace OpenMeeting;
+	_activeMeetingCoordinator = coordinator;
 	auto &session = SessionManager::instance();
 	const auto authGeneration = session.authGeneration();
 	const auto userId = session.userId();
 	const auto service = session.serverBaseUrl();
 	const QPointer<MeetingCatalogController> catalog(_meetingCatalog);
+	const QPointer<PresenceWatchController> presence(_presenceWatch);
+	const QPointer<MeetingMainWindow> mainWin(this);
 	const QPointer<MeetingCoordinator> owner(coordinator);
 	const auto active = std::make_shared<std::optional<MeetingRecord>>();
 	const auto currentAccount = [authGeneration, userId, service] {
@@ -2232,13 +2348,16 @@ void MeetingMainWindow::bindMeetingCatalog(OpenMeeting::MeetingCoordinator *coor
 		return session.isLoggedIn() && session.authGeneration() == authGeneration &&
 			session.userId() == userId && session.serverBaseUrl() == service;
 	};
-	const auto project = [catalog, owner, active, currentAccount] {
+	const auto project = [catalog, presence, owner, active, currentAccount] {
 		if (!catalog || !owner || !currentAccount() ||
 			(owner->state() != MeetingState::InMeeting &&
 			 owner->state() != MeetingState::Reconnecting)) return false;
 		const auto &detail = owner->meetingDetail();
 		const auto meetingId = owner->currentMeetingId();
 		if (meetingId.isEmpty()) return false;
+		if (presence) {
+			presence->setLocalInMeeting(true, meetingId);
+		}
 		if (*active && (*active)->meetingId == meetingId &&
 			(*active)->title == detail.meetingName &&
 			(*active)->creatorUserId == detail.creatorUserId &&
@@ -2272,7 +2391,13 @@ void MeetingMainWindow::bindMeetingCatalog(OpenMeeting::MeetingCoordinator *coor
 	// Metadata can arrive after the join signal (or be cleared on reconnect).
 	connect(coordinator, &MeetingCoordinator::meetingDetailUpdated, this,
 		[update](const MeetingDetail &) { update(); });
-	const auto finish = [catalog, active, currentAccount, refresh] {
+	const auto finish = [catalog, presence, mainWin, owner, active, currentAccount, refresh] {
+		if (mainWin && mainWin->_activeMeetingCoordinator == owner) {
+			mainWin->_activeMeetingCoordinator = nullptr;
+		}
+		if (presence && currentAccount()) {
+			presence->setLocalInMeeting(false);
+		}
 		if (!std::exchange(*active, std::nullopt) || !catalog || !currentAccount()) return;
 		catalog->clearActiveMeeting();
 		refresh();
@@ -2283,8 +2408,274 @@ void MeetingMainWindow::bindMeetingCatalog(OpenMeeting::MeetingCoordinator *coor
 
 void MeetingMainWindow::syncSchedule() {
 	if (_scheduleWidget && _meetingCatalog) {
+		_scheduleWidget->setCurrentUserId(OpenMeeting::SessionManager::instance().userId());
 		_scheduleWidget->setMeetingState(_meetingCatalog->upcomingState());
 	}
+}
+
+void MeetingMainWindow::setupContactsAndCallRuntime() {
+	auto &session = OpenMeeting::SessionManager::instance();
+	_eventStream = new OpenMeeting::UserEventStreamClient(session, this);
+	_contactCatalog = new OpenMeeting::ContactCatalogController(session, this);
+	_presenceWatch = new OpenMeeting::PresenceWatchController(session, *_contactCatalog, *_eventStream, this);
+	_callInvite = new OpenMeeting::CallInviteController(session, *_eventStream, this);
+
+	if (_agentCoordinator) {
+		_agentCoordinator->attachContacts(_contactCatalog, _presenceWatch, _callInvite);
+	}
+
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::syncSeqAdvanced, this, [this](qint64 seq) {
+		if (_contactCatalog) _contactCatalog->advanceSyncSeq(seq);
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::contactRelationUpdated, this, [this](const QJsonObject &payload) {
+		if (_contactCatalog) _contactCatalog->applyRelationEvent(payload);
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::contactRequestReceived, this, [this](const QJsonObject &payload) {
+		if (_contactCatalog) _contactCatalog->applyRequestReceivedEvent(payload);
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::contactRequestHandled, this, [this](const QJsonObject &payload) {
+		if (_contactCatalog) _contactCatalog->applyRequestHandledEvent(payload);
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::orgTreeUpdated, this, [this](qint64 treeVersion) {
+		if (_contactCatalog) _contactCatalog->applyOrgTreeUpdatedEvent(treeVersion);
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::syncResetRequired, this, [this] {
+		if (_contactCatalog) _contactCatalog->handleSyncResetRequired();
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::meetingInvited, this, [this](const QJsonObject &) {
+		if (_meetingCatalog) _meetingCatalog->refreshUpcoming();
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::sessionKicked, this, [](const QString &reason) {
+		const auto invalidation = (reason == QStringLiteral("logout"))
+			? OpenMeeting::SessionInvalidationReason::TokenExpired
+			: OpenMeeting::SessionInvalidationReason::DuplicatedLogin;
+		OpenMeeting::SessionManager::instance().invalidateSession(invalidation);
+	});
+	connect(_eventStream, &OpenMeeting::UserEventStreamClient::sessionAuthRejected, this, [](const QString &) {
+		OpenMeeting::SessionManager::instance().invalidateSession(
+			OpenMeeting::SessionInvalidationReason::TokenExpired);
+	});
+
+	connect(_contactCatalog, &OpenMeeting::ContactCatalogController::pendingRequestCountChanged, this, [this](qint64) {
+		updateContactsNavBadge();
+	});
+
+	_callInvite->setEntryArbitrationHooks(
+		[this]() { return _meetingEntryGuard.tryAcquire(); },
+		[this]() {
+			if (!_activeMeetingCoordinator) return false;
+			const auto st = _activeMeetingCoordinator->state();
+			return st == OpenMeeting::MeetingState::InMeeting ||
+				st == OpenMeeting::MeetingState::Reconnecting ||
+				st == OpenMeeting::MeetingState::ConnectingRoom ||
+				st == OpenMeeting::MeetingState::StartingLocalMedia;
+		},
+		[this]() {
+			return _activeMeetingCoordinator ? _activeMeetingCoordinator->currentMeetingId() : QString();
+		},
+		[this]() {
+			return _activeMeetingCoordinator ? _activeMeetingCoordinator->requiresEncryption() : false;
+		},
+		[this](OpenMeeting::CallJoinHandoff &&handoff) {
+			joinCallMeeting(std::move(handoff));
+		});
+
+	connect(_callInvite, &OpenMeeting::CallInviteController::incomingCallRinging,
+		this, [this](const OpenMeeting::CallSession &callSession) {
+			if (!_incomingCallWindow) {
+				_incomingCallWindow = new IncomingCallWindow();
+				connect(_incomingCallWindow, &IncomingCallWindow::acceptClicked, this, [this] {
+					if (_callInvite) _callInvite->acceptIncomingCall();
+				});
+				connect(_incomingCallWindow, &IncomingCallWindow::rejectClicked, this, [this] {
+					if (_callInvite) _callInvite->rejectIncomingCall();
+				});
+			}
+			_incomingCallWindow->presentCall(callSession, _callInvite->remainingSeconds());
+		});
+
+	connect(_callInvite, &OpenMeeting::CallInviteController::outgoingCallRinging,
+		this, [this](const OpenMeeting::CallSession &callSession) {
+			if (!_outgoingCallOverlay) {
+				_outgoingCallOverlay = new OutgoingCallOverlay(this);
+				connect(_outgoingCallOverlay, &OutgoingCallOverlay::cancelClicked, this, [this] {
+					if (_callInvite) _callInvite->cancelOutgoingCall();
+				});
+			}
+			const QString calleeName = _contactCatalog
+				? _contactCatalog->displayNameForUser(callSession.calleeUserId)
+				: callSession.calleeUserId;
+			_outgoingCallOverlay->presentOutgoing(callSession, calleeName, _callInvite->remainingSeconds());
+		});
+
+	connect(_callInvite, &OpenMeeting::CallInviteController::countdownTick, this, [this](int remaining) {
+		if (_incomingCallWindow && _incomingCallWindow->isVisible()) {
+			_incomingCallWindow->updateCountdown(remaining);
+		}
+		if (_outgoingCallOverlay && _outgoingCallOverlay->isVisible()) {
+			_outgoingCallOverlay->updateCountdown(remaining);
+		}
+	});
+
+	connect(_callInvite, &OpenMeeting::CallInviteController::stateChanged,
+		this, [this](OpenMeeting::CallControllerState state, const std::optional<OpenMeeting::CallSession> &) {
+			if (state == OpenMeeting::CallControllerState::Idle ||
+				state == OpenMeeting::CallControllerState::HandingOffToMeeting) {
+				if (_incomingCallWindow) _incomingCallWindow->dismiss();
+				if (_outgoingCallOverlay) _outgoingCallOverlay->dismiss();
+			}
+		});
+
+	connect(_callInvite, &OpenMeeting::CallInviteController::callEnded,
+		this, [this](const QString &, const QString &reason) {
+			if (_incomingCallWindow) _incomingCallWindow->dismiss();
+			if (_outgoingCallOverlay) _outgoingCallOverlay->dismiss();
+			if (reason == QStringLiteral("busy")) {
+				QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Call Busy"),
+					QCoreApplication::translate("MeetingUI", "The callee is currently in another meeting or call."));
+			} else if (reason == QStringLiteral("rejected")) {
+				QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Call Declined"),
+					QCoreApplication::translate("MeetingUI", "The call was declined."));
+			} else if (reason == QStringLiteral("timeout")) {
+				QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "No Answer"),
+					QCoreApplication::translate("MeetingUI", "The call was not answered in time."));
+			}
+		});
+
+	connect(_callInvite, &OpenMeeting::CallInviteController::errorMessage,
+		this, [this](const QString &msg) {
+			if (!msg.isEmpty()) {
+				QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Call"), msg);
+			}
+		});
+}
+
+void MeetingMainWindow::startEventStreamForSession() {
+	auto &session = OpenMeeting::SessionManager::instance();
+	if (!_eventStream || !session.isLoggedIn()) return;
+	if (_contactCatalog) {
+		_eventStream->setInitialSinceSeq(_contactCatalog->syncSeq());
+	}
+	_eventStream->start();
+}
+
+void MeetingMainWindow::switchMainTab(bool showContacts) {
+	if (_showingContactsTab == showContacts) return;
+	_showingContactsTab = showContacts;
+	if (_navMeetingsButton) _navMeetingsButton->setChecked(!showContacts);
+	if (_navContactsButton) _navContactsButton->setChecked(showContacts);
+	if (_centerColumn) _centerColumn->setVisible(!showContacts);
+	if (_contactsPage) _contactsPage->setVisible(showContacts);
+	if (showContacts && _contactCatalog && OpenMeeting::SessionManager::instance().isLoggedIn()) {
+		if (_contactCatalog->contacts().empty() && _contactCatalog->departments().empty()) {
+			_contactCatalog->refreshAll();
+		}
+	}
+	QResizeEvent ev(size(), size());
+	resizeEvent(&ev);
+	update();
+}
+
+void MeetingMainWindow::updateContactsNavBadge() {
+	if (!_navContactsButton) return;
+	const qint64 count = _contactCatalog ? _contactCatalog->pendingRequestCount() : 0;
+	if (count > 0) {
+		_navContactsButton->setText(QCoreApplication::translate("MeetingUI", "Contacts (%1)").arg(count));
+	} else {
+		_navContactsButton->setText(QCoreApplication::translate("MeetingUI", "Contacts"));
+	}
+}
+
+void MeetingMainWindow::joinCallMeeting(OpenMeeting::CallJoinHandoff &&handoff) {
+	auto &session = OpenMeeting::SessionManager::instance();
+	if (!session.isLoggedIn() || handoff.liveKit.url.isEmpty() || handoff.liveKit.token.isEmpty()) {
+		return;
+	}
+	if (!handoff.entryReservation) {
+		handoff.entryReservation = _meetingEntryGuard.tryAcquire();
+		if (!handoff.entryReservation) {
+			QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Meeting Busy"),
+				QCoreApplication::translate("MeetingUI", "A meeting is already open or a request is in progress."));
+			return;
+		}
+	}
+
+	livekit::MeetingEncryptionRequest encryption;
+	try {
+		encryption = session.meetingEncryptionRequest(OpenMeeting::MeetingEncryptionEntry::JoinMeeting);
+	} catch (const livekit::EncryptionRequestException &) {
+		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Meeting Encryption"),
+			QCoreApplication::translate("MeetingUI", "Set an encryption key in Settings > Security before joining."));
+		return;
+	}
+
+	if (handoff.session.e2eeRequired && encryption.mode != livekit::MeetingEncryptionMode::Required) {
+		bool ok = false;
+		QString key = QInputDialog::getText(
+			this,
+			QCoreApplication::translate("MeetingUI", "End-to-End Encryption Key"),
+			QCoreApplication::translate("MeetingUI", "This meeting requires end-to-end encryption. Enter the shared ASCII encryption key:"),
+			QLineEdit::Password,
+			QString(),
+			&ok);
+		if (!ok || key.isEmpty()) {
+			return;
+		}
+		auto bytes = key.toUtf8();
+		key.fill(QChar(0));
+		const auto cleanse = qScopeGuard([&] {
+			if (!bytes.isEmpty()) OPENSSL_cleanse(bytes.data(), static_cast<size_t>(bytes.size()));
+		});
+		try {
+			encryption.mode = livekit::MeetingEncryptionMode::Required;
+			encryption.secret = livekit::MeetingSecretHandle::Create(
+				std::vector<uint8_t>(bytes.begin(), bytes.end()));
+			encryption.Validate();
+		} catch (const livekit::EncryptionRequestException &) {
+			QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Invalid Encryption Key"),
+				QCoreApplication::translate("MeetingUI", "Enter 1 to 4096 printable ASCII characters."));
+			return;
+		}
+	}
+
+	auto preferences = session.mediaPreferences();
+	preferences.enableMicrophone = true;
+	preferences.enableVideo = !handoff.audioOnly;
+
+	MeetingRoomWindow::Config config;
+	config.serverUrl = handoff.liveKit.url;
+	config.token = handoff.liveKit.token;
+	config.meetingId = handoff.session.meetingId;
+	config.displayName = session.nickname();
+	config.audioMuted = !preferences.enableMicrophone;
+	config.videoEnabled = preferences.enableVideo;
+	config.invitationMode = InvitationMode::BusinessMeetingId;
+	populateCopilotConfig(config, this, _agentCoordinator, _contactCatalog, _presenceWatch, _callInvite);
+
+	auto coordinator = OpenMeeting::MeetingCoordinator::create();
+	bindMeetingCatalog(coordinator.get());
+	if (!coordinator->pageTiming()) {
+		coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+			livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
+	}
+	auto *roomWindow = new MeetingRoomWindow(config, coordinator);
+	handoff.entryReservation->setParent(roomWindow);
+	handoff.entryReservation.release();
+	roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+	roomWindow->show();
+
+	const auto authGeneration = session.authGeneration();
+	roomWindow->prepareMediaAndJoin([coordinator, config, preferences, authGeneration,
+		sessionManager = &session, window = QPointer<MeetingRoomWindow>(roomWindow),
+		encryption = std::move(encryption)]() mutable {
+		if (!sessionManager->isLoggedIn() || sessionManager->authGeneration() != authGeneration) {
+			encryption.Revoke();
+			if (window) window->close();
+			return;
+		}
+		coordinator->connectDirectlyAsync(
+			config.serverUrl, config.token, config.meetingId, config.displayName, preferences, std::move(encryption));
+	});
 }
 
 int MeetingMainWindow::copilotDrawerWidth(int totalWidth) const {
@@ -2399,6 +2790,13 @@ void MeetingMainWindow::retranslateUi() {
 	if (_moreSettingsButton) {
 		_moreSettingsButton->setText(QCoreApplication::translate("MeetingUI", "More Settings"));
 	}
+	if (_navMeetingsButton) {
+		_navMeetingsButton->setText(QCoreApplication::translate("MeetingUI", "Meetings"));
+	}
+	updateContactsNavBadge();
+	if (_contactsPage) {
+		_contactsPage->retranslateUi();
+	}
 	syncHeaderDate();
 	syncAccountBadge();
 	syncJoinPresets();
@@ -2441,7 +2839,13 @@ void MeetingMainWindow::resizeEvent(QResizeEvent *e) {
 		const int colX = (mainAreaW - colW) / 2;
 		const int colH = std::max(0, bodyH - topPad - bottomPad);
 		_centerColumn->setGeometry(colX, bodyTop + topPad, colW, colH);
+		_centerColumn->setVisible(!_showingContactsTab);
 		updatePresetStripLayout(colW);
+	}
+
+	if (_contactsPage) {
+		_contactsPage->setGeometry(0, bodyTop, mainAreaW, bodyH);
+		_contactsPage->setVisible(_showingContactsTab);
 	}
 
 	if (_copilotSidebar) {

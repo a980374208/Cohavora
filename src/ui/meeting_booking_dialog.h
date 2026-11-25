@@ -2,6 +2,7 @@
 
 #include "src/net/meeting_types.h"
 
+#include <QtCore/QStringList>
 #include <QtWidgets/QDialog>
 
 #include <optional>
@@ -16,7 +17,9 @@ class QPushButton;
 class QSpinBox;
 
 namespace OpenMeeting {
+class ContactCatalogController;
 class MeetingCatalogController;
+class PresenceWatchController;
 class SessionManager;
 }
 
@@ -27,17 +30,25 @@ public:
 	MeetingBookingDialog(
 		OpenMeeting::MeetingCatalogController &controller,
 		OpenMeeting::SessionManager &session,
-		QWidget *parent = nullptr);
+		QWidget *parent = nullptr,
+		OpenMeeting::ContactCatalogController *contacts = nullptr,
+		OpenMeeting::PresenceWatchController *presence = nullptr);
 	MeetingBookingDialog(
 		OpenMeeting::MeetingCatalogController &controller,
 		OpenMeeting::SessionManager &session,
 		const OpenMeeting::MeetingCatalogDetail &detail,
-		QWidget *parent = nullptr);
+		QWidget *parent = nullptr,
+		OpenMeeting::ContactCatalogController *contacts = nullptr,
+		OpenMeeting::PresenceWatchController *presence = nullptr);
+
+	void setPreselectedInvitees(const QStringList &userIds);
 
 private:
 	void initUi();
 	void populateCreateDefaults();
 	void populateEditValues();
+	void updateInviteesDisplay();
+	void openInviteePicker();
 	void submit();
 	void handleWriteState();
 	void setBusy(bool busy);
@@ -61,7 +72,10 @@ private:
 
 	OpenMeeting::MeetingCatalogController &_controller;
 	OpenMeeting::SessionManager &_session;
+	OpenMeeting::ContactCatalogController *_contacts = nullptr;
+	OpenMeeting::PresenceWatchController *_presence = nullptr;
 	std::optional<OpenMeeting::MeetingCatalogDetail> _original;
+	QStringList _selectedInviteeIds;
 	QLineEdit *_titleEdit = nullptr;
 	QDateTimeEdit *_startEdit = nullptr;
 	QSpinBox *_durationEdit = nullptr;
@@ -70,6 +84,8 @@ private:
 	QCheckBox *_repeatEndEnabled = nullptr;
 	QDateEdit *_repeatEndEdit = nullptr;
 	QLineEdit *_passwordEdit = nullptr;
+	QLabel *_inviteesLabel = nullptr;
+	QPushButton *_selectInviteesButton = nullptr;
 	QCheckBox *_cameraOnJoin = nullptr;
 	QCheckBox *_microphoneOnJoin = nullptr;
 	QLabel *_statusLabel = nullptr;

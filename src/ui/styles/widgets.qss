@@ -3315,6 +3315,33 @@ QWidget#mainCenterColumn[uiStyle="main-home-window"] {
     font-size: 12px;
     font-weight: 400;
 }
+[uiStyle="main-home-window"] QFrame#mainNavCapsule {
+    background: @surface-alt@;
+    border: 1px solid @border@;
+    border-radius: 15px;
+}
+[uiStyle="main-home-window"] QPushButton#mainNavMeetings,
+[uiStyle="main-home-window"] QPushButton#mainNavContacts {
+    background: transparent;
+    color: @text-secondary@;
+    border: none;
+    border-radius: 12px;
+    padding: 0 14px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+}
+[uiStyle="main-home-window"] QPushButton#mainNavMeetings:hover,
+[uiStyle="main-home-window"] QPushButton#mainNavContacts:hover {
+    color: @text@;
+    background: @hover@;
+}
+[uiStyle="main-home-window"] QPushButton#mainNavMeetings:checked,
+[uiStyle="main-home-window"] QPushButton#mainNavContacts:checked {
+    background: @accent@;
+    color: @on-accent@;
+    font-weight: 600;
+}
 [uiStyle="main-home-window"] QPushButton#mainCopilot {
     background: @accent-soft@;
     color: @accent@;
