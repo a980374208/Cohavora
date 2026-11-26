@@ -17,6 +17,7 @@
 #include <QtCore/QVector>
 
 #include <memory>
+#include <future>
 #include <optional>
 
 namespace OpenMeeting {
@@ -194,6 +195,9 @@ public:
 	bool deleteSession(const QString &sessionId);
 	bool renameSession(const QString &sessionId, const QString &newTitle);
 	bool clearAllSavedSessions();
+	enum class HistoryError { None, Save, Remove };
+	HistoryError historyError() const { return _historyError; }
+	void retryHistoryStorage();
 	[[nodiscard]] QString exportSessionMarkdown(const QString &sessionId = QString()) const;
 
 	[[nodiscard]] const QVector<AgentPendingToolAction> &pendingActions() const { return _pendingActions; }
@@ -263,6 +267,7 @@ signals:
 	void chatModeChanged(OpenMeeting::AgentChatMode mode);
 	void permissionModeChanged(OpenMeeting::AgentPermissionMode mode);
 	void sessionsChanged();
+	void historyStorageChanged();
 	void pendingActionAdded(const OpenMeeting::AgentPendingToolAction &action);
 	void pendingActionUpdated(const OpenMeeting::AgentPendingToolAction &action);
 
@@ -343,6 +348,11 @@ private:
 	void syncActiveSessionSnapshot(bool updateTimestamp = true) const;
 	void schedulePersistSessions();
 	void flushPersistSessions();
+	void finishHistoryWrite(quint64 revision);
+	void drainHistoryWrites();
+	bool removeSavedHistory();
+	void historyPolicyChanged(bool previousPersist);
+	void setHistoryError(HistoryError error);
 	int indexOfSession(const QString &sessionId) const;
 	[[nodiscard]] bool validateE2eeForAttachments(
 		const QVector<AgentImageAttachment> &images,
@@ -368,6 +378,16 @@ private:
 	QString _activeSessionId;
 	mutable QVector<AgentChatSessionData> _sessions;
 	QTimer _persistTimer;
+	std::future<bool> _historyWrite;
+	quint64 _historyRevision = 0;
+	bool _historyWriteQueued = false;
+	HistoryError _historyError = HistoryError::None;
+	// Retain a failed account's latest intent until it is selected and can retry.
+	struct UnsavedHistory {
+		AgentSessionStore::LoadedSessions snapshot;
+		HistoryError error = HistoryError::None;
+	};
+	QHash<QString, UnsavedHistory> _unsavedHistory;
 	QPointer<MeetingCoordinator> _meeting;
 	QVector<QMetaObject::Connection> _meetingConnections;
 	QPointer<MeetingCatalogController> _catalog;

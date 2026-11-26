@@ -556,7 +556,7 @@ void CopilotSidebarWidget::buildUi() {
 
 	root->addWidget(sessionHeader);
 
-	// 3. E2EE authorization gate (shown only when an encrypted meeting awaits permission)
+	// 3. Context bar: E2EE authorization gate & persistent history storage retry
 	_contextBar = new QWidget(this);
 	_contextBar->setObjectName(QStringLiteral("CopilotContextBar"));
 	auto *contextLayout = new QVBoxLayout(_contextBar);
@@ -591,6 +591,17 @@ void CopilotSidebarWidget::buildUi() {
 
 	_e2eeBanner->hide();
 	contextLayout->addWidget(_e2eeBanner);
+
+	_historyRetryBtn = new QPushButton(_contextBar);
+	_historyRetryBtn->setObjectName(QStringLiteral("CopilotHistoryRetryBtn"));
+	_historyRetryBtn->setCursor(Qt::PointingHandCursor);
+	_historyRetryBtn->setAutoDefault(false);
+	_historyRetryBtn->hide();
+	connect(_historyRetryBtn, &QPushButton::clicked, this, [this] {
+		if (_coordinator) _coordinator->retryHistoryStorage();
+	});
+	contextLayout->addWidget(_historyRetryBtn);
+
 	_contextBar->hide();
 	root->addWidget(_contextBar);
 
@@ -1215,6 +1226,8 @@ void CopilotSidebarWidget::bindCoordinator() {
 			rebuildHistoryList();
 		}
 	}));
+	_coordinatorConnections.push_back(connect(_coordinator, &AgentCoordinator::historyStorageChanged,
+		this, &CopilotSidebarWidget::syncHeaderAndState));
 	_coordinatorConnections.push_back(connect(_coordinator, &AgentCoordinator::streamingStateChanged, this, [this](bool streaming) {
 		if (_chatCanvas) {
 			_chatCanvas->setActionsEnabled(!streaming);
@@ -1297,6 +1310,16 @@ void CopilotSidebarWidget::updateModePermLabel() {
 
 void CopilotSidebarWidget::syncHeaderAndState() {
 	const bool hasCoord = !_coordinator.isNull();
+	const auto historyError = hasCoord ? _coordinator->historyError() : AgentCoordinator::HistoryError::None;
+	const bool hasHistoryError = historyError != AgentCoordinator::HistoryError::None;
+	_historyRetryBtn->setVisible(hasHistoryError);
+	if (hasHistoryError) {
+		const QString retryText = historyError == AgentCoordinator::HistoryError::Save
+			? QCoreApplication::translate("MeetingUI", "History has not been saved. Retry")
+			: QCoreApplication::translate("MeetingUI", "Saved history could not be removed. Retry");
+		_historyRetryBtn->setText(retryText);
+		_historyRetryBtn->setAccessibleName(retryText);
+	}
 	const bool configured = hasCoord && _coordinator->isConfigured();
 
 	// 1. Session title
@@ -1421,16 +1444,16 @@ void CopilotSidebarWidget::syncHeaderAndState() {
 	_unconfiguredCard->setVisible(!configured);
 	_emptyCard->setVisible(configured && !hasMessages);
 
+	bool needE2eeGate = false;
 	if (hasCoord) {
-		const bool needE2eeGate = _coordinator->isInMeeting() &&
+		needE2eeGate = _coordinator->isInMeeting() &&
 			_coordinator->isEncryptedMeeting() &&
 			!_coordinator->isE2eeContextAuthorized();
 		_e2eeBanner->setVisible(needE2eeGate);
-		_contextBar->setVisible(needE2eeGate);
 	} else {
 		_e2eeBanner->hide();
-		_contextBar->hide();
 	}
+	_contextBar->setVisible(needE2eeGate || hasHistoryError);
 
 	_inputEdit->setEnabled(configured);
 	if (_addContextBtn) {

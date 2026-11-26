@@ -1,4 +1,5 @@
 #include "src/agent/agent_session_store.h"
+#include <QtCore/QElapsedTimer>
 
 #include "src/core/service_account_scope.h"
 
@@ -529,7 +530,9 @@ AgentSessionStore::LoadedSessions AgentSessionStore::loadAccountSessions(const Q
 bool AgentSessionStore::saveAccountSessions(
 		const QString &accountKey,
 		const QString &activeSessionId,
-		const QVector<AgentChatSessionData> &sessions) const {
+		const QVector<AgentChatSessionData> &sessions, SaveTimings *timings) const {
+	QElapsedTimer timer;
+	if (timings) timer.start();
 	const QString path = sessionFilePath(accountKey);
 	const QFileInfo fi(path);
 	if (!QDir().mkpath(fi.absolutePath())) {
@@ -563,6 +566,7 @@ bool AgentSessionStore::saveAccountSessions(
 		filtered.resize(kMaxPersistedSessions);
 	}
 
+	if (timings) timings->preparationNs = timer.nsecsElapsed();
 	QJsonArray arr;
 	for (const auto &s : filtered) {
 		QJsonObject so;
@@ -588,12 +592,17 @@ bool AgentSessionStore::saveAccountSessions(
 	root.insert(QStringLiteral("activeSessionId"), activeSessionId);
 	root.insert(QStringLiteral("sessions"), arr);
 
+	const auto bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
+	if (timings) timings->serializationNs = timer.nsecsElapsed() - timings->preparationNs;
+	if (bytes.size() > kMaxSessionFileBytes) return false;
 	QSaveFile save(path);
 	if (!save.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
 		return false;
 	}
-	save.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-	return save.commit();
+	if (save.write(bytes) != bytes.size()) return false;
+	const bool committed = save.commit();
+	if (timings) timings->commitNs = timer.nsecsElapsed() - timings->preparationNs - timings->serializationNs;
+	return committed;
 }
 
 bool AgentSessionStore::clearAccountSessions(const QString &accountKey) const {

@@ -156,6 +156,7 @@ private:
 	QWidget *_e2eeBanner = nullptr;
 	QLabel *_e2eeBannerLabel = nullptr;
 	QPushButton *_e2eeAuthorizeBtn = nullptr;
+	QPushButton *_historyRetryBtn = nullptr;
 
 	QStackedWidget *_bodyStack = nullptr;
 	QWidget *_chatStreamPage = nullptr;

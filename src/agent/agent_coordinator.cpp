@@ -616,7 +616,7 @@ AgentCoordinator::~AgentCoordinator() {
 		_activeHandle->disconnect(this);
 		_activeHandle->cancel();
 	}
-	flushPersistSessions();
+	drainHistoryWrites();
 	cancelProbe();
 	cancelSpeechProbe();
 	if (_modelsHandle) {
@@ -891,12 +891,7 @@ void AgentCoordinator::setProfile(const AgentProfile &profile) {
 		_settings->remove(QStringLiteral("agent/profiles/") + previousId.trimmed());
 	}
 	saveProfileToSettings();
-	if (previousPersist && !_profile.persistChatHistory) {
-		_persistTimer.stop();
-		_sessionStore.clearAccountSessions(_currentAccountKey);
-	} else if (!previousPersist && _profile.persistChatHistory) {
-		flushPersistSessions();
-	}
+	historyPolicyChanged(previousPersist);
 	if (listMetaChanged) {
 		emit profilesChanged();
 	}
@@ -950,7 +945,9 @@ QString AgentCoordinator::createProfile(const QString &displayName, const AgentP
 	created = normalizeProfileValues(created, newId);
 
 	_profiles.push_back(created);
+	const bool previousPersist = _profile.persistChatHistory;
 	_profile = created;
+	historyPolicyChanged(previousPersist);
 	_sendMeetingContext = _profile.sendMeetingContextByDefault;
 
 	cancelProbe();
@@ -990,7 +987,9 @@ bool AgentCoordinator::switchProfile(const QString &profileId) {
 
 	const QString previousBaseUrl = _profile.baseUrl;
 	const AgentProfile next = normalizeProfileValues(*targetOpt, targetOpt->id);
+	const bool previousPersist = _profile.persistChatHistory;
 	_profile = next;
+	historyPolicyChanged(previousPersist);
 	_sendMeetingContext = _profile.sendMeetingContextByDefault;
 
 	cancelProbe();
@@ -1041,7 +1040,9 @@ bool AgentCoordinator::deleteProfile(const QString &profileId) {
 	_profiles.removeAt(idx);
 
 	if (deletingActive) {
+		const bool previousPersist = _profile.persistChatHistory;
 		_profile = normalizeProfileValues(_profiles.front(), _profiles.front().id);
+		historyPolicyChanged(previousPersist);
 		_sendMeetingContext = _profile.sendMeetingContextByDefault;
 		cancelProbe();
 		const QString effectiveSttUrl = dictationSttBaseUrl();
@@ -4281,7 +4282,11 @@ void AgentCoordinator::onAuthSessionChanged() {
 		QStringLiteral("Account session changed."));
 	expireAllPendingActions(QCoreApplication::translate("MeetingUI", "Account session changed."));
 	_persistTimer.stop();
-	flushPersistSessions();
+	drainHistoryWrites();
+	if (_historyError != HistoryError::None && _profile.persistChatHistory) {
+		syncActiveSessionSnapshot(false);
+		_unsavedHistory.insert(_currentAccountKey, {{_activeSessionId, _sessions}, _historyError});
+	}
 
 	_activeToolRound.reset();
 	_inFlightActionByGroup.clear();
@@ -4334,7 +4339,22 @@ void AgentCoordinator::loadAccountSessionsFromDisk() {
 	_activeSessionId.clear();
 	_messages.clear();
 
-	if (_profile.persistChatHistory) {
+	auto unsaved = _unsavedHistory.take(_currentAccountKey);
+	const bool hasLocalEdits = _profile.persistChatHistory && !unsaved.snapshot.sessions.isEmpty();
+	const QString pendingRemovalKey = QStringLiteral("agent/historyRemovalPending/") + _currentAccountKey;
+	if (_settings->value(pendingRemovalKey, false).toBool()) {
+		if (_sessionStore.clearAccountSessions(_currentAccountKey)) {
+			_settings->remove(pendingRemovalKey);
+			_settings->sync();
+			unsaved.error = HistoryError::None;
+		} else {
+			unsaved.error = HistoryError::Remove;
+		}
+	}
+	if (hasLocalEdits) {
+		_sessions = std::move(unsaved.snapshot.sessions);
+		_activeSessionId = unsaved.snapshot.activeSessionId;
+	} else if (_profile.persistChatHistory && unsaved.error != HistoryError::Remove) {
 		auto loaded = _sessionStore.loadAccountSessions(_currentAccountKey);
 		_sessions = std::move(loaded.sessions);
 		_activeSessionId = loaded.activeSessionId;
@@ -4365,6 +4385,8 @@ void AgentCoordinator::loadAccountSessionsFromDisk() {
 			emit chatModeChanged(_chatMode);
 		}
 	}
+	setHistoryError(unsaved.error);
+	if (hasLocalEdits && unsaved.error == HistoryError::None) schedulePersistSessions();
 }
 
 void AgentCoordinator::syncActiveSessionSnapshot(bool updateTimestamp) const {
@@ -4407,11 +4429,73 @@ void AgentCoordinator::schedulePersistSessions() {
 
 void AgentCoordinator::flushPersistSessions() {
 	_persistTimer.stop();
-	if (!_profile.persistChatHistory) {
+	if (!_profile.persistChatHistory || _historyError == HistoryError::Remove) return;
+	if (_historyWrite.valid()) {
+		_historyWriteQueued = true;
 		return;
 	}
 	syncActiveSessionSnapshot(false);
-	_sessionStore.saveAccountSessions(_currentAccountKey, _activeSessionId, _sessions);
+	const auto revision = ++_historyRevision;
+	try {
+		_historyWrite = std::async(std::launch::async,
+			[this, store = _sessionStore, account = _currentAccountKey, active = _activeSessionId,
+			 sessions = _sessions, revision] {
+				bool saved = false;
+				try {
+					saved = store.saveAccountSessions(account, active, sessions);
+				} catch (const std::exception &) {
+					// Keep the last atomic file and allow retrying the snapshot.
+				}
+				QMetaObject::invokeMethod(this, [this, revision] { finishHistoryWrite(revision); },
+					Qt::QueuedConnection);
+				return saved;
+			});
+	} catch (const std::system_error &) {
+		setHistoryError(HistoryError::Save);
+	}
+}
+
+void AgentCoordinator::finishHistoryWrite(quint64 revision) {
+	if (revision != _historyRevision || !_historyWrite.valid()) return;
+	const bool saved = _historyWrite.get();
+	if (std::exchange(_historyWriteQueued, false)) flushPersistSessions();
+	else setHistoryError(saved ? HistoryError::None : HistoryError::Save);
+}
+
+void AgentCoordinator::drainHistoryWrites() {
+	flushPersistSessions();
+	while (_historyWrite.valid()) finishHistoryWrite(_historyRevision);
+}
+
+void AgentCoordinator::setHistoryError(HistoryError error) {
+	if (_historyError == error) return;
+	_historyError = error;
+	emit historyStorageChanged();
+}
+
+bool AgentCoordinator::removeSavedHistory() {
+	_persistTimer.stop();
+	_historyWriteQueued = false;
+	++_historyRevision;
+	if (_historyWrite.valid()) _historyWrite.get();
+	const bool removed = _sessionStore.clearAccountSessions(_currentAccountKey);
+	const QString pendingRemovalKey = QStringLiteral("agent/historyRemovalPending/") + _currentAccountKey;
+	if (!removed) _settings->setValue(pendingRemovalKey, true);
+	else _settings->remove(pendingRemovalKey);
+	_settings->sync();
+	setHistoryError(removed ? HistoryError::None : HistoryError::Remove);
+	return removed;
+}
+
+void AgentCoordinator::historyPolicyChanged(bool previousPersist) {
+	if (previousPersist == _profile.persistChatHistory) return;
+	if (!_profile.persistChatHistory) removeSavedHistory();
+	else retryHistoryStorage();
+}
+
+void AgentCoordinator::retryHistoryStorage() {
+	if (_historyError == HistoryError::Remove && !removeSavedHistory()) return;
+	if (_profile.persistChatHistory) flushPersistSessions();
 }
 
 QVector<AgentChatSessionSummary> AgentCoordinator::sessionSummaries() const {
@@ -4571,7 +4655,6 @@ bool AgentCoordinator::clearAllSavedSessions() {
 	_messages.clear();
 	resetStreamingBuffers();
 	_sessions.clear();
-	_sessionStore.clearAccountSessions(_currentAccountKey);
 
 	AgentChatSessionData fresh;
 	fresh.summary.sessionId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -4580,11 +4663,12 @@ bool AgentCoordinator::clearAllSavedSessions() {
 	fresh.summary.updatedAt = fresh.summary.createdAt;
 	fresh.summary.chatMode = _chatMode;
 	_sessions.push_back(std::move(fresh));
-	_activeSessionId = fresh.summary.sessionId;
+	_activeSessionId = _sessions.back().summary.sessionId;
+	const bool removed = removeSavedHistory();
 
 	emit historyCleared();
 	emit sessionsChanged();
-	return true;
+	return removed;
 }
 
 QString AgentCoordinator::exportSessionMarkdown(const QString &sessionId) const {

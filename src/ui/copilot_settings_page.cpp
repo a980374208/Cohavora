@@ -1766,9 +1766,10 @@ void CopilotSettingsPage::buildUi() {
 		updateCopilotAdvSummaries();
 	});
 	connect(_copilotClearHistoryBtn, &QPushButton::clicked, this, [this] {
-		copilotCoordinator().clearAllSavedSessions();
-		setCopilotTestStatus(QStringLiteral("ok"),
-			QCoreApplication::translate("MeetingUI", "Saved Copilot chat history cleared for the current account."));
+		const bool removed = copilotCoordinator().clearAllSavedSessions();
+		setCopilotTestStatus(removed ? QStringLiteral("ok") : QStringLiteral("error"), removed
+			? QCoreApplication::translate("MeetingUI", "Saved Copilot chat history cleared for the current account.")
+			: QCoreApplication::translate("MeetingUI", "Saved history could not be removed. Retry"));
 	});
 	connect(_copilotMaxHistorySpin, static_cast<void (QSpinBox::*)(int)>(&QSpinBox::valueChanged),
 		this, [this, commitLive](int) {

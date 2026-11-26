@@ -3,6 +3,14 @@
 <TS version="2.1" language="zh_CN" sourcelanguage="en_US">
 <context>
     <name>MeetingUI</name>
+    <message>
+        <source>History has not been saved. Retry</source>
+        <translation>聊天历史尚未保存，点击重试</translation>
+    </message>
+    <message>
+        <source>Saved history could not be removed. Retry</source>
+        <translation>未能清除已保存的聊天历史，请重试</translation>
+    </message>
     <message><source>The encoder could not be initialized.</source><translation>无法初始化此编码器。</translation></message>
     <message><source>Initialization succeeded. Encoded output has not been verified.</source><translation>初始化成功；尚未验证实际编码输出。</translation></message>
     <message><source>This encoder is not included in this build.</source><translation>此版本未包含该编码器。</translation></message>

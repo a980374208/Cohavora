@@ -18,6 +18,12 @@ public:
 		QVector<AgentChatSessionData> sessions;
 	};
 
+	struct SaveTimings {
+		qint64 preparationNs = 0;
+		qint64 serializationNs = 0;
+		qint64 commitNs = 0;
+	};
+
 	explicit AgentSessionStore(QString baseDirectory = {});
 
 	[[nodiscard]] static QString resolveBaseDirectory(const QSettings &settings);
@@ -31,7 +37,7 @@ public:
 	bool saveAccountSessions(
 		const QString &accountKey,
 		const QString &activeSessionId,
-		const QVector<AgentChatSessionData> &sessions) const;
+		const QVector<AgentChatSessionData> &sessions, SaveTimings *timings = nullptr) const;
 	bool clearAccountSessions(const QString &accountKey) const;
 
 private:

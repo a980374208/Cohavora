@@ -2658,6 +2658,19 @@ QWidget[uiStyle="copilot-sidebar-widget"][objectName="CopilotSidebar"] {
     font-size: 11px;
     font-weight: bold;
 }
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotHistoryRetryBtn"] {
+    background: @danger-soft@;
+    color: @danger@;
+    border: 1px solid @danger@;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+[uiStyle="copilot-sidebar-widget"] QPushButton[objectName="CopilotHistoryRetryBtn"]:hover {
+    background: @hover@;
+    border-color: @danger@;
+}
 [uiStyle="copilot-sidebar-widget"] QStackedWidget[objectName="CopilotBodyStack"],
 [uiStyle="copilot-sidebar-widget"] QWidget[objectName="CopilotHistoryPage"],
 [uiStyle="copilot-sidebar-widget"] QScrollArea[objectName="CopilotMessageScroll"],
