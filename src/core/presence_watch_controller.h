@@ -31,12 +31,15 @@ public:
     UserPresence presenceFor(const QString &userId) const;
     PresenceStatus statusFor(const QString &userId) const { return presenceFor(userId).status; }
 
-    void setViewportWatchedUsers(const QStringList &userIds);
+    enum class Viewport { Page, Picker };
+    void setViewportWatchedUsers(const QObject *source, Viewport viewport, const QStringList &userIds);
+    void removeViewport(const QObject *source);
     void setLocalInMeeting(bool inMeeting, const QString &meetingId = {});
     void setManualStatus(PresenceStatus status); // Online or Away
 
 signals:
     void presencesUpdated(const QStringList &userIds);
+    void viewportWatchesReset();
 
 private:
     void rebuildFixedWatch();
@@ -49,7 +52,12 @@ private:
     UserEventStreamClient &_stream;
 
     QHash<QString, UserPresence> _presences;
-    QStringList _pendingViewportUsers;
+    struct ViewportSource {
+        const QObject *owner;
+        Viewport viewport;
+        QStringList users;
+    };
+    std::vector<ViewportSource> _viewports;
     QStringList _lastSentViewportUsers;
     QTimer _viewportThrottleTimer;
     bool _localInMeeting = false;

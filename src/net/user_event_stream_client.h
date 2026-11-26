@@ -94,6 +94,7 @@ signals:
     void callTimeout(const OpenMeeting::CallSession &session);
 
 private:
+    friend class UserEventStreamInspectionAccess;
     struct TransportImpl;
 
     void handleSessionReset();

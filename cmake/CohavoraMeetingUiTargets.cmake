@@ -85,6 +85,8 @@ add_library(cohavora_meeting_widgets OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/contacts/contacts_tree_delegate.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_picker_dialog.h
     ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_picker_dialog.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_viewport_watch.h
+    ${PROJECT_SOURCE_DIR}/src/ui/contacts/contact_viewport_watch.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_history_list_model.h
     ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_history_list_model.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/contacts/org_history_item_delegate.h

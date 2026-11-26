@@ -7,6 +7,7 @@
 #include "src/ui/app_theme.h"
 #include "src/ui/contacts/contact_item_delegate.h"
 #include "src/ui/contacts/contact_list_model.h"
+#include "src/ui/contacts/contact_viewport_watch.h"
 #include "src/ui/contacts/contact_request_item_delegate.h"
 #include "src/ui/contacts/contact_request_list_model.h"
 #include "src/ui/contacts/contacts_tree_delegate.h"
@@ -121,6 +122,17 @@ ContactsPageWidget::ContactsPageWidget(
     });
 
     initUi();
+    _viewportWatch = new ContactViewportWatch(*this, _presence, OpenMeeting::PresenceWatchController::Viewport::Page,
+        [this] { return _rightStack->currentWidget() == _detailPage ? _selectedUserId : QString(); });
+    _viewportWatch->observe(*_contactsTreeView);
+    _viewportWatch->observe(*_orgTreeView);
+    _viewportWatch->observe(*_searchListView);
+    connect(_rightStack, &QStackedWidget::currentChanged, _viewportWatch, &ContactViewportWatch::schedule);
+    connect(&_presence, &OpenMeeting::PresenceWatchController::viewportWatchesReset, this, [this] {
+        _selectedUserId.clear();
+        _rightStack->setCurrentIndex(0);
+        _viewportWatch->schedule();
+    });
 
     connect(&_session, &OpenMeeting::SessionManager::authenticationReset, this, [this] {
         _quickAddAccountEdit->clear();
@@ -982,7 +994,6 @@ void ContactsPageWidget::setSidebarTab(SidebarTab tab) {
         }
     }
     updateLeftViewMode();
-    syncViewportWatch();
 }
 
 void ContactsPageWidget::updateLeftViewMode() {
@@ -1010,7 +1021,6 @@ void ContactsPageWidget::updateLeftViewMode() {
             _leftStack->setCurrentIndex(0);
         }
     }
-    syncViewportWatch();
 }
 
 void ContactsPageWidget::rebuildContactsTree() {
@@ -1135,7 +1145,6 @@ void ContactsPageWidget::rebuildContactsTree() {
             _contactsTreeView->setCurrentIndex(uIdx);
         }
     }
-    syncViewportWatch();
 }
 
 void ContactsPageWidget::rebuildOrgTree() {
@@ -1150,7 +1159,6 @@ void ContactsPageWidget::rebuildOrgTree() {
 
     if (!_orgDirModel->hasDepartments()) {
         _expandedDeptIds.clear();
-        syncViewportWatch();
         return;
     }
 
@@ -1170,7 +1178,6 @@ void ContactsPageWidget::rebuildOrgTree() {
         }
     }
     _expandedDeptIds = std::move(validExpanded);
-    syncViewportWatch();
 }
 
 void ContactsPageWidget::applyDeptMembersToTree(const QString &deptId) {
@@ -1207,7 +1214,6 @@ void ContactsPageWidget::applyDeptMembersToTree(const QString &deptId) {
 
     _orgDirModel->setDeptMembers(deptId, std::move(items), restricted,
         _catalog.hasMoreDeptMembers(deptId), _catalog.isDeptMembersLoading(deptId));
-    syncViewportWatch();
 }
 
 void ContactsPageWidget::rebuildSearchList() {
@@ -1234,21 +1240,11 @@ void ContactsPageWidget::rebuildSearchList() {
     } else {
         _listStatusLabel->hide();
     }
-    syncViewportWatch();
-}
-
-void ContactsPageWidget::syncViewportWatch() {
-    if (!_searchKeyword.isEmpty() && _searchModel) {
-        _presence.setViewportWatchedUsers(_searchModel->allUserIds());
-    } else if (_sidebarTab == SidebarTab::Organization && _orgDirModel) {
-        _presence.setViewportWatchedUsers(_orgDirModel->loadedMemberUserIds());
-    } else {
-        _presence.setViewportWatchedUsers({});
-    }
 }
 
 void ContactsPageWidget::showContactDetail(const QString &userId, bool refreshFromServer) {
     _selectedUserId = userId;
+    _viewportWatch->schedule();
     if (userId.isEmpty()) {
         _rightStack->setCurrentIndex(0);
         return;

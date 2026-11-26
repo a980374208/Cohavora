@@ -25,6 +25,7 @@ class SessionManager;
 namespace MeetingUI {
 
 class ContactItemDelegate;
+class ContactViewportWatch;
 class ContactListModel;
 class ContactRequestItemDelegate;
 class ContactRequestListModel;
@@ -70,7 +71,6 @@ private:
     void showContactDetail(const QString &userId, bool refreshFromServer = true);
     void updateDetailPresence();
     void updateRequestsBadge();
-    void syncViewportWatch();
 
     void handleOpenSelfProfileDialog();
     void handlePlusMenu();
@@ -96,6 +96,7 @@ private:
     QString _selectedUserId;
     QString _searchKeyword;
     QTimer _searchDebounce;
+    ContactViewportWatch *_viewportWatch = nullptr;
 
     // Left pane controls (Figure 2 clean collapsible-tree style)
     QLineEdit *_searchEdit = nullptr;

@@ -5,6 +5,7 @@
 #include "src/ui/app_theme.h"
 #include "src/ui/contacts/contact_item_delegate.h"
 #include "src/ui/contacts/contact_list_model.h"
+#include "src/ui/contacts/contact_viewport_watch.h"
 #include "src/ui/contacts/org_tree_model.h"
 
 #include <QtCore/QCoreApplication>
@@ -152,6 +153,9 @@ ContactPickerDialog::ContactPickerDialog(
     connect(&_catalog, &OpenMeeting::ContactCatalogController::contactsChanged, this,
             [this]() { populateList(); });
     if (_presence) {
+        auto *watch = new ContactViewportWatch(*this, *_presence, OpenMeeting::PresenceWatchController::Viewport::Picker);
+        watch->observe(*_contactListView);
+        connect(_presence, &OpenMeeting::PresenceWatchController::viewportWatchesReset, this, &QDialog::reject);
         connect(_presence, &OpenMeeting::PresenceWatchController::presencesUpdated, this,
                 [this](const QStringList &userIds) {
                     if (!_contactModel || !_presence) return;
@@ -240,14 +244,9 @@ void ContactPickerDialog::populateList() {
             }
         }
     } else {
-        QStringList watchIds;
         for (const auto &m : _catalog.deptMembers(_selectedDeptId)) {
-            watchIds.push_back(m.profile.userId);
             const QString sub = !m.profile.jobTitle.isEmpty() ? m.profile.jobTitle : m.profile.account;
             appendEntry(m.profile.userId, m.profile.displayName(), sub, false, m.isLeader);
-        }
-        if (_presence && !watchIds.isEmpty()) {
-            _presence->setViewportWatchedUsers(watchIds);
         }
     }
 

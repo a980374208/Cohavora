@@ -7,6 +7,8 @@
 #include <QtCore/QDateTime>
 #include <QtCore/QSet>
 
+#include <algorithm>
+
 namespace OpenMeeting {
 
 PresenceWatchController::PresenceWatchController(
@@ -40,7 +42,9 @@ UserPresence PresenceWatchController::presenceFor(const QString &userId) const {
     return fallback;
 }
 
-void PresenceWatchController::setViewportWatchedUsers(const QStringList &userIds) {
+void PresenceWatchController::setViewportWatchedUsers(const QObject *source, Viewport viewport,
+                                                      const QStringList &userIds) {
+    if (!_session.isLoggedIn()) return;
     QSet<QString> seen;
     QStringList deduped;
     deduped.reserve(std::min(userIds.size(), kMaxViewportWatch));
@@ -51,8 +55,24 @@ void PresenceWatchController::setViewportWatchedUsers(const QStringList &userIds
         deduped.push_back(id);
         if (deduped.size() >= kMaxViewportWatch) break;
     }
-    _pendingViewportUsers = std::move(deduped);
+    // Priority has already been applied by truncation. Protocol subscriptions are sets.
+    deduped.sort();
+    auto it = std::find_if(_viewports.begin(), _viewports.end(),
+        [source](const auto &item) { return item.owner == source; });
+    if (it == _viewports.end()) {
+        _viewports.push_back({source, viewport, std::move(deduped)});
+    } else {
+        if (it->users == deduped) return;
+        it->users = std::move(deduped);
+    }
     if (!_viewportThrottleTimer.isActive()) {
+        _viewportThrottleTimer.start();
+    }
+}
+
+void PresenceWatchController::removeViewport(const QObject *source) {
+    if (std::erase_if(_viewports, [source](const auto &item) { return item.owner == source; })
+            && !_viewportThrottleTimer.isActive()) {
         _viewportThrottleTimer.start();
     }
 }
@@ -84,8 +104,12 @@ void PresenceWatchController::rebuildFixedWatch() {
 
 void PresenceWatchController::flushViewportWatch() {
     if (!_session.isLoggedIn()) return;
-    if (_pendingViewportUsers == _lastSentViewportUsers) return;
-    _lastSentViewportUsers = _pendingViewportUsers;
+    const auto picker = std::find_if(_viewports.rbegin(), _viewports.rend(),
+        [](const auto &item) { return item.viewport == Viewport::Picker; });
+    const QStringList users = picker != _viewports.rend() ? picker->users
+        : _viewports.empty() ? QStringList{} : _viewports.back().users;
+    if (users == _lastSentViewportUsers) return;
+    _lastSentViewportUsers = users;
     _stream.sendPresenceWatch(std::nullopt, _lastSentViewportUsers);
 }
 
@@ -114,11 +138,12 @@ void PresenceWatchController::handlePresenceBatch(const std::vector<UserPresence
 void PresenceWatchController::clearAll() {
     _viewportThrottleTimer.stop();
     _presences.clear();
-    _pendingViewportUsers.clear();
+    _viewports.clear();
     _lastSentViewportUsers.clear();
     _localInMeeting = false;
     _localMeetingId.clear();
     emit presencesUpdated({});
+    emit viewportWatchesReset();
 }
 
 } // namespace OpenMeeting
