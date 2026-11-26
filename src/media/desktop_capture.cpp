@@ -32,6 +32,7 @@ namespace {
 using namespace std::chrono_literals;
 std::atomic<std::uint32_t> observed_backend{0};
 std::atomic<std::uint64_t> observed_frames{0};
+std::atomic<std::uint64_t> delivered_native{0}, delivered_cpu{0}, forced_cpu_fallbacks{0};
 enum class CaptureFailure {
     None, SourceUnavailable, WindowClosed, FrameTimeout, BackendPermanent,
     InvalidFrame, UnsupportedQuality, Conversion, Scaling, WorkerException,
@@ -467,7 +468,7 @@ private:
                 scaled_source_ = nullptr;
             }
             webrtc::scoped_refptr<webrtc::VideoFrameBuffer> nv12;
-            if (prepared) {
+            if (prepared && !probe_.force_cpu_conversion) {
                 if (prepared->width() == profile.width && prepared->height() == profile.height) {
                     nv12 = prepared;
                 } else {
@@ -479,7 +480,7 @@ private:
                     }
                     nv12 = scaled_texture_;
                 }
-            } else {
+            } else if (!probe_.force_cpu_conversion) {
                 if (!gpu_converter_ || gpu_converter_->device() != gpu_frame->device()) {
                     gpu_converter_ = std::make_unique<D3d11VideoProcessorConverter>(
                         gpu_frame->device(), gpu_frame->adapter_luid(), gpu_frame->device_context_mutex());
@@ -491,9 +492,12 @@ private:
                     0, 0, /*direct_input_only=*/false, gpu_frame->rotation());
             }
             if (nv12) {
+                const bool nv12_native = nv12->type() == webrtc::VideoFrameBuffer::Type::kNative;
                 VideoFrame delivered_gpu(std::move(nv12), VideoBufferType::NV12);
                 last_frame_ns_.store(NowNs(), std::memory_order_relaxed);
                 if (!stopped_.load(std::memory_order_acquire) && frame_) {
+                    auto &count = nv12_native ? delivered_native : delivered_cpu;
+                    count.fetch_add(1, std::memory_order_relaxed);
                     frame_(delivered_gpu);
                     if (!stopped_.load(std::memory_order_acquire) &&
                         (!last_applied_ || *last_applied_ != profile)) {
@@ -505,6 +509,7 @@ private:
             }
             // If GPU VideoProcessor conversion fails on this adapter, ensure CPU BGRA
             // bytes are mapped before falling back to the Phase 1 libyuv path.
+            if (probe_.force_cpu_conversion) forced_cpu_fallbacks.fetch_add(1, std::memory_order_relaxed);
             if (!gpu_frame->EnsureCpuData() || !gpu_frame->cpu_populated()) {
                 Fail(CaptureFailure::Conversion);
                 return;
@@ -547,6 +552,7 @@ private:
         } else scaled_.reset();
         last_frame_ns_.store(NowNs(), std::memory_order_relaxed);
         if (!stopped_.load(std::memory_order_acquire) && frame_) {
+            delivered_cpu.fetch_add(1, std::memory_order_relaxed);
             frame_(*delivered);
             if (!stopped_.load(std::memory_order_acquire) && (!last_applied_ || *last_applied_ != profile)) {
                 last_applied_ = profile;
@@ -591,7 +597,9 @@ DesktopCaptureObservation ObserveDesktopCapture() {
     const auto binding_failures = observed_binding_failures.load(std::memory_order_acquire);
     return {backend, observed_frames.load(std::memory_order_relaxed),
         failures, FailureName(observed_failure.load(std::memory_order_relaxed)),
-        binding_failures, FailureName(observed_binding_failure.load(std::memory_order_relaxed))};
+        binding_failures, FailureName(observed_binding_failure.load(std::memory_order_relaxed)),
+        delivered_native.load(std::memory_order_relaxed), delivered_cpu.load(std::memory_order_relaxed),
+        forced_cpu_fallbacks.load(std::memory_order_relaxed)};
 }
 
 std::vector<DesktopSource> EnumerateDesktopSources() {

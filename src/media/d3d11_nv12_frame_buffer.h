@@ -41,6 +41,13 @@ public:
         std::uint64_t pool_exhausted_drops = 0;
         std::uint64_t direct_capture_conversions = 0;
         std::uint64_t native_preview_imports = 0;
+        std::uint64_t nv12_readbacks = 0;
+        std::uint64_t bgra_readbacks = 0;
+        std::uint64_t capability_failures = 0;
+        std::uint64_t rotation_failures = 0;
+        std::uint64_t d3d_failures = 0;
+        std::uint64_t direct_input_rejections = 0;
+        std::uint64_t cpu_scales = 0;
     };
 
     static Diagnostics GetDiagnostics() noexcept;

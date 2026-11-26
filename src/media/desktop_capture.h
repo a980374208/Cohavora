@@ -61,6 +61,7 @@ struct DesktopCaptureProbeOptions {
     bool use_legacy_wgc_window = false;
     unsigned simulate_dxgi_failure_after_frames = 0;
     unsigned simulate_wgc_failure_after_frames = 0;
+    bool force_cpu_conversion = false;
     std::function<void(DesktopCaptureProbeEvent)> on_event;
     // Optional probe-only work/wait timings in microseconds. Production does
     // not sample these clocks or call a diagnostic sink on every frame.
@@ -79,6 +80,7 @@ struct DesktopCaptureObservation {
     const char* failure_reason = "none";
     std::uint64_t binding_failures = 0;
     const char* binding_failure_reason = "none";
+    std::uint64_t delivered_native_frames = 0, delivered_cpu_frames = 0, forced_cpu_fallbacks = 0;
 };
 DesktopCaptureObservation ObserveDesktopCapture();
 

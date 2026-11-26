@@ -36,8 +36,20 @@ std::atomic<std::uint64_t> g_direct_capture_conversions{0};
 std::atomic<std::uint64_t> g_native_preview_imports{0};
 std::atomic<std::uint64_t> g_gpu_frames_created{0};
 std::atomic<std::uint64_t> g_gpu_scales_performed{0};
-std::atomic<std::uint64_t> g_cpu_readbacks_performed{0};
+std::atomic<std::uint64_t> g_nv12_readbacks{0};
 std::atomic<std::uint64_t> g_pool_exhausted_drops{0};
+
+std::atomic<std::uint64_t> g_bgra_readbacks{0};
+std::atomic<std::uint64_t> g_capability_failures{0};
+std::atomic<std::uint64_t> g_rotation_failures{0};
+std::atomic<std::uint64_t> g_d3d_failures{0};
+std::atomic<std::uint64_t> g_direct_input_rejections{0};
+std::atomic<std::uint64_t> g_cpu_scales{0};
+
+webrtc::scoped_refptr<D3d11Nv12FrameBuffer> ConversionFailed(std::atomic<std::uint64_t>& reason) {
+    reason.fetch_add(1, std::memory_order_relaxed);
+    return nullptr;
+}
 
 bool IsValidVideoProcessorRotation(D3D11_VIDEO_PROCESSOR_ROTATION rotation) noexcept {
     switch (rotation) {
@@ -248,23 +260,37 @@ void RotatedDimensions(
 }
 
 D3d11Nv12FrameBuffer::Diagnostics D3d11Nv12FrameBuffer::GetDiagnostics() noexcept {
+    const auto nv12 = g_nv12_readbacks.load(std::memory_order_relaxed);
+    const auto bgra = g_bgra_readbacks.load(std::memory_order_relaxed);
     return {
         g_gpu_frames_created.load(std::memory_order_relaxed),
         g_gpu_scales_performed.load(std::memory_order_relaxed),
-        g_cpu_readbacks_performed.load(std::memory_order_relaxed),
+        nv12 + bgra,
         g_pool_exhausted_drops.load(std::memory_order_relaxed),
         g_direct_capture_conversions.load(std::memory_order_relaxed),
         g_native_preview_imports.load(std::memory_order_relaxed),
+        nv12, bgra,
+        g_capability_failures.load(std::memory_order_relaxed),
+        g_rotation_failures.load(std::memory_order_relaxed),
+        g_d3d_failures.load(std::memory_order_relaxed),
+        g_direct_input_rejections.load(std::memory_order_relaxed),
+        g_cpu_scales.load(std::memory_order_relaxed),
     };
 }
 
 void D3d11Nv12FrameBuffer::ResetDiagnostics() noexcept {
     g_gpu_frames_created.store(0, std::memory_order_relaxed);
     g_gpu_scales_performed.store(0, std::memory_order_relaxed);
-    g_cpu_readbacks_performed.store(0, std::memory_order_relaxed);
+    g_nv12_readbacks.store(0, std::memory_order_relaxed);
     g_pool_exhausted_drops.store(0, std::memory_order_relaxed);
     g_direct_capture_conversions.store(0, std::memory_order_relaxed);
     g_native_preview_imports.store(0, std::memory_order_relaxed);
+    g_bgra_readbacks.store(0, std::memory_order_relaxed);
+    g_capability_failures.store(0, std::memory_order_relaxed);
+    g_rotation_failures.store(0, std::memory_order_relaxed);
+    g_d3d_failures.store(0, std::memory_order_relaxed);
+    g_direct_input_rejections.store(0, std::memory_order_relaxed);
+    g_cpu_scales.store(0, std::memory_order_relaxed);
 }
 
 D3d11Nv12FrameBuffer::D3d11Nv12FrameBuffer(
@@ -403,7 +429,7 @@ webrtc::scoped_refptr<webrtc::NV12BufferInterface> D3d11Nv12FrameBuffer::ToNV12(
     }
     auto nv12 = webrtc::NV12Buffer::Create(width_, height_);
     if (owner_pool_ && owner_pool_->ReadbackToNV12(texture_.Get(), width_, height_, nv12.get())) {
-        g_cpu_readbacks_performed.fetch_add(1, std::memory_order_relaxed);
+        g_nv12_readbacks.fetch_add(1, std::memory_order_relaxed);
         cached_nv12_ = nv12;
         return cached_nv12_;
     }
@@ -442,7 +468,7 @@ webrtc::scoped_refptr<webrtc::NV12BufferInterface> D3d11Nv12FrameBuffer::ToNV12(
                                     uv_w_bytes);
                     }
                     ctx->Unmap(staging.Get(), 0);
-                    g_cpu_readbacks_performed.fetch_add(1, std::memory_order_relaxed);
+                    g_nv12_readbacks.fetch_add(1, std::memory_order_relaxed);
                     cached_nv12_ = nv12;
                     return cached_nv12_;
                 }
@@ -517,7 +543,9 @@ webrtc::scoped_refptr<webrtc::VideoFrameBuffer> D3d11Nv12FrameBuffer::CropAndSca
     }
     auto nv12 = ToNV12();
     if (nv12) {
-        return nv12->CropAndScale(offset_x, offset_y, crop_width, crop_height, even_w, even_h);
+        auto result = nv12->CropAndScale(offset_x, offset_y, crop_width, crop_height, even_w, even_h);
+        if (result) g_cpu_scales.fetch_add(1, std::memory_order_relaxed);
+        return result;
     }
     return nullptr;
 }
@@ -618,7 +646,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11Nv12TexturePool::Acquire(int wi
 
             Microsoft::WRL::ComPtr<ID3D11Texture2D> tex;
             if (FAILED(device_->CreateTexture2D(&desc, nullptr, tex.GetAddressOf())) || !tex) {
-                return nullptr;
+                return ConversionFailed(g_d3d_failures);
             }
             HANDLE shared_handle = nullptr;
             Microsoft::WRL::ComPtr<IDXGIResource> dxgi_res;
@@ -888,10 +916,10 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     src_texture->GetDesc(&src_desc);
 
     if (!EnsureProcessorLocked(src_width, src_height, even_dst_w, even_dst_h)) {
-        return nullptr;
+        return ConversionFailed(supported_ ? g_d3d_failures : g_capability_failures);
     }
     if (rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY && !rotation_supported_) {
-        return nullptr;
+        return ConversionFailed(g_rotation_failures);
     }
 
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC in_view_desc{};
@@ -908,7 +936,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     if (FAILED(video_device_->CreateVideoProcessorInputView(
             input_tex_for_view, enumerator_.Get(), &in_view_desc, in_view.GetAddressOf())) ||
         !in_view) {
-        if (direct_input_only) return nullptr;
+        if (direct_input_only) return ConversionFailed(g_direct_input_rejections);
         if (!bindable_input_ || bindable_in_w_ != src_width || bindable_in_h_ != src_height ||
             bindable_in_format_ != src_desc.Format) {
             bindable_input_.Reset();
@@ -925,7 +953,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
             bdesc.MiscFlags = 0;
             if (FAILED(device_->CreateTexture2D(&bdesc, nullptr, bindable_input_.GetAddressOf())) ||
                 !bindable_input_) {
-                return nullptr;
+                return ConversionFailed(g_d3d_failures);
             }
             bindable_in_w_ = src_width;
             bindable_in_h_ = src_height;
@@ -946,7 +974,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
         if (FAILED(video_device_->CreateVideoProcessorInputView(
                 input_tex_for_view, enumerator_.Get(), &in_view_desc, in_view.GetAddressOf())) ||
             !in_view) {
-            return nullptr;
+            return ConversionFailed(g_d3d_failures);
         }
     }
 
@@ -958,7 +986,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     if (FAILED(video_device_->CreateVideoProcessorOutputView(
             dst_buffer->texture(), enumerator_.Get(), &out_view_desc, out_view.GetAddressOf())) ||
         !out_view) {
-        return nullptr;
+        return ConversionFailed(g_d3d_failures);
     }
 
     // Configure stream color space according to source format (BGRA vs NV12)
@@ -1001,7 +1029,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
 
     if (FAILED(video_context_->VideoProcessorBlt(
             processor_.Get(), out_view.Get(), 0, 1, &stream_data))) {
-        return nullptr;
+        return ConversionFailed(g_d3d_failures);
     }
 
     // Flush the command buffer so cross-device shared resource consumers see the completed blit.
@@ -1115,6 +1143,7 @@ const std::uint8_t* D3d11TextureDesktopFrame::EnsureCpuData() const {
             ctx->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture_.Get(), 0, &box);
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)) && mapped.pData) {
+                g_bgra_readbacks.fetch_add(1, std::memory_order_relaxed);
                 if (rotation_ == D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY) {
                     for (int r = 0; r < raw_h; ++r) {
                         std::memcpy(cpu_data_.get() + r * stride(),
