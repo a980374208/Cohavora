@@ -102,6 +102,7 @@ private:
     QPointF pan_, panStart_, lastMouse_;
     bool panning_ = false, erasing_ = false;
     std::optional<livekit::whiteboard::Command> gesture_;
+    std::optional<WhiteboardRendering::Item> strokePreview_;
     std::vector<WhiteboardRendering::Item> items_;
     // Display only: the document and export remain authority-confirmed.
     std::vector<PendingItem> pendingItems_;

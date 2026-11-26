@@ -204,6 +204,7 @@ void WhiteboardCanvas::clampPan() {
 
 void WhiteboardCanvas::cancelInput() {
     gesture_.reset();
+    strokePreview_.reset();
     panning_ = erasing_ = false;
     laserTimer_.stop();
     laser_.reset();
@@ -347,7 +348,8 @@ void WhiteboardCanvas::paintEvent(QPaintEvent *event) {
     } else paintCommitted(painter, event->rect());
     painter.setTransform(transform());
     painter.setClipRect(QRectF(0, 0, document_.page().width, document_.page().height));
-    if (gesture_ && tool_ != Tool::Text) WhiteboardRendering::draw(painter, WhiteboardRendering::compile(gesture_->object));
+    if (strokePreview_) WhiteboardRendering::draw(painter, *strokePreview_);
+    else if (gesture_ && tool_ != Tool::Text) WhiteboardRendering::draw(painter, WhiteboardRendering::compile(gesture_->object));
     if (laser_) {
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(Qt::NoPen);
@@ -400,7 +402,9 @@ void WhiteboardCanvas::mousePressEvent(QMouseEvent *event) {
     object.width = tool_ == Tool::Highlighter ? std::min(64.0, inkWidth_ * 4) : inkWidth_;
     object.points.push_back({position->x(), position->y()});
     if (tool_ != Tool::Pen && tool_ != Tool::Highlighter) object.points.push_back(object.points.front());
-    update(transform().mapRect(WhiteboardRendering::compile(object).bounds).toAlignedRect().adjusted(-3, -3, 3, 3));
+    auto item = WhiteboardRendering::compile(object);
+    update(transform().mapRect(item.bounds).toAlignedRect().adjusted(-3, -3, 3, 3));
+    if (tool_ == Tool::Pen || tool_ == Tool::Highlighter) strokePreview_ = std::move(item);
 }
 void WhiteboardCanvas::mouseMoveEvent(QMouseEvent *event) {
     if (textBox_) return;
@@ -424,6 +428,9 @@ void WhiteboardCanvas::mouseMoveEvent(QMouseEvent *event) {
     QRectF dirty;
     if (object.kind == wb::ObjectKind::Pen || object.kind == wb::ObjectKind::Highlighter) {
         if (QLineF(previous, *position).length() * transform().m11() < 1.5) return;
+        // The single-point preview includes a tiny round-cap segment for taps.
+        if (object.points.size() == 1) strokePreview_->path = QPainterPath(previous);
+        strokePreview_->path.lineTo(*position);
         object.points.push_back({position->x(), position->y()});
         const double margin = object.width / 2 + 2;
         dirty = QRectF(previous, *position).normalized().adjusted(-margin, -margin, margin, margin);
@@ -450,6 +457,7 @@ void WhiteboardCanvas::finishGesture() {
     if (!gesture_ || textBox_) return;
     const auto value = std::move(*gesture_);
     gesture_.reset();
+    strokePreview_.reset();
     const auto dirty = transform().mapRect(WhiteboardRendering::compile(value.object).bounds).toAlignedRect().adjusted(-3, -3, 3, 3);
     apply(value);
     update(dirty);
