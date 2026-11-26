@@ -81,6 +81,7 @@ set_target_properties(cohavora_whiteboard_model PROPERTIES AUTOMOC OFF FOLDER "w
 
 add_library(cohavora_whiteboard_ui STATIC
     whiteboard/accessible_combo_box.cpp whiteboard/accessible_combo_box.h
+    whiteboard/ink_color_picker.cpp whiteboard/ink_color_picker.h
     whiteboard/whiteboard_image_loader.cpp whiteboard/whiteboard_image_loader.h
     whiteboard/whiteboard_renderer.cpp whiteboard/whiteboard_renderer.h
     whiteboard/whiteboard_canvas.cpp whiteboard/whiteboard_canvas.h

@@ -25,6 +25,7 @@ QToolButton[uiStyle="meeting-layout-trigger"]:disabled {
     color: @text-muted@;
 }
 
+[uiStyle="ink-color-popup"] QLabel,
 [uiStyle="meeting-layout-popup"] QLabel,
 [uiStyle="meeting-layout-popup"] QCheckBox {
     color: @text@;
@@ -66,6 +67,7 @@ QToolButton[uiStyle="meeting-layout-trigger"]:disabled {
 [uiStyle="meeting-video-pager"] QToolButton:disabled {
     color: @text-muted@;
 }
+[uiStyle="ink-color-popup"] QLineEdit,
 [uiStyle="meeting-layout-popup"] QLineEdit {
     color: @text@;
     background: @surface-alt@;
@@ -74,6 +76,7 @@ QToolButton[uiStyle="meeting-layout-trigger"]:disabled {
     padding: 5px 7px;
     font-size: 13px;
 }
+[uiStyle="ink-color-popup"] QLineEdit:focus,
 [uiStyle="meeting-layout-popup"] QLineEdit:focus {
     border-color: @accent@;
 }
@@ -111,7 +114,8 @@ QWidget[uiStyle="whiteboard-panel"],
     border-radius: 6px;
     padding: 4px 8px;
 }
-[uiStyle="whiteboard-panel"] QPushButton {
+[uiStyle="whiteboard-panel"] QPushButton,
+[uiStyle="ink-color-popup"] QPushButton {
     color: @text@;
     background: @surface@;
     border: 1px solid @border@;
@@ -121,18 +125,25 @@ QWidget[uiStyle="whiteboard-panel"],
     font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 12px;
 }
-[uiStyle="whiteboard-panel"] QPushButton:hover {
+[uiStyle="whiteboard-panel"] QPushButton:hover,
+[uiStyle="ink-color-popup"] QPushButton:hover {
     color: @accent@;
     border-color: @accent-soft@;
     background: @accent-soft@;
 }
+[uiStyle="whiteboard-panel"] QPushButton:focus,
+[uiStyle="ink-color-popup"] QPushButton:focus {
+    border-color: @accent@;
+}
+[uiStyle="ink-color-popup"] QPushButton:pressed,
 [uiStyle="whiteboard-panel"] QPushButton:checked,
 [uiStyle="whiteboard-panel"] QPushButton:pressed {
     color: @accent@;
     border-color: @accent@;
     background: @accent-soft@;
 }
-[uiStyle="whiteboard-panel"] QPushButton:disabled {
+[uiStyle="whiteboard-panel"] QPushButton:disabled,
+[uiStyle="ink-color-popup"] QPushButton:disabled {
     color: @text-muted@;
     background: @surface-alt@;
     border-color: @border@;
@@ -150,6 +161,29 @@ QWidget[uiStyle="whiteboard-panel"],
     font-size: 12px;
 }
 [uiStyle="whiteboard-panel"] QPlainTextEdit { padding: 6px; }
+
+QListView#inkColorShortcuts,
+[uiStyle="ink-color-popup"] QListView {
+    background: transparent;
+    border: none;
+}
+[uiStyle="ink-color-popup"] QLabel#inkColorError { color: @danger@; }
+QSlider#inkColorHue { min-height: 20px; }
+QSlider#inkColorHue::groove:horizontal {
+    height: 8px;
+    border-radius: 4px;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+        stop:0 #ff0000, stop:0.167 #ffff00, stop:0.333 #00ff00,
+        stop:0.5 #00ffff, stop:0.667 #0000ff, stop:0.833 #ff00ff, stop:1 #ff0000);
+}
+QSlider#inkColorHue::handle:horizontal {
+    width: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+    border: 1px solid @text-secondary@;
+    background: @surface@;
+}
+QSlider#inkColorHue:focus::handle:horizontal { border-color: @accent@; }
 
 QDialog[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
 [uiStyle="login-dialog-this"] QDialog {

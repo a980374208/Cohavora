@@ -175,7 +175,10 @@ void WhiteboardCanvas::setTool(Tool tool) {
     tool_ = tool;
     setCursor(tool == Tool::Pan ? Qt::OpenHandCursor : tool == Tool::Text ? Qt::IBeamCursor : Qt::CrossCursor);
 }
-void WhiteboardCanvas::setInkColor(QColor color) { cancelInput(); if (color.isValid()) color_ = color; }
+void WhiteboardCanvas::setInkColor(QColor color) {
+    // Active strokes and text drafts keep the color captured when they began.
+    if (color.isValid()) color_ = color;
+}
 void WhiteboardCanvas::setInkWidth(double width) { cancelInput(); inkWidth_ = std::clamp(width, 1.0, 32.0); }
 void WhiteboardCanvas::setTextSize(double pixels) { cancelInput(); textSize_ = std::clamp(pixels, 8.0, 96.0); }
 void WhiteboardCanvas::setZoom(double zoom) {

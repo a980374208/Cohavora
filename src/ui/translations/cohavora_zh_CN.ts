@@ -7930,6 +7930,33 @@ Greeting: &quot;%2&quot;</source><translation>向 %1 发送联系人申请。
     <message><source>Updating contact relation...</source><translation>正在更新联系人信息…</translation></message>
 </context>
 <context>
+    <name>MeetingUI::InkColorPicker</name>
+    <message><source>Color palette</source><translation>取色板</translation></message>
+    <message><source>Quick colors</source><translation>快捷颜色</translation></message>
+    <message><source>Preset colors</source><translation>预设颜色</translation></message>
+    <message><source>Recent colors</source><translation>最近使用</translation></message>
+    <message><source>Custom color</source><translation>自定义颜色</translation></message>
+    <message><source>Saturation and brightness</source><translation>饱和度和明度</translation></message>
+    <message><source>Use the arrow keys to adjust the color.</source><translation>使用方向键调整颜色。</translation></message>
+    <message><source>Hue</source><translation>色相</translation></message>
+    <message><source>Hex color</source><translation>十六进制颜色</translation></message>
+    <message><source>Apply</source><translation>应用</translation></message>
+    <message><source>Enter a color as #RRGGBB.</source><translation>请输入 #RRGGBB 格式的颜色。</translation></message>
+    <message><source>Ink color: %1</source><translation>画笔颜色：%1</translation></message>
+    <message><source>Black</source><translation>黑色</translation></message>
+    <message><source>Red</source><translation>红色</translation></message>
+    <message><source>Blue</source><translation>蓝色</translation></message>
+    <message><source>Green</source><translation>绿色</translation></message>
+    <message><source>Orange</source><translation>橙色</translation></message>
+    <message><source>Purple</source><translation>紫色</translation></message>
+    <message><source>White</source><translation>白色</translation></message>
+    <message><source>Gray</source><translation>灰色</translation></message>
+    <message><source>Yellow</source><translation>黄色</translation></message>
+    <message><source>Cyan</source><translation>青色</translation></message>
+    <message><source>Pink</source><translation>粉色</translation></message>
+    <message><source>Navy</source><translation>深蓝色</translation></message>
+</context>
+<context>
     <name>MeetingUI::AnnotationOverlayWindow</name>
     <message>
         <source>Draw</source>

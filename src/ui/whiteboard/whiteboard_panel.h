@@ -12,6 +12,7 @@ class QPushButton;
 class QThread;
 
 namespace MeetingUI {
+class InkColorPicker;
 class WhiteboardPanel final : public QWidget {
     Q_OBJECT
 public:
@@ -54,6 +55,7 @@ private:
     QString imageErrorText(WhiteboardImageError error) const;
     livekit::whiteboard::Document document_;
     WhiteboardCanvas *canvas_ = nullptr;
+    InkColorPicker *colors_ = nullptr;
     QComboBox *pages_ = nullptr, *zoom_ = nullptr;
     QPushButton *undo_ = nullptr, *redo_ = nullptr, *addPage_ = nullptr;
     QPushButton *import_ = nullptr, *export_ = nullptr;

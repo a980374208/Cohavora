@@ -1,6 +1,7 @@
 #include <QtWidgets/QDialogButtonBox>
 #include "whiteboard_panel.h"
 #include "accessible_combo_box.h"
+#include "ink_color_picker.h"
 #include "src/ui/app_theme.h"
 #include "src/core/whiteboard/whiteboard_runtime.h"
 #include <QtCore/QEvent>
@@ -53,7 +54,7 @@ protected:
 private:
     QFileDialog &dialog_;
 };
-QHBoxLayout *toolbar(QVBoxLayout *outer, QWidget *parent) {
+QHBoxLayout *toolbar(QBoxLayout *outer, QWidget *parent) {
     auto *scroll = new QScrollArea(parent);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
@@ -119,21 +120,14 @@ WhiteboardPanel::WhiteboardPanel(QWidget *parent)
     }
     tools->addStretch();
 
-    auto *options = toolbar(layout, this);
-    auto *colors = createAccessibleWhiteboardComboBox(this);
-    colors->setObjectName(QStringLiteral("whiteboardInkColor"));
-    colors->setAccessibleName(tr("Ink color"));
-    const std::pair<QString, QRgb> palette[]{{tr("Black"), 0x1f2329}, {tr("Red"), 0xf53f3f},
-        {tr("Blue"), 0x1677ff}, {tr("Green"), 0x00a870}, {tr("Orange"), 0xff9f1a}, {tr("Purple"), 0x722ed1}};
-    for (const auto &color : palette) {
-        QPixmap swatch(14, 14);
-        swatch.fill(QColor::fromRgb(color.second));
-        colors->addItem(QIcon(swatch), color.first, color.second);
-    }
-    options->addWidget(colors);
-    connect(colors, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, colors] {
-        canvas_->setInkColor(QColor::fromRgb(colors->currentData().toUInt()));
-    });
+    auto *optionsRow = new QHBoxLayout;
+    optionsRow->setSpacing(6);
+    colors_ = new InkColorPicker(QStringLiteral("whiteboardInkColor"), canvas_->inkColor(), this);
+    optionsRow->addWidget(colors_);
+    connect(colors_, &InkColorPicker::colorSelected, canvas_, &WhiteboardCanvas::setInkColor);
+    auto *options = toolbar(optionsRow, this);
+    optionsRow->setStretch(1, 1);
+    layout->addLayout(optionsRow);
     options->addWidget(new QLabel(tr("Width"), this));
     auto *width = new QSpinBox(this);
     width->setObjectName(QStringLiteral("whiteboardInkWidth"));
@@ -227,6 +221,7 @@ WhiteboardPanel::~WhiteboardPanel() {
     if (decodeWorker_) decodeWorker_->wait();
 }
 void WhiteboardPanel::refreshControls() {
+    colors_->setEnabled(canEdit_);
     const auto actor = localActor_.isEmpty() ? document_.owner() : localActor_.toStdString();
     undo_->setEnabled(canEdit_ && (collaborative_ || document_.canUndo(actor)));
     redo_->setEnabled(canEdit_ && (collaborative_ || document_.canRedo(actor)));

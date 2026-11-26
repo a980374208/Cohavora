@@ -1,4 +1,5 @@
 #include "annotation_overlay_window.h"
+#include "ink_color_picker.h"
 
 #include "src/platform/annotation_window_support.h"
 #include "src/ui/app_theme.h"
@@ -15,7 +16,6 @@
 #include <QtGui/QWindow>
 #include <QtWidgets/QAbstractButton>
 #include <QtWidgets/QButtonGroup>
-#include <QtWidgets/QComboBox>
 #include <QtWidgets/QFileDialog>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
@@ -150,19 +150,9 @@ void AnnotationOverlayWindow::createToolbar(QScreen *screen, bool showWindows) {
     outer->addLayout(tools);
 
     auto *options = new QHBoxLayout;
-    auto *colors = new QComboBox(toolbar_);
-    colors->setAccessibleName(tr("Ink color"));
-    const std::pair<QString, QRgb> palette[]{{tr("Black"), 0x1f2329}, {tr("Red"), 0xf53f3f},
-        {tr("Blue"), 0x1677ff}, {tr("Green"), 0x00a870}, {tr("Orange"), 0xff9f1a}};
-    for (const auto &color : palette) {
-        QPixmap swatch(14, 14);
-        swatch.fill(QColor::fromRgb(color.second));
-        colors->addItem(QIcon(swatch), color.first, color.second);
-    }
-    options->addWidget(colors);
-    connect(colors, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, colors] {
-        canvas_->setInkColor(QColor::fromRgb(colors->currentData().toUInt()));
-    });
+    colors_ = new InkColorPicker(QStringLiteral("annotationInkColor"), canvas_->inkColor(), toolbar_);
+    options->addWidget(colors_);
+    connect(colors_, &InkColorPicker::colorSelected, canvas_, &WhiteboardCanvas::setInkColor);
     options->addWidget(new QLabel(tr("Width"), toolbar_));
     auto *width = new QSpinBox(toolbar_);
     width->setRange(1, 32);
@@ -202,22 +192,23 @@ void AnnotationOverlayWindow::createToolbar(QScreen *screen, bool showWindows) {
     });
     outer->addLayout(options);
     AppTheme::styleChoiceControls(*toolbar_, AppTheme::Tone::Light);
-    toolbar_->adjustSize();
+    updateToolbarState();
     positionToolbar(screen);
     if (!showWindows) toolbar_->hide();
-    updateToolbarState();
 }
 
 void AnnotationOverlayWindow::positionToolbar(QScreen *screen) {
     if (!toolbar_ || !screen) return;
     const auto target = screen->geometry();
-    toolbar_->adjustSize();
-    const int width = std::min(toolbar_->width(), std::max(320, target.width() - 24));
-    toolbar_->resize(width, toolbar_->height());
+    toolbar_->ensurePolished();
+    const auto preferred = toolbar_->layout()->sizeHint();
+    const int width = std::min(preferred.width(), std::max(320, target.width() - 24));
+    toolbar_->resize(width, preferred.height());
     toolbar_->move(target.left() + (target.width() - width) / 2, target.top() + 12);
 }
 
 void AnnotationOverlayWindow::setDesktopMode(bool desktopMode) {
+    if (colors_) colors_->closePalette();
     desktopModePending_ = false;
     desktopMode_ = desktopMode || !interactionEnabled_;
     canvas_->cancelInput();
@@ -244,11 +235,11 @@ void AnnotationOverlayWindow::setInteractionEnabled(bool enabled) {
 
 void AnnotationOverlayWindow::updateToolbarState() {
     if (!toolbar_) return;
-    for (auto *button : toolbar_->findChildren<QAbstractButton *>()) {
+    colors_->setEnabled(interactionEnabled_);
+    for (auto *button : toolbar_->findChildren<QAbstractButton *>(QString(), Qt::FindDirectChildrenOnly)) {
         if (button == close_ || button == export_) continue;
         button->setEnabled(interactionEnabled_);
     }
-    for (auto *combo : toolbar_->findChildren<QComboBox *>()) combo->setEnabled(interactionEnabled_);
     for (auto *spin : toolbar_->findChildren<QSpinBox *>()) spin->setEnabled(interactionEnabled_);
     if (status_) status_->setText(interactionEnabled_
         ? (desktopMode_ ? tr("Desktop mode") : tr("Drawing on shared screen"))

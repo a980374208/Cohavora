@@ -19,6 +19,7 @@ public:
     void setTool(Tool tool);
     Tool tool() const { return tool_; }
     void setInkColor(QColor color);
+    QColor inkColor() const { return color_; }
     void setInkWidth(double width);
     void setTextSize(double pixels);
     void setZoom(double zoom);

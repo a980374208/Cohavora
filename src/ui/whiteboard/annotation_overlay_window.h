@@ -12,6 +12,7 @@ class QPushButton;
 class QScreen;
 
 namespace MeetingUI {
+class InkColorPicker;
 class AnnotationOverlayWindow final : public QWidget {
     Q_OBJECT
 public:
@@ -52,6 +53,7 @@ private:
     livekit::whiteboard::Document document_;
     WhiteboardCanvas *canvas_ = nullptr;
     QWidget *toolbar_ = nullptr;
+    InkColorPicker *colors_ = nullptr;
     QPushButton *drawMode_ = nullptr;
     QPushButton *export_ = nullptr;
     QPushButton *close_ = nullptr;
