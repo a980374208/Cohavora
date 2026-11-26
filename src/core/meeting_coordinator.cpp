@@ -1858,9 +1858,10 @@ public:
                 const auto admissionGeneration = owner->_admissionGeneration;
                 owner->setState(MeetingState::Leaving, qDetail);
                 if (!current()) return;
+                auto disconnectedEmitted = std::make_shared<bool>(false);
                 // A server disconnect retires the native session too. Publish
                 // the terminal UI state only after its managed cleanup joins.
-                owner->stopRoomSession([owner, generation, admissionGeneration, qDetail] {
+                owner->stopRoomSession([owner, generation, admissionGeneration, qDetail, reason, disconnectedEmitted] {
                     const auto stillStopped = [&] {
                         return owner && owner->_nextSessionGeneration == generation &&
                             owner->_admissionGeneration == admissionGeneration &&
@@ -1870,16 +1871,21 @@ public:
                     if (!stillStopped() || owner->_state != MeetingState::Leaving) return;
                     owner->setState(MeetingState::Idle, qDetail);
                     if (!stillStopped() || owner->_state != MeetingState::Idle) return;
+                    if (!std::exchange(*disconnectedEmitted, true)) {
+                        emit owner->meetingDisconnected(reason);
+                    }
+                    if (!stillStopped() || owner->_state != MeetingState::Idle) return;
                     emit owner->meetingLeft();
                 });
                 if (owner && owner->_nextSessionGeneration == generation &&
                     owner->_admissionGeneration == admissionGeneration &&
                     !owner->_sessionRunning.load(std::memory_order_acquire) &&
                     !owner->_sessionInvalidated &&
-                    (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle)) {
+                    (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle) &&
+                    !std::exchange(*disconnectedEmitted, true)) {
                     // Window lifetime must not depend on a native join. Keep
                     // meetingLeft as the fully drained business terminal.
-                    emit owner->meetingDisconnected();
+                    emit owner->meetingDisconnected(reason);
                 }
             }
         });
@@ -1949,7 +1955,7 @@ public:
                         !owner->_sessionRunning.load(std::memory_order_acquire) &&
                         !owner->_sessionInvalidated &&
                         (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle)) {
-                        emit owner->meetingDisconnected();
+                        emit owner->meetingDisconnected(livekit::RoomDisconnectReason::RoomDeleted);
                     }
                     return;
                 }
@@ -4003,161 +4009,184 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     const auto nativeAudioPreferences = _mediaPrefs;
     const auto encryption = _admissionEncryption;
 
-    _sessionOwner->thread = std::thread([gate = _sessionUiGate, ioContext, room = std::move(room), session = std::move(session),
+    const auto startThread = [&] {
+        _sessionOwner->thread = std::thread([gate = _sessionUiGate, ioContext, room = std::move(room), session = std::move(session),
+                                 audioSource = std::move(audioSource), videoSource = std::move(videoSource),
+                                 audioMuted, videoEnabled, audioAvailable, videoAvailable,
+                                 cameraVideoCodec, allowInsecureTransport, encryption, nativeAudioPreferences,
+                                 urlStr, tokenStr, sessionGeneration] {
+            const auto opts = ProductionMeetingSignalOptions(
+                allowInsecureTransport);
+
+            const auto startupExecutor = session->strand();
+            asio::co_spawn(startupExecutor,
+                            [gate, room = std::move(room), session = std::move(session),
                              audioSource = std::move(audioSource), videoSource = std::move(videoSource),
                              audioMuted, videoEnabled, audioAvailable, videoAvailable,
-                             cameraVideoCodec, allowInsecureTransport, encryption, nativeAudioPreferences,
-                             urlStr, tokenStr, sessionGeneration] {
-        const auto opts = ProductionMeetingSignalOptions(
-            allowInsecureTransport);
-
-        const auto startupExecutor = session->strand();
-        asio::co_spawn(startupExecutor,
-                        [gate, room = std::move(room), session = std::move(session),
-                         audioSource = std::move(audioSource), videoSource = std::move(videoSource),
-                         audioMuted, videoEnabled, audioAvailable, videoAvailable,
-                         cameraVideoCodec, encryption, nativeAudioPreferences,
-                         urlStr, tokenStr, opts, sessionGeneration]() mutable -> asio::awaitable<void> {
-            MeetingStartupTransaction startup;
-            try {
-                if (urlStr.empty() || tokenStr.empty()) {
-                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit URL or access token is empty").toStdString());
-                }
-
-                session->assertOnStrand();
-                encryption.Validate();
-                if (encryption.mode == livekit::MeetingEncryptionMode::Required) {
-                    auto provider = encryption.secret->ConsumeProvider();
-                    room->EnableE2ee({livekit::EncryptionType::GCM, std::move(provider)});
-                }
-                co_await room->ConnectAsync(urlStr, tokenStr, opts);
-                if (!startup.markRoomConnected()) {
-                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "Invalid local media startup transaction state").toStdString());
-                }
-                MediaPreferences requestedPreferences;
-                requestedPreferences.enableMicrophone = !audioMuted;
-                requestedPreferences.enableVideo = videoEnabled;
-                const auto initialMedia = resolveInitialMediaState(
-                    room->room_info().metadata, requestedPreferences);
-                const bool effectiveAudioMuted = !initialMedia.microphoneEnabled;
-                const bool effectiveVideoEnabled = initialMedia.videoEnabled;
-                MeetingUI::LogToConsole(
-                    MeetingUI::LogCategory::Media,
-                    "INITIAL_MEDIA_POLICY",
-                    QString("metadata=%1 valid=%2 microphone=%3 camera=%4")
-                        .arg(initialMedia.hasOpenMeetingDetail ? QStringLiteral("openmeeting")
-                                                              : QStringLiteral("none"))
-                        .arg(initialMedia.metadataValid ? QStringLiteral("true")
-                                                        : QStringLiteral("false"))
-                        .arg(initialMedia.microphoneEnabled ? QStringLiteral("enabled")
-                                                            : QStringLiteral("disabled"))
-                        .arg(initialMedia.videoEnabled ? QStringLiteral("enabled")
-                                                       : QStringLiteral("disabled")));
-                gate->Post([sessionGeneration](MeetingCoordinator* self) {
-                    if (!self->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
-                        return;
+                             cameraVideoCodec, encryption, nativeAudioPreferences,
+                             urlStr, tokenStr, opts, sessionGeneration]() mutable -> asio::awaitable<void> {
+                MeetingStartupTransaction startup;
+                const auto handleStartupFailure = [&] {
+                    const QString diagnostic = QString::fromStdString(
+                        livekit::secure_log::ExceptionSummary("meeting_startup"));
+                    const bool mediaBegan = startup.mediaStartupBegan();
+                    const QString err = mediaBegan
+                        ? QCoreApplication::translate("MeetingUI", "Local audio and video could not be started. Please leave the meeting and try joining again.")
+                        : diagnostic;
+                    const QString title = mediaBegan
+                        ? QCoreApplication::translate("MeetingUI", "Local Media Startup Failed")
+                        : QCoreApplication::translate("MeetingUI", "Room Connection Failed");
+                    if (startup.beginRollback()) {
+                        startup.completeRollback();
                     }
-                    QPointer<MeetingCoordinator> owner(self);
-                    // 房间底层信令与下行通道已就绪，立即进入 InMeeting 状态以秒级呈现远端画面
-                    self->setState(MeetingState::InMeeting,
-                             QCoreApplication::translate("MeetingUI", "Connected to the meeting room. Starting local audio and video..."));
-                    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
-                        owner->_state != MeetingState::InMeeting) return;
-                    emit owner->meetingJoinedSuccessfully(owner->_currentMeetingId);
-                });
+                    MeetingUI::LogToConsole(MeetingUI::LogCategory::Error, "STARTUP_TRANSACTION",
+                                            QString("%1: %2").arg(title, diagnostic));
+                    if (mediaBegan && encryption.mode == livekit::MeetingEncryptionMode::Off) {
+                        // 房间本身连接正常，仅本地媒体硬件发布异常：降级为无媒体参会，不强制断开会议
+                        gate->Post([sessionGeneration, title, err](MeetingCoordinator* self) {
+                            self->completeRoomStartupDegradedOnUiThread(sessionGeneration, title, err);
+                        });
+                    } else {
+                        // 连接房间本身失败：执行回滚并清理
+                        gate->Post([sessionGeneration, title, err](MeetingCoordinator* self) {
+                            self->failRoomStartupOnUiThread(sessionGeneration, title, err);
+                        });
+                    }
+                };
+                try {
+                    if (urlStr.empty() || tokenStr.empty()) {
+                        throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit URL or access token is empty").toStdString());
+                    }
 
-                auto local = room->local_participant();
-                if (!local) {
-                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit room connected without creating a local participant").toStdString());
-                }
+                    session->assertOnStrand();
+                    encryption.Validate();
+                    if (encryption.mode == livekit::MeetingEncryptionMode::Required) {
+                        auto provider = encryption.secret->ConsumeProvider();
+                        room->EnableE2ee({livekit::EncryptionType::GCM, std::move(provider)});
+                    }
+                    co_await room->ConnectAsync(urlStr, tokenStr, opts);
+                    if (!startup.markRoomConnected()) {
+                        throw std::runtime_error(QCoreApplication::translate("MeetingUI", "Invalid local media startup transaction state").toStdString());
+                    }
+                    MediaPreferences requestedPreferences;
+                    requestedPreferences.enableMicrophone = !audioMuted;
+                    requestedPreferences.enableVideo = videoEnabled;
+                    const auto initialMedia = resolveInitialMediaState(
+                        room->room_info().metadata, requestedPreferences);
+                    const bool effectiveAudioMuted = !initialMedia.microphoneEnabled;
+                    const bool effectiveVideoEnabled = initialMedia.videoEnabled;
+                    MeetingUI::LogToConsole(
+                        MeetingUI::LogCategory::Media,
+                        "INITIAL_MEDIA_POLICY",
+                        QString("metadata=%1 valid=%2 microphone=%3 camera=%4")
+                            .arg(initialMedia.hasOpenMeetingDetail ? QStringLiteral("openmeeting")
+                                                                  : QStringLiteral("none"))
+                            .arg(initialMedia.metadataValid ? QStringLiteral("true")
+                                                            : QStringLiteral("false"))
+                            .arg(initialMedia.microphoneEnabled ? QStringLiteral("enabled")
+                                                                : QStringLiteral("disabled"))
+                            .arg(initialMedia.videoEnabled ? QStringLiteral("enabled")
+                                                           : QStringLiteral("disabled")));
+                    gate->Post([sessionGeneration](MeetingCoordinator* self) {
+                        if (!self->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+                            return;
+                        }
+                        QPointer<MeetingCoordinator> owner(self);
+                        // 房间底层信令与下行通道已就绪，立即进入 InMeeting 状态以秒级呈现远端画面
+                        self->setState(MeetingState::InMeeting,
+                                 QCoreApplication::translate("MeetingUI", "Connected to the meeting room. Starting local audio and video..."));
+                        if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                            owner->_state != MeetingState::InMeeting) return;
+                        emit owner->meetingJoinedSuccessfully(owner->_currentMeetingId);
+                    });
+
+                    auto local = room->local_participant();
+                    if (!local) {
+                        throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit room connected without creating a local participant").toStdString());
+                    }
 
 #ifdef _WIN32
-                auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audioSource);
+                    auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audioSource);
 #else
-                auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", {});
-                auto& manager = livekit::WebRTCManager::Instance();
-                const auto factory = manager.factory();
-                if (!factory) throw std::runtime_error("native_audio_factory_unavailable");
-                manager.signaling_thread()->BlockingCall([&] {
-                    webrtc::AudioOptions options;
-                    options.echo_cancellation = nativeAudioPreferences.echoCancellation;
-                    options.noise_suppression = nativeAudioPreferences.noiseSuppression;
-                    options.auto_gain_control = nativeAudioPreferences.autoGainControl;
-                    const auto source = factory->CreateAudioSource(options);
-                    audioTrack->set_rtc_track(factory->CreateAudioTrack("simple_audio", source.get()));
-                });
+                    auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", {});
+                    auto& manager = livekit::WebRTCManager::Instance();
+                    const auto factory = manager.factory();
+                    if (!factory) throw std::runtime_error("native_audio_factory_unavailable");
+                    manager.signaling_thread()->BlockingCall([&] {
+                        webrtc::AudioOptions options;
+                        options.echo_cancellation = nativeAudioPreferences.echoCancellation;
+                        options.noise_suppression = nativeAudioPreferences.noiseSuppression;
+                        options.auto_gain_control = nativeAudioPreferences.autoGainControl;
+                        const auto source = factory->CreateAudioSource(options);
+                        audioTrack->set_rtc_track(factory->CreateAudioTrack("simple_audio", source.get()));
+                    });
 #endif
-                audioTrack->set_source(livekit::TrackSource::Microphone);
-                audioTrack->set_muted(effectiveAudioMuted || !audioAvailable);
+                    audioTrack->set_source(livekit::TrackSource::Microphone);
+                    audioTrack->set_muted(effectiveAudioMuted || !audioAvailable);
 
-                livekit::VideoPublishOptions vopts;
-                vopts.video_codec = cameraVideoCodec;
-                auto videoTrack = livekit::LocalVideoTrack::createLocalVideoTrack(
-                    "camera_video", videoSource, livekit::TrackSource::Camera, vopts);
-                videoTrack->set_muted(!effectiveVideoEnabled || !videoAvailable);
+                    livekit::VideoPublishOptions vopts;
+                    vopts.video_codec = cameraVideoCodec;
+                    auto videoTrack = livekit::LocalVideoTrack::createLocalVideoTrack(
+                        "camera_video", videoSource, livekit::TrackSource::Camera, vopts);
+                    videoTrack->set_muted(!effectiveVideoEnabled || !videoAvailable);
 
-                // 【核心优化】：将本地音视频打包，发起批量发布与单次全量 SDP 协商
-                std::vector<std::shared_ptr<livekit::Track>> tracksToPublish;
-                tracksToPublish.push_back(audioTrack);
-                tracksToPublish.push_back(videoTrack);
+                    // 【核心优化】：将本地音视频打包，发起批量发布与单次全量 SDP 协商
+                    std::vector<std::shared_ptr<livekit::Track>> tracksToPublish;
+                    tracksToPublish.push_back(audioTrack);
+                    tracksToPublish.push_back(videoTrack);
 
-                auto pubs = co_await local->PublishTracksBatchAsync(std::move(tracksToPublish));
-                if (!startup.markMediaBatchPublished()) {
-                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "Invalid local media batch publication transaction state").toStdString());
-                }
-                MeetingUI::LogToConsole(MeetingUI::LogCategory::Track, "PUBLISH",
-                    QCoreApplication::translate("MeetingUI", "Local audio/video published (%1 tracks, a single combined SDP negotiation)").arg(pubs.size()));
+                    auto pubs = co_await local->PublishTracksBatchAsync(std::move(tracksToPublish));
+                    if (!startup.markMediaBatchPublished()) {
+                        throw std::runtime_error(QCoreApplication::translate("MeetingUI", "Invalid local media batch publication transaction state").toStdString());
+                    }
+                    MeetingUI::LogToConsole(MeetingUI::LogCategory::Track, "PUBLISH",
+                        QCoreApplication::translate("MeetingUI", "Local audio/video published (%1 tracks, a single combined SDP negotiation)").arg(pubs.size()));
 
-                gate->Post([sessionGeneration, audioTrack = std::move(audioTrack),
-                                           videoTrack = std::move(videoTrack), audioMuted, videoEnabled,
-                                           effectiveAudioMuted, effectiveVideoEnabled](MeetingCoordinator* self) mutable {
-                    self->completeRoomStartupOnUiThread(
-                        sessionGeneration, std::move(audioTrack), std::move(videoTrack),
-                        audioMuted, videoEnabled, effectiveAudioMuted, effectiveVideoEnabled);
-                });
-            } catch (const std::exception &) {
-                const QString diagnostic = QString::fromStdString(
-                    livekit::secure_log::ExceptionSummary("meeting_startup"));
-                const bool mediaBegan = startup.mediaStartupBegan();
-                const QString err = mediaBegan
-                    ? QCoreApplication::translate("MeetingUI", "Local audio and video could not be started. Please leave the meeting and try joining again.")
-                    : diagnostic;
-                const QString title = mediaBegan
-                    ? QCoreApplication::translate("MeetingUI", "Local Media Startup Failed")
-                    : QCoreApplication::translate("MeetingUI", "Room Connection Failed");
-                if (startup.beginRollback()) {
-                    startup.completeRollback();
-                }
-                MeetingUI::LogToConsole(MeetingUI::LogCategory::Error, "STARTUP_TRANSACTION",
-                                        QString("%1: %2").arg(title, diagnostic));
-                if (mediaBegan && encryption.mode == livekit::MeetingEncryptionMode::Off) {
-                    // 房间本身连接正常，仅本地媒体硬件发布异常：降级为无媒体参会，不强制断开会议
-                    gate->Post([sessionGeneration, title, err](MeetingCoordinator* self) {
-                        self->completeRoomStartupDegradedOnUiThread(sessionGeneration, title, err);
+                    gate->Post([sessionGeneration, audioTrack = std::move(audioTrack),
+                                               videoTrack = std::move(videoTrack), audioMuted, videoEnabled,
+                                               effectiveAudioMuted, effectiveVideoEnabled](MeetingCoordinator* self) mutable {
+                        self->completeRoomStartupOnUiThread(
+                            sessionGeneration, std::move(audioTrack), std::move(videoTrack),
+                            audioMuted, videoEnabled, effectiveAudioMuted, effectiveVideoEnabled);
                     });
-                } else {
-                    // 连接房间本身失败：执行回滚并清理
-                    gate->Post([sessionGeneration, title, err](MeetingCoordinator* self) {
-                        self->failRoomStartupOnUiThread(sessionGeneration, title, err);
-                    });
+                } catch (const std::exception &) {
+                    handleStartupFailure();
+                } catch (...) {
+                    handleStartupFailure();
+                }
+            }, asio::detached);
+
+            // An exceptional handler must not strand the shutdown barriers. ASIO
+            // permits run() to resume after an exception without restart().
+            for (;;) {
+                try {
+                    ioContext->run();
+                    break;
+                } catch (...) {
+                    auto event = livekit::diagnostic::Event::Issue(
+                        livekit::diagnostic::IssueCode::SessionHandlerFailed);
+                    event.thread_role = livekit::diagnostic::ThreadRole::Session;
+                    livekit::diagnostic::EmitBusinessEvent(event);
                 }
             }
-        }, asio::detached);
-
-        // An exceptional handler must not strand the shutdown barriers. ASIO
-        // permits run() to resume after an exception without restart().
-        for (;;) {
-            try {
-                ioContext->run();
-                break;
-            } catch (...) {
-                auto event = livekit::diagnostic::Event::Issue(
-                    livekit::diagnostic::IssueCode::SessionHandlerFailed);
-                event.thread_role = livekit::diagnostic::ThreadRole::Session;
-                livekit::diagnostic::EmitBusinessEvent(event);
-            }
-        }
-    });
+        });
+    };
+    try {
+        startThread();
+    } catch (...) {
+        const QString diagnostic = QString::fromStdString(
+            livekit::secure_log::ExceptionSummary("meeting_startup_thread"));
+        auto event = livekit::diagnostic::Event::Issue(
+            livekit::diagnostic::IssueCode::SessionHandlerFailed);
+        event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+        livekit::diagnostic::EmitBusinessEvent(event);
+        MeetingUI::LogToConsole(MeetingUI::LogCategory::Error, "STARTUP_THREAD", diagnostic);
+        failRoomStartupOnUiThread(
+            sessionGeneration,
+            QCoreApplication::translate("MeetingUI", "Room Connection Failed"),
+            QCoreApplication::translate("MeetingUI", "Unable to start the meeting connection worker. Please try again."));
+        return;
+    }
 }
 
 void MeetingCoordinator::completeRoomStartupOnUiThread(

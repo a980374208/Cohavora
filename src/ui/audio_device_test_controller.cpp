@@ -646,21 +646,37 @@ void AudioDeviceTestController::playSpeakerTestTone(
 	_impl->speakerActive.store(true, std::memory_order_release);
 	{
 		std::lock_guard<std::mutex> lock(_impl->speakerMutex);
-		_impl->speakerThread = std::thread([this, deviceId, durationMs, generation] {
-			auto result = PlayTone(deviceId, durationMs, _impl->speakerStopRequested);
-			QMetaObject::invokeMethod(
-				this,
-				[this, generation, result = std::move(result)]() mutable {
-					if (_impl->shuttingDown.load(std::memory_order_acquire)
-						|| _impl->speakerGeneration.load(std::memory_order_acquire) != generation) {
-						return;
-					}
-					_impl->speakerActive.store(false, std::memory_order_release);
-					emit speakerTestStateChanged(false);
-					emit speakerTestFinished(result.success, result.message);
-				},
-				Qt::QueuedConnection);
-		});
+		try {
+			_impl->speakerThread = std::thread([this, deviceId, durationMs, generation] {
+				ToneResult result;
+				try {
+					result = PlayTone(deviceId, durationMs, _impl->speakerStopRequested);
+				} catch (...) {
+					result.success = false;
+					result.message = QCoreApplication::translate(
+						"MeetingUI", "Audio playback test failed unexpectedly.");
+				}
+				QMetaObject::invokeMethod(
+					this,
+					[this, generation, result = std::move(result)]() mutable {
+						if (_impl->shuttingDown.load(std::memory_order_acquire)
+							|| _impl->speakerGeneration.load(std::memory_order_acquire) != generation) {
+							return;
+						}
+						_impl->speakerActive.store(false, std::memory_order_release);
+						emit speakerTestStateChanged(false);
+						emit speakerTestFinished(result.success, result.message);
+					},
+					Qt::QueuedConnection);
+			});
+		} catch (...) {
+			_impl->speakerActive.store(false, std::memory_order_release);
+			emit speakerTestStateChanged(false);
+			emit speakerTestFinished(
+				false,
+				QCoreApplication::translate("MeetingUI", "Unable to start the speaker test thread."));
+			return;
+		}
 	}
 	emit speakerTestStateChanged(true);
 }

@@ -813,10 +813,16 @@ void CameraSourceManager::ScheduleTimeout(int timeout_ms, ScheduledTask task) {
         timeout_scheduler_override_(timeout_ms, std::move(task));
         return;
     }
-    std::thread([timeout_ms, task = std::move(task)]() mutable {
-        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
-        task();
-    }).detach();
+    try {
+        std::thread([timeout_ms, task = std::move(task)]() mutable {
+            try {
+                std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+                if (task) task();
+            } catch (...) {
+            }
+        }).detach();
+    } catch (...) {
+    }
 }
 
 void CameraSourceManager::ScheduleCleanup(ScheduledTask task) {
@@ -824,9 +830,20 @@ void CameraSourceManager::ScheduleCleanup(ScheduledTask task) {
         cleanup_scheduler_override_(std::move(task));
         return;
     }
-    std::thread([task = std::move(task)]() mutable {
-        task();
-    }).detach();
+    auto sharedTask = std::make_shared<ScheduledTask>(std::move(task));
+    try {
+        std::thread([sharedTask] {
+            try {
+                if (*sharedTask) (*sharedTask)();
+            } catch (...) {
+            }
+        }).detach();
+    } catch (...) {
+        try {
+            if (*sharedTask) (*sharedTask)();
+        } catch (...) {
+        }
+    }
 }
 
 } // namespace livekit

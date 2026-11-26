@@ -1,6 +1,7 @@
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDebug>
 #include <QtCore/QEventLoop>
+#include <QtCore/QFile>
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include "base/basic_types.h"
@@ -9,6 +10,7 @@
 #endif
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDialog>
+#include <QtWidgets/QMessageBox>
 #include <QtGui/QIcon>
 #include <QtCore/QDir>
 #include <QtCore/QStandardPaths>
@@ -45,11 +47,24 @@
 #include "src/telemetry/telemetry_report.h"
 #include "src/telemetry/diagnostic_pipeline.h"
 #include "src/telemetry/diagnostic_spdlog_bridge.h"
+#include "src/telemetry/log_redaction.h"
 #include "src/ui/diagnostic_qt_bridge.h"
 
+#include <atomic>
+#include <cstdio>
 #include <filesystem>
 #include "src/platform/qt_path.h"
 #include <memory>
+
+#ifdef Q_OS_WIN
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 // 静态链接 Qt 必须显式导入平台与图像插件
 // Linux plugins are selected by qt5_import_plugins in CMake.
@@ -83,6 +98,108 @@ struct DiagnosticCloseGuard final {
 	livekit::diagnostic::ShutdownReason reason =
 		livekit::diagnostic::ShutdownReason::UserExit;
 	~DiagnosticCloseGuard() { if (pipeline) pipeline->Close(reason); }
+};
+
+bool HasNonEmptyEnv(const char *name) {
+	return !qEnvironmentVariableIsEmpty(name);
+}
+
+bool IsHeadlessPlatformName(const QString &name) {
+	return name.compare(QStringLiteral("offscreen"), Qt::CaseInsensitive) == 0 ||
+		name.compare(QStringLiteral("minimal"), Qt::CaseInsensitive) == 0 ||
+		name.compare(QStringLiteral("minimalegl"), Qt::CaseInsensitive) == 0;
+}
+
+bool IsAutomatedOrHeadlessLaunch(bool debugEnabled) {
+	if (debugEnabled ||
+		HasNonEmptyEnv("LIVEKIT_UIA_DATA_ROOT") ||
+		HasNonEmptyEnv("LIVEKIT_UIA_SETTINGS_ROOT") ||
+		HasNonEmptyEnv("LIVEKIT_UIA_PILOT_PROBE")) {
+		return true;
+	}
+	if (IsHeadlessPlatformName(qEnvironmentVariable("QT_QPA_PLATFORM"))) {
+		return true;
+	}
+	if (QCoreApplication::instance()) {
+		return IsHeadlessPlatformName(QGuiApplication::platformName());
+	}
+	return false;
+}
+
+void ShowStartupFailureNotice(bool interactive, const QString &title, const QString &message) {
+	std::fprintf(stderr, "%s: %s\n", title.toUtf8().constData(), message.toUtf8().constData());
+	if (!interactive) {
+		return;
+	}
+	if (qobject_cast<QApplication *>(QCoreApplication::instance())) {
+		QMessageBox::critical(nullptr, title, message);
+		return;
+	}
+#ifdef Q_OS_WIN
+	const auto wideTitle = title.toStdWString();
+	const auto wideMessage = message.toStdWString();
+	::MessageBoxW(nullptr, wideMessage.c_str(), wideTitle.c_str(),
+		MB_OK | MB_ICONERROR | MB_TOPMOST);
+#endif
+}
+
+class SafeApplication final : public QApplication {
+public:
+	SafeApplication(
+			int &argc,
+			char **argv,
+			std::shared_ptr<livekit::diagnostic::DiagnosticPipeline> diagnostics,
+			bool interactive)
+		: QApplication(argc, argv)
+		, diagnostics_(std::move(diagnostics))
+		, interactive_(interactive) {}
+
+	bool notify(QObject *receiver, QEvent *event) override {
+		try {
+			return QApplication::notify(receiver, event);
+		} catch (...) {
+			const auto summary = livekit::secure_log::ExceptionSummary("qt_event_loop");
+			if (diagnostics_) {
+				auto issue = livekit::diagnostic::Event::Issue(
+					livekit::diagnostic::IssueCode::SessionHandlerFailed);
+				issue.thread_role = livekit::diagnostic::ThreadRole::Ui;
+				diagnostics_->TryEmit(issue);
+			}
+			qCritical().noquote() << "[App] Unhandled exception in Qt event loop:"
+			                      << QString::fromStdString(summary);
+			if (interactive_ && !IsAutomatedOrHeadlessLaunch(false) &&
+				!alertVisible_.exchange(true)) {
+				QTimer::singleShot(0, this, [this] {
+					auto *notice = new QMessageBox(
+						QMessageBox::Critical,
+						QCoreApplication::translate("MeetingUI", "Unexpected Application Error"),
+						QCoreApplication::translate(
+							"MeetingUI",
+							"An unexpected error interrupted the current action. If the issue persists, please restart Cohavora."),
+						QMessageBox::Ok,
+						nullptr);
+					notice->setObjectName(QStringLiteral("applicationUnexpectedError"));
+					notice->setProperty("meetingStandaloneNotice", true);
+					notice->setAttribute(Qt::WA_DeleteOnClose);
+					notice->setAttribute(Qt::WA_QuitOnClose, false);
+					notice->setWindowModality(Qt::NonModal);
+					MeetingUI::AppTheme::setTone(*notice, MeetingUI::AppTheme::Tone::Light);
+					QObject::connect(notice, &QObject::destroyed, this, [this] {
+						alertVisible_.store(false);
+					});
+					notice->show();
+					notice->raise();
+					notice->activateWindow();
+				});
+			}
+			return false;
+		}
+	}
+
+private:
+	std::shared_ptr<livekit::diagnostic::DiagnosticPipeline> diagnostics_;
+	bool interactive_ = true;
+	std::atomic<bool> alertVisible_{false};
 };
 
 bool LoginWithDebugCredentials(
@@ -119,12 +236,19 @@ bool LoginWithDebugCredentials(
 
 } // namespace
 
-int main(int argc, char *argv[]) {
+int RunMeetingApp(int argc, char *argv[]) {
 	livekit::platform::EnsureOpenSslThreadCleanupRegistered();
+	const bool nativeDebugRequested = MeetingApp::NativeDebugOptionEnabled(argc, argv);
 	const auto debugStorage = MeetingApp::ResolveDebugStoragePaths(
-		MeetingApp::NativeDebugOptionEnabled(argc, argv),
+		nativeDebugRequested,
 		qEnvironmentVariable("LIVEKIT_UIA_DATA_ROOT"));
-	if (!debugStorage.valid) return 2;
+	if (!debugStorage.valid) {
+		ShowStartupFailureNotice(
+			!IsAutomatedOrHeadlessLaunch(nativeDebugRequested),
+			QCoreApplication::translate("MeetingUI", "Startup Failed"),
+			QCoreApplication::translate("MeetingUI", "Invalid or inaccessible local storage directory configuration."));
+		return 2;
+	}
 	auto diagnostics = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
 	const auto buildId = livekit::telemetry::CurrentExecutableBuildId();
 	const auto crashRoot = debugStorage.enabled ? debugStorage.crashEvidence
@@ -150,7 +274,13 @@ int main(int argc, char *argv[]) {
 	livekit::diagnostic::InstallBusinessPipeline(diagnostics);
 	diagnostics->TryEmit(livekit::diagnostic::Event::Started(
 		buildId, livekit::telemetry::CurrentExecutablePdbIdentity()));
-	if (!livekit::diagnostic::InstallSafeSpdlogAdapter(diagnostics)) return 4;
+	if (!livekit::diagnostic::InstallSafeSpdlogAdapter(diagnostics)) {
+		ShowStartupFailureNotice(
+			!IsAutomatedOrHeadlessLaunch(debugStorage.enabled),
+			QCoreApplication::translate("MeetingUI", "Startup Failed"),
+			QCoreApplication::translate("MeetingUI", "Unable to initialize the application logging system. Cohavora will now exit."));
+		return 4;
+	}
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
 	QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 	QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
@@ -169,13 +299,18 @@ int main(int argc, char *argv[]) {
         qputenv("QT_QPA_PLATFORM", "wayland");
     }
 #endif
-	QApplication app(argc, argv);
+	SafeApplication app(argc, argv, diagnostics,
+		!IsAutomatedOrHeadlessLaunch(nativeDebugRequested));
 
 #ifdef Q_OS_WIN
 	// Capture can be the first WinRT caller on a worker thread; initialize the
 	// desktop toolkit's dynamic WinRT imports before meeting actions start.
 	if (!base::WinRT::Supported()) {
 		qCritical() << "Required Windows Runtime APIs are unavailable.";
+		ShowStartupFailureNotice(
+			!IsAutomatedOrHeadlessLaunch(debugStorage.enabled),
+			QCoreApplication::translate("MeetingUI", "Startup Failed"),
+			QCoreApplication::translate("MeetingUI", "Required Windows Runtime APIs are unavailable on this system. Please update Windows and try again."));
 		return 4;
 	}
 #endif
@@ -189,13 +324,25 @@ int main(int argc, char *argv[]) {
     // The application owns this dedicated data directory. Tighten existing
     // directories as well as new ones before any normal diagnostic writer.
     const auto appData = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
-    if (appData.isEmpty() || !QDir().mkpath(appData)) return 2;
+    if (appData.isEmpty() || !QDir().mkpath(appData)) {
+        ShowStartupFailureNotice(
+            !IsAutomatedOrHeadlessLaunch(debugStorage.enabled),
+            QCoreApplication::translate("MeetingUI", "Startup Failed"),
+            QCoreApplication::translate("MeetingUI", "Unable to access the application data directory. Check directory permissions and try again."));
+        return 2;
+    }
     const auto appDataPath = cohavora::platform::PathFromQString(appData);
     MeetingApp::debug_storage_detail::Directory appDataDirectory{
         ::open(appDataPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)};
     struct stat appDataInfo{};
     if (appDataDirectory.fd < 0 || ::fstat(appDataDirectory.fd, &appDataInfo) != 0 ||
-        appDataInfo.st_uid != ::geteuid() || ::fchmod(appDataDirectory.fd, 0700) != 0) return 2;
+        appDataInfo.st_uid != ::geteuid() || ::fchmod(appDataDirectory.fd, 0700) != 0) {
+        ShowStartupFailureNotice(
+            !IsAutomatedOrHeadlessLaunch(debugStorage.enabled),
+            QCoreApplication::translate("MeetingUI", "Startup Failed"),
+            QCoreApplication::translate("MeetingUI", "Unable to secure the application data directory. Check directory permissions and try again."));
+        return 2;
+    }
 #endif
 
 	auto debugLogin = MeetingApp::ParseDebugLoginOptions(app.arguments());
@@ -204,6 +351,10 @@ int main(int argc, char *argv[]) {
 			qEnvironmentVariable("LIVEKIT_UIA_SETTINGS_ROOT"))) {
 		qCritical() << "Invalid debug options or settings root.";
 		diagnosticClose.reason = livekit::diagnostic::ShutdownReason::LoginRejected;
+		ShowStartupFailureNotice(
+			!IsAutomatedOrHeadlessLaunch(debugLogin.debugEnabled),
+			QCoreApplication::translate("MeetingUI", "Startup Failed"),
+			QCoreApplication::translate("MeetingUI", "Invalid startup options or configuration root. Cohavora will now exit."));
 		return 2;
 	}
 	MeetingUI::DiagnosticQtBridge diagnosticQtBridge(diagnostics);
@@ -212,7 +363,13 @@ int main(int argc, char *argv[]) {
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
 		.filePath(QStringLiteral("diagnostics"));
 	if (!MeetingUI::MeetingLogConsoleWindow::ConfigureStorageRoots(
-		cohavora::platform::PathFromQString(diagnosticRoot), crashRoot)) return 2;
+		cohavora::platform::PathFromQString(diagnosticRoot), crashRoot)) {
+		ShowStartupFailureNotice(
+			!IsAutomatedOrHeadlessLaunch(debugLogin.debugEnabled),
+			QCoreApplication::translate("MeetingUI", "Startup Failed"),
+			QCoreApplication::translate("MeetingUI", "Unable to initialize local diagnostic storage. Check available disk space and permissions, then try again."));
+		return 2;
+	}
 	QSettings diagnosticSettings;
 	const bool requestedLogRetention = diagnosticSettings.value(
 		QStringLiteral("diagnostics/historyEnabled"), true).toBool();
@@ -329,6 +486,15 @@ int main(int argc, char *argv[]) {
 
 	// 初始化 Telegram Desktop lib_ui 样式系统
 	style::StartManager(100);
+	if (!QFile::exists(QStringLiteral(":/meeting-ui/styles/widgets.qss")) ||
+		!QFile::exists(QStringLiteral(":/meeting-ui/styles/application.qss"))) {
+		ShowStartupFailureNotice(
+			!IsAutomatedOrHeadlessLaunch(debugLogin.debugEnabled),
+			QCoreApplication::translate("MeetingUI", "Startup Failed"),
+			QCoreApplication::translate("MeetingUI", "Application theme resources are missing or corrupted. Please reinstall Cohavora."));
+		style::StopManager();
+		return 4;
+	}
 	MeetingUI::AppTheme::install(app);
 
 	// 初始化会话与用户认证
@@ -359,7 +525,7 @@ int main(int argc, char *argv[]) {
     }
 
 	// Only a successfully restored, explicitly enabled session skips login.
-	if (!session.isLoggedIn() ||
+	while (!session.isLoggedIn() ||
 		(debugLogin.status != MeetingApp::DebugLoginOptionStatus::Enabled &&
 		 !session.isAutoLogin())) {
 		MeetingUI::LoginDialog loginDlg;
@@ -367,6 +533,15 @@ int main(int argc, char *argv[]) {
 			// 用户主动退出登录对话框，直接退出程序
 			style::StopManager();
 			return !pilotProbe || pilotProbe->Finish() ? 0 : 5;
+		}
+		if (session.isLoggedIn()) {
+			break;
+		}
+		if (!IsAutomatedOrHeadlessLaunch(debugLogin.debugEnabled)) {
+			QMessageBox::warning(
+				nullptr,
+				QCoreApplication::translate("MeetingUI", "Sign-In Incomplete"),
+				QCoreApplication::translate("MeetingUI", "Your sign-in session could not be established. Please sign in again."));
 		}
 	}
 
@@ -407,6 +582,7 @@ int main(int argc, char *argv[]) {
 				}
 			}
 			mainWindow.reset();
+			MeetingUI::MeetingRoomWindow::closeStandaloneNotices();
 			MeetingUI::MeetingLogConsoleWindow::DestroyInstance();
 #ifdef Q_OS_LINUX
             // Both completions run on Qt. Secret Service drains on its own
@@ -476,8 +652,19 @@ int main(int argc, char *argv[]) {
         startupLogin = new MeetingUI::LoginDialog(session);
         startupLogin->setAttribute(Qt::WA_DeleteOnClose);
         QObject::connect(startupLogin, &QDialog::accepted, &app, [&] {
-            if (session.isLoggedIn()) showAuthenticatedMain();
-            else shutdownGuard.Request();
+            if (session.isLoggedIn()) {
+                showAuthenticatedMain();
+                return;
+            }
+            if (!IsAutomatedOrHeadlessLaunch(debugLogin.debugEnabled)) {
+                QMessageBox::warning(
+                    nullptr,
+                    QCoreApplication::translate("MeetingUI", "Sign-In Incomplete"),
+                    QCoreApplication::translate("MeetingUI", "Your sign-in session could not be established. Please sign in again."));
+            }
+            if (startupLogin) startupLogin->deleteLater();
+            startupLogin = nullptr;
+            QTimer::singleShot(0, &app, showStartupLogin);
         });
         QObject::connect(startupLogin, &QDialog::rejected, &app, [&] { shutdownGuard.Request(); });
         startupLogin->open(); // No nested exec()/wait while Secret Service runs.
@@ -515,4 +702,16 @@ int main(int argc, char *argv[]) {
     if (result == 0 && startupExitCode != 0) return startupExitCode;
 #endif
 	return result == 0 && !probeEvidenceComplete ? 5 : result;
+}
+
+int main(int argc, char *argv[]) {
+	try {
+		return RunMeetingApp(argc, argv);
+	} catch (...) {
+		ShowStartupFailureNotice(
+			!IsAutomatedOrHeadlessLaunch(MeetingApp::NativeDebugOptionEnabled(argc, argv)),
+			QCoreApplication::translate("MeetingUI", "Startup Failed"),
+			QCoreApplication::translate("MeetingUI", "Cohavora encountered an unexpected error and needs to close."));
+		return 1;
+	}
 }

@@ -894,6 +894,8 @@ const char* ToString(RoomDisconnectReason reason) {
     case RoomDisconnectReason::ServerShutdown: return "SERVER_SHUTDOWN";
     case RoomDisconnectReason::DuplicateIdentity: return "DUPLICATE_IDENTITY";
     case RoomDisconnectReason::ParticipantRemoved: return "PARTICIPANT_REMOVED";
+    case RoomDisconnectReason::RoomDeleted: return "ROOM_DELETED";
+    case RoomDisconnectReason::RoomClosed: return "ROOM_CLOSED";
     case RoomDisconnectReason::Unknown: return "UNKNOWN";
     }
     return "UNKNOWN";
@@ -909,6 +911,10 @@ RoomDisconnectReason Room::ToRoomDisconnectReason(proto::DisconnectReason reason
         return RoomDisconnectReason::DuplicateIdentity;
     case proto::PARTICIPANT_REMOVED:
         return RoomDisconnectReason::ParticipantRemoved;
+    case proto::ROOM_DELETED:
+        return RoomDisconnectReason::RoomDeleted;
+    case proto::ROOM_CLOSED:
+        return RoomDisconnectReason::RoomClosed;
     default:
         return RoomDisconnectReason::Unknown;
     }

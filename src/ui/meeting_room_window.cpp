@@ -3164,6 +3164,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	: Ui::RpWidget(parent)
 	, _config(config)
 	, _coordinator(std::move(coordinator)) {
+	closeStandaloneNotices();
 	setObjectName("MeetingRoomWindow");
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
 	AppTheme::observeChanges(*this, [this] {
@@ -3395,9 +3396,18 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 		}, [callbacks](std::exception_ptr failure) {
 			callbacks->Post([failure](MeetingRoomWindow *window) {
 				if (failure) {
+					const bool hadPendingAdmission = static_cast<bool>(window->_pendingAdmission);
 					window->cancelMediaPreparation();
 					window->updateRecoveryStateUi(OpenMeeting::MeetingState::Failed,
 						QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."));
+					if (hadPendingAdmission &&
+						!window->_closingForSessionInvalidation &&
+						!OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+						window->showDepartureNotice(
+							QCoreApplication::translate("MeetingUI", "Media Preparation Failed"),
+							QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."),
+							QMessageBox::Critical);
+					}
 					return;
 				}
 				window->finishMediaPreparation();
@@ -3405,10 +3415,19 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 		});
 	if (!accepted) {
 		// No worker ran and no native resources exist when admission is rejected.
+		const bool hadPendingAdmission = static_cast<bool>(_pendingAdmission);
 		_mediaPreparation.reset();
 		cancelMediaPreparation();
 		updateRecoveryStateUi(OpenMeeting::MeetingState::Failed,
 			QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."));
+		if (hadPendingAdmission &&
+			!_closingForSessionInvalidation &&
+			!OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+			showDepartureNotice(
+				QCoreApplication::translate("MeetingUI", "Media Preparation Failed"),
+				QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."),
+				QMessageBox::Critical);
+		}
 	}
 }
 
@@ -7466,26 +7485,115 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			!_coordinator) {
 			return;
 		}
-		if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting ||
-			_coordinator->state() == OpenMeeting::MeetingState::Reconnecting) {
-			auto *notice = new QMessageBox(QMessageBox::Warning, title, message,
-				QMessageBox::Ok, this);
-			notice->setObjectName(QStringLiteral("meetingOperationError"));
-			notice->setAttribute(Qt::WA_DeleteOnClose);
-			notice->open();
+		const auto state = _coordinator->state();
+		if (state == OpenMeeting::MeetingState::Failed) {
+			invalidateCameraCompletion();
+			QPointer<MeetingRoomWindow> guard(this);
+			LogToConsole(LogCategory::Error, "SESSION_STARTUP", QString("%1: %2").arg(title, message));
+			if (!guard) {
+				return;
+			}
+			showDepartureNotice(title, message, QMessageBox::Critical);
 			return;
 		}
-		if (_coordinator->state() != OpenMeeting::MeetingState::Failed) return;
-		invalidateCameraCompletion();
-		QPointer<MeetingRoomWindow> guard(this);
-		LogToConsole(LogCategory::Error, "SESSION_STARTUP", QString("%1: %2").arg(title, message));
-		if (!guard) {
+		LogToConsole(LogCategory::Error, "SESSION_OPERATION", QString("%1: %2").arg(title, message));
+		if (state == OpenMeeting::MeetingState::Leaving ||
+			state == OpenMeeting::MeetingState::Idle ||
+			!isVisible()) {
+			showStandaloneNotice(
+				QStringLiteral("meetingOperationError"),
+				QMessageBox::Warning,
+				title,
+				message);
 			return;
 		}
-		showDepartureNotice(title, message, QMessageBox::Critical);
+		auto *notice = new QMessageBox(QMessageBox::Warning, title, message,
+			QMessageBox::Ok, this);
+		notice->setObjectName(QStringLiteral("meetingOperationError"));
+		notice->setAttribute(Qt::WA_DeleteOnClose);
+		notice->open();
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingDisconnected,
-	        this, [this] {
+	        this, [this](livekit::RoomDisconnectReason reason) {
+		if (_closingForSessionInvalidation ||
+			OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+			stopLiveKitSession(false);
+			close();
+			return;
+		}
+		if (_departureNotice) {
+			stopLiveKitSession(false);
+			return;
+		}
+		if (!_pendingDepartureTitle.isEmpty()) {
+			const auto title = _pendingDepartureTitle;
+			const auto message = _pendingDepartureMessage;
+			_pendingDepartureTitle.clear();
+			_pendingDepartureMessage.clear();
+			if (!_standaloneDepartureNoticeShown) {
+				_standaloneDepartureNoticeShown = true;
+				closeAnnotationOverlay();
+				_annotationBinding.reset();
+				showStandaloneNotice(
+					QStringLiteral("meetingDepartureNotice"),
+					QMessageBox::Warning,
+					title,
+					message);
+			}
+			stopLiveKitSession(false);
+			close();
+			return;
+		}
+		if (reason != livekit::RoomDisconnectReason::UserLeave &&
+			!_standaloneDepartureNoticeShown) {
+			_standaloneDepartureNoticeShown = true;
+			closeAnnotationOverlay();
+			_annotationBinding.reset();
+			QMessageBox::Icon icon = QMessageBox::Warning;
+			QString title;
+			QString message;
+			switch (reason) {
+			case livekit::RoomDisconnectReason::NetworkError:
+				title = QCoreApplication::translate("MeetingUI", "Connection Lost");
+				message = QCoreApplication::translate(
+					"MeetingUI",
+					"The meeting connection was lost and could not be restored. Please check your network and join again.");
+				break;
+			case livekit::RoomDisconnectReason::RoomDeleted:
+			case livekit::RoomDisconnectReason::RoomClosed:
+				icon = QMessageBox::Information;
+				title = QCoreApplication::translate("MeetingUI", "Meeting Ended");
+				message = QCoreApplication::translate(
+					"MeetingUI",
+					"This meeting has ended and you have been disconnected.");
+				break;
+			case livekit::RoomDisconnectReason::ServerShutdown:
+				title = QCoreApplication::translate("MeetingUI", "Server Disconnected");
+				message = QCoreApplication::translate(
+					"MeetingUI",
+					"The meeting server closed the connection. Please try joining again later.");
+				break;
+			case livekit::RoomDisconnectReason::ParticipantRemoved:
+				title = QCoreApplication::translate("MeetingUI", "Removed from Meeting");
+				message = QCoreApplication::translate(
+					"MeetingUI",
+					"You have been removed from the meeting.");
+				break;
+			case livekit::RoomDisconnectReason::Unknown:
+			case livekit::RoomDisconnectReason::DuplicateIdentity:
+			case livekit::RoomDisconnectReason::UserLeave:
+				title = QCoreApplication::translate("MeetingUI", "Disconnected from Meeting");
+				message = QCoreApplication::translate(
+					"MeetingUI",
+					"You were disconnected from the meeting unexpectedly. Please try joining again.");
+				break;
+			}
+			showStandaloneNotice(
+				QStringLiteral("meetingDepartureNotice"),
+				icon,
+				title,
+				message);
+		}
 		stopLiveKitSession(false);
 		close();
 	});
@@ -7508,6 +7616,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			stopLiveKitSession();
 			return;
 		}
+		stopLiveKitSession(false);
 		close();
 	});
 
@@ -7519,9 +7628,42 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	updateRecoveryStateUi(_coordinator->state());
 }
 
+void MeetingRoomWindow::closeStandaloneNotices() {
+	const auto widgets = QApplication::topLevelWidgets();
+	for (QWidget *widget : widgets) {
+		auto *notice = qobject_cast<QMessageBox *>(widget);
+		if (notice && !notice->parentWidget() &&
+			notice->property("meetingStandaloneNotice").toBool()) {
+			notice->close();
+		}
+	}
+}
+
+void MeetingRoomWindow::showStandaloneNotice(
+		const QString &objectName,
+		QMessageBox::Icon icon,
+		const QString &title,
+		const QString &message) {
+	auto *notice = new QMessageBox(icon, title, message, QMessageBox::Ok, nullptr);
+	notice->setObjectName(objectName);
+	notice->setProperty("meetingStandaloneNotice", true);
+	notice->setAttribute(Qt::WA_DeleteOnClose);
+	notice->setAttribute(Qt::WA_QuitOnClose, false);
+	notice->setWindowModality(Qt::NonModal);
+	notice->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+	notice->setMinimumSize(460, 180);
+	AppTheme::setTone(*notice, AppTheme::Tone::Light);
+	notice->show();
+	notice->raise();
+	notice->activateWindow();
+}
+
 void MeetingRoomWindow::showDepartureNotice(const QString &title, const QString &message,
 		QMessageBox::Icon icon) {
-	if (_departureNotice) return;
+	if (_departureNotice || _closingForSessionInvalidation ||
+		OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+		return;
+	}
 	// A screen-sized TOPMOST annotation surface can otherwise remain above the
 	// meeting-owned dialog during the short kick/leave transition.
 	closeAnnotationOverlay();
@@ -7588,6 +7730,9 @@ void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
 
 void MeetingRoomWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {
 	invalidateCameraCompletion();
+	closeStandaloneNotices();
+	_pendingDepartureTitle.clear();
+	_pendingDepartureMessage.clear();
 	if (_closingForSessionInvalidation) {
 		return;
 	}
@@ -7706,6 +7851,7 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 					QCoreApplication::translate("MeetingUI", "Could not end the meeting. Please try again."),
 					QMessageBox::Ok, nullptr);
 				notice->setObjectName(QStringLiteral("meetingEndError"));
+				notice->setProperty("meetingStandaloneNotice", true);
 				notice->setAttribute(Qt::WA_DeleteOnClose);
 				notice->setAttribute(Qt::WA_QuitOnClose, false);
 				notice->setWindowModality(Qt::NonModal);

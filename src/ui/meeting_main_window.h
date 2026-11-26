@@ -149,7 +149,7 @@ class MeetingMainWindow : public Ui::RpWidget {
     friend class MeetingEntryEncryptionInspectionAccess;
 public:
 	explicit MeetingMainWindow(QWidget *parent = nullptr);
-	~MeetingMainWindow() override = default;
+	~MeetingMainWindow() override;
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;

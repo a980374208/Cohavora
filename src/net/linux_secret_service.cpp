@@ -379,24 +379,40 @@ public:
         auto join = join_;
         // Create the reaper before the native owner. Shutdown/destruction then
         // needs no new native thread and never joins on the application thread.
-        std::thread([owner, join]() mutable {
-            {
-                std::unique_lock lock(join->mutex);
-                join->retire.wait(lock, [&] { return join->retiring; });
-            }
-            if (join->native.joinable()) join->native.join();
-            std::vector<std::function<void()>> callbacks;
-            {
-                std::lock_guard lock(join->mutex);
-                join->finished = true;
-                callbacks.swap(join->callbacks);
-            }
-            for (auto &callback : callbacks) callback();
-        }).detach();
+        try {
+            std::thread([owner, join]() mutable {
+                try {
+                    {
+                        std::unique_lock lock(join->mutex);
+                        join->retire.wait(lock, [&] { return join->retiring; });
+                    }
+                    if (join->native.joinable()) join->native.join();
+                } catch (...) {
+                }
+                std::vector<std::function<void()>> callbacks;
+                {
+                    std::lock_guard lock(join->mutex);
+                    join->finished = true;
+                    callbacks.swap(join->callbacks);
+                }
+                for (auto &callback : callbacks) {
+                    if (callback) {
+                        try { callback(); } catch (...) {}
+                    }
+                }
+            }).detach();
+        } catch (...) {
+            std::lock_guard lock(join_->mutex);
+            join_->finished = true;
+            throw;
+        }
         try {
             join_->native = std::thread([owner] {
                 g_main_context_push_thread_default(owner->context);
-                g_main_loop_run(owner->loop);
+                try {
+                    g_main_loop_run(owner->loop);
+                } catch (...) {
+                }
                 g_main_context_pop_thread_default(owner->context);
             });
         } catch (...) {

@@ -333,7 +333,7 @@ signals:
     void meetingJoinedSuccessfully(const QString &meetingId);
     // Terminal Room disconnect has revoked the session. Presentation may close
     // while the shutdown service retains and drains the native owners.
-    void meetingDisconnected();
+    void meetingDisconnected(livekit::RoomDisconnectReason reason);
     void meetingLeft();
     // LiveKit 服务端主动断开（例如同一 identity 重复进入同一房间）。
     // UI 仅消费客户端枚举，不依赖 protobuf 协议细节。

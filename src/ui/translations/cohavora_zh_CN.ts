@@ -4504,6 +4504,36 @@ Sign in with your own account in a client configured for the same meeting servic
     <message><source>Sending</source><translation>发送</translation></message>
     <message><source>Encrypted meetings support VP8 and H264. Auto prefers hardware H264, then VP8; select a supported codec in Settings for camera and screen sharing.</source><translation>加密会议支持 VP8 和 H264，自动模式优先硬件 H264，失败后回退 VP8。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
     <message><source>Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings.</source><translation>加密会议支持 VP8 和 H264。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
+    <message><source>Unable to start the meeting connection worker. Please try again.</source><translation>无法启动会议连接工作线程，请重试。</translation></message>
+    <message><source>Media Preparation Failed</source><translation>媒体设备准备失败</translation></message>
+    <message><source>Connection Lost</source><translation>连接已断开</translation></message>
+    <message><source>The meeting connection was lost and could not be restored. Please check your network and join again.</source><translation>会议网络连接已断开且未能恢复，请检查网络后重新加入。</translation></message>
+    <message><source>Meeting Ended</source><translation>会议已结束</translation></message>
+    <message><source>This meeting has ended and you have been disconnected.</source><translation>当前会议已结束，你已退出会议。</translation></message>
+    <message><source>Server Disconnected</source><translation>服务器已断开连接</translation></message>
+    <message><source>The meeting server closed the connection. Please try joining again later.</source><translation>会议服务器已关闭连接，请稍后重试加入。</translation></message>
+    <message><source>Removed from Meeting</source><translation>已移出会议</translation></message>
+    <message><source>You have been removed from the meeting.</source><translation>你已被移出当前会议。</translation></message>
+    <message><source>Disconnected from Meeting</source><translation>已与会议断开连接</translation></message>
+    <message><source>You were disconnected from the meeting unexpectedly. Please try joining again.</source><translation>会议连接意外断开，请尝试重新加入。</translation></message>
+    <message><source>Sign-In Incomplete</source><translation>登录未完成</translation></message>
+    <message><source>Your sign-in session could not be established. Please sign in again.</source><translation>未能建立有效的登录会话，请重新登录。</translation></message>
+    <message><source>Meeting encryption settings could not be prepared. Please try again.</source><translation>无法准备会议加密设置，请重试。</translation></message>
+    <message><source>Your account session changed before joining the meeting. Please sign in and try again.</source><translation>账号会话在进入会议前发生变化，请登录后重试。</translation></message>
+    <message><source>Startup Failed</source><translation>启动失败</translation></message>
+    <message><source>Invalid or inaccessible local storage directory configuration.</source><translation>本地数据目录配置无效或无法访问。</translation></message>
+    <message><source>Unable to initialize the application logging system. Cohavora will now exit.</source><translation>无法初始化应用日志系统，Cohavora 将退出。</translation></message>
+    <message><source>Required Windows Runtime APIs are unavailable on this system. Please update Windows and try again.</source><translation>当前系统缺少必需的 Windows 运行时接口，请更新系统后重试。</translation></message>
+    <message><source>Unable to access the application data directory. Check directory permissions and try again.</source><translation>无法访问应用数据目录，请检查目录权限后重试。</translation></message>
+    <message><source>Unable to secure the application data directory. Check directory permissions and try again.</source><translation>无法保护应用数据目录权限，请检查目录权限后重试。</translation></message>
+    <message><source>Invalid startup options or configuration root. Cohavora will now exit.</source><translation>启动参数或配置目录无效，Cohavora 将退出。</translation></message>
+    <message><source>Unable to initialize local diagnostic storage. Check available disk space and permissions, then try again.</source><translation>无法初始化本地诊断存储目录，请检查磁盘空间和权限后重试。</translation></message>
+    <message><source>Application theme resources are missing or corrupted. Please reinstall Cohavora.</source><translation>应用主题资源缺失或已损坏，请重新安装 Cohavora。</translation></message>
+    <message><source>Unexpected Application Error</source><translation>应用程序异常</translation></message>
+    <message><source>An unexpected error interrupted the current action. If the issue persists, please restart Cohavora.</source><translation>发生意外错误并中断了当前操作。若问题持续出现，请重启 Cohavora。</translation></message>
+    <message><source>Cohavora encountered an unexpected error and needs to close.</source><translation>Cohavora 遇到意外错误，需要关闭。</translation></message>
+    <message><source>Audio playback test failed unexpectedly.</source><translation>扬声器播放测试意外失败。</translation></message>
+    <message><source>Unable to start the speaker test thread.</source><translation>无法启动扬声器测试线程。</translation></message>
 </context>
 <context>
     <name>MeetingUI::AnnotationOverlayWindow</name>
