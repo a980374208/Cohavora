@@ -53,6 +53,7 @@ QSize ContactsTreeDelegate::sizeHint(const QStyleOptionViewItem &option, const Q
     case ContactsTreeNodeKind::Department:
         return QSize(option.rect.width(), kHeaderRowHeight);
     case ContactsTreeNodeKind::Notice:
+    case ContactsTreeNodeKind::LoadMore:
         return QSize(option.rect.width(), kNoticeRowHeight);
     case ContactsTreeNodeKind::Member:
     default:
@@ -114,14 +115,20 @@ void ContactsTreeDelegate::paint(
         return;
     }
 
-    if (kind == ContactsTreeNodeKind::Notice) {
+    const bool loadMore = kind == ContactsTreeNodeKind::LoadMore;
+    if (kind == ContactsTreeNodeKind::Notice || loadMore) {
         const QRect rowRect = option.rect.adjusted(6, 1, -6, -1);
+        if (loadMore && (hovered || selected)) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(Theme::color(Theme::ColorRole::Hover));
+            painter->drawRoundedRect(rowRect, 7, 7);
+        }
         const int textLeft = rowRect.left() + 18 + std::max(0, depth - 1) * kDepthIndentPx;
         const int textWidth = std::max(40, rowRect.right() - 10 - textLeft);
         QFont noticeFont = option.font;
         noticeFont.setPixelSize(11);
         painter->setFont(noticeFont);
-        painter->setPen(Theme::color(Theme::ColorRole::TextMuted));
+        painter->setPen(Theme::color(loadMore ? Theme::ColorRole::Accent : Theme::ColorRole::TextMuted));
         const QString text = index.data(TreeTitleRole).toString();
         painter->drawText(QRect(textLeft, rowRect.top(), textWidth, rowRect.height()),
                           Qt::AlignLeft | Qt::AlignVCenter,

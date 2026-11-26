@@ -1,5 +1,8 @@
 #include "screen_share_session.h"
 #include "room.h"
+#ifdef _WIN32
+#include "render/native_screen_preview_win.h"
+#endif
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -76,7 +79,9 @@ struct ScreenShareSession::Run {
     bool driving = false;
     ScreenShareQuality requested;
     ScreenShareQuality applied_request;
+    std::optional<ScreenShareFrameProfile> target_quality;
     std::optional<ScreenShareFrameProfile> applied;
+    ScreenShareQualityConstraint quality_constraint;
     std::optional<ScreenShareFrameProfile> delivered; // delivery mutex, bounded mailbox
     uint64_t revision = 1;
     bool quality_dirty = false;
@@ -156,10 +161,27 @@ ScreenShareSession::Backend ScreenShareSession::ForRoom(const std::shared_ptr<Ro
             }
         }
     };
-    backend.resolve_quality = [weak](auto track, auto profile) -> asio::awaitable<ScreenShareFrameProfile> {
+    struct ResolvedConstraintSlot {
+        std::mutex mutex;
+        uint64_t revision = 0;
+        ScreenShareQualityConstraint constraint;
+    };
+    auto constraint_slot = std::make_shared<ResolvedConstraintSlot>();
+    backend.resolve_quality = [weak, constraint_slot](auto track, auto profile) -> asio::awaitable<ScreenShareFrameProfile> {
         auto room = weak.lock();
         if (!room) throw std::runtime_error("screen room retired");
-        co_return co_await room->ConstrainScreenShareProfileAsync(std::move(track), profile);
+        const auto detail = co_await room->ConstrainScreenShareProfileWithDetailAsync(std::move(track), profile);
+        {
+            std::lock_guard lock(constraint_slot->mutex);
+            constraint_slot->revision = profile.revision;
+            constraint_slot->constraint = detail.constraint;
+        }
+        co_return detail.profile;
+    };
+    backend.read_resolved_constraint = [constraint_slot](uint64_t revision) -> std::optional<ScreenShareQualityConstraint> {
+        std::lock_guard lock(constraint_slot->mutex);
+        if (constraint_slot->revision != revision) return std::nullopt;
+        return constraint_slot->constraint;
     };
     backend.apply_quality = [weak](auto track, auto profile) -> asio::awaitable<void> {
         auto room = weak.lock();
@@ -191,7 +213,9 @@ void ScreenShareSession::SetState(ScreenShareState state, ScreenShareError error
         snapshot_.run_id = run_->id;
         snapshot_.audio_epoch = run_->audio_epoch;
         snapshot_.requested_quality = run_->requested;
+        snapshot_.target_quality = run_->target_quality;
         snapshot_.applied_quality = run_->applied;
+        snapshot_.quality_constraint = run_->quality_constraint;
         snapshot_.quality_status = run_->quality_status;
         snapshot_.source_title = run_->source_title;
         snapshot_.source_kind = run_->source_kind;
@@ -386,8 +410,15 @@ asio::awaitable<std::optional<ScreenShareFrameProfile>> ScreenShareSession::Appl
     for (;;) {
         if (!current()) co_return std::nullopt;
         auto effective = profile;
-        if (self->backend_.resolve_quality)
+        ScreenShareQualityConstraint resolved_constraint;
+        if (self->backend_.resolve_quality) {
             effective = co_await self->backend_.resolve_quality(run->track, profile);
+            if (self->backend_.read_resolved_constraint) {
+                if (auto info = self->backend_.read_resolved_constraint(profile.revision)) {
+                    resolved_constraint = std::move(*info);
+                }
+            }
+        }
         if (!current()) co_return std::nullopt;
         if (run->ended.load()) throw std::runtime_error("screen capture ended during quality update");
         const auto expected = ResolveScreenShareProfile(
@@ -414,7 +445,13 @@ asio::awaitable<std::optional<ScreenShareFrameProfile>> ScreenShareSession::Appl
             co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
         }
         if (run->ended.load()) throw std::runtime_error("screen capture ended during quality update");
-        if (*latest == effective) co_return latest;
+        if (*latest == effective) {
+            run->target_quality = ResolveScreenShareProfile(
+                latest->source_width, latest->source_height, run->requested, revision)
+                .value_or(profile);
+            run->quality_constraint = std::move(resolved_constraint);
+            co_return latest;
+        }
         // Geometry can change while a quality operation waits for its frame.
         // Re-resolve the delivered geometry, then align capture again if the
         // negotiated codec requires another supported quality tier.
@@ -734,40 +771,16 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                     if (!run->accepting || run->capture_phase == DesktopCapturePhase::AwaitingPermission) return;
                     run->source->captureFrame(frame);
                     if (frame.hasNativeBuffer()) {
-                        run->preview->SubmitLazy("screen", run->id, [captured = frame]() -> render::OwnedI420Frame::Ptr {
-                            const auto planes = captured.planeInfos();
-                            if (captured.type() == VideoBufferType::NV12 && planes.size() >= 2) {
-                                return render::OwnedI420Frame::CopyFromNV12(
-                                    captured.width(), captured.height(),
-                                    reinterpret_cast<const uint8_t*>(planes[0].data_ptr), planes[0].stride,
-                                    reinterpret_cast<const uint8_t*>(planes[1].data_ptr), planes[1].stride);
+                        run->preview->SubmitLazyPreview("screen", run->id, [captured = frame]([[maybe_unused]] auto target) {
+#ifdef _WIN32
+                            if (target == render::VideoRenderRouter::PreviewTarget::Dx11) {
+                                if (auto native = render::NativeScreenPreview::Create(captured)) return native;
                             }
-                            if (planes.size() >= 3) {
-                                return render::OwnedI420Frame::CopyFromPlanes(
-                                    captured.width(), captured.height(),
-                                    reinterpret_cast<const uint8_t*>(planes[0].data_ptr), planes[0].stride,
-                                    reinterpret_cast<const uint8_t*>(planes[1].data_ptr), planes[1].stride,
-                                    reinterpret_cast<const uint8_t*>(planes[2].data_ptr), planes[2].stride);
-                            }
-                            return nullptr;
+#endif
+                            return render::VideoRenderFrame::FromScreenPixels(captured);
                         });
-                    } else if (frame.type() == VideoBufferType::NV12) {
-                        const auto planes = frame.planeInfos();
-                        if (planes.size() >= 2) {
-                            run->preview->Submit("screen", run->id, render::OwnedI420Frame::CopyFromNV12(
-                                frame.width(), frame.height(),
-                                reinterpret_cast<const uint8_t*>(planes[0].data_ptr), planes[0].stride,
-                                reinterpret_cast<const uint8_t*>(planes[1].data_ptr), planes[1].stride));
-                        }
-                    } else if (frame.type() == VideoBufferType::I420) {
-                        const auto planes = frame.planeInfos();
-                        if (planes.size() >= 3) {
-                            run->preview->Submit("screen", run->id, render::OwnedI420Frame::CopyFromPlanes(
-                                frame.width(), frame.height(),
-                                reinterpret_cast<const uint8_t*>(planes[0].data_ptr), planes[0].stride,
-                                reinterpret_cast<const uint8_t*>(planes[1].data_ptr), planes[1].stride,
-                                reinterpret_cast<const uint8_t*>(planes[2].data_ptr), planes[2].stride));
-                        }
+                    } else {
+                        run->preview->SubmitPreview("screen", run->id, render::VideoRenderFrame::FromScreenPixels(frame));
                     }
                     run->first_frame.store(true, std::memory_order_release);
                 }
@@ -864,6 +877,32 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                     run->published = true;
                     run->quality_status = ScreenShareQualityStatus::Applied;
                     failure = ScreenShareError::None;
+                    if (!self->closed_ && !run->stopping && !run->ended.load() &&
+                        self->backend_.resolve_quality && self->backend_.read_resolved_constraint &&
+                        self->backend_.read_resolved_constraint(run->revision).has_value() &&
+                        run->applied) {
+                        const auto requested_profile = ResolveScreenShareProfile(
+                            run->applied->source_width, run->applied->source_height,
+                            run->requested, run->revision);
+                        if (requested_profile) {
+                            try {
+                                const auto post_profile = co_await self->backend_.resolve_quality(
+                                    run->track, *requested_profile);
+                                if (!self->closed_ && !run->stopping && !run->ended.load()) {
+                                    run->target_quality = *requested_profile;
+                                    if (auto info = self->backend_.read_resolved_constraint(run->revision)) {
+                                        run->quality_constraint = std::move(*info);
+                                    }
+                                    if (post_profile.width != run->applied->width ||
+                                        post_profile.height != run->applied->height ||
+                                        post_profile.quality != run->applied->quality) {
+                                        run->quality_dirty = true;
+                                        run->quality_status = ScreenShareQualityStatus::Pending;
+                                    }
+                                }
+                            } catch (...) {}
+                        }
+                    }
                     if (!self->closed_ && !run->stopping && !run->ended.load())
                         self->SetState(ScreenShareState::Active);
                     if (!self->closed_ && !run->stopping && !run->ended.load() && run->audio_options.enabled)

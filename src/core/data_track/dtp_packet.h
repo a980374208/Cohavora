@@ -13,6 +13,8 @@
 
 namespace livekit::data_track {
 
+inline constexpr size_t kMaxPacketsPerFrame = 128;
+
 enum class DtpFrameMarker : uint8_t {
     Inter = 0,
     Final = 1,
@@ -135,6 +137,9 @@ public:
     uint16_t track_handle() const noexcept { return track_handle_; }
     size_t mtu_size() const noexcept { return mtu_size_; }
 
+    static size_t MaxFramePayloadBytes(const DtpExtensions& extensions,
+                                       size_t mtu_size = kDefaultTransportMtu) noexcept;
+
     /// Empty payload returns true with `out_packets` cleared (no wire packets emitted).
     bool Packetize(const uint8_t* data,
                    size_t size,
@@ -196,7 +201,7 @@ struct DtpDepacketizerPushResult {
 /// partial frames when concurrent partial frame count reaches `max_partial_frames`.
 class DtpDepacketizer {
 public:
-    static constexpr size_t kMaxBufferPackets = 128;
+    static constexpr size_t kMaxBufferPackets = kMaxPacketsPerFrame;
 
     DtpDepacketizerPushResult Push(DtpPacket packet,
                                    DtpDepacketizerPushOptions options = {});

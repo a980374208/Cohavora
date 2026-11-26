@@ -376,6 +376,8 @@ public:
 
     asio::awaitable<ScreenShareFrameProfile> ConstrainScreenShareProfileAsync(
         std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
+    asio::awaitable<ResolvedScreenShareQuality> ConstrainScreenShareProfileWithDetailAsync(
+        std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
     asio::awaitable<void> ApplyScreenShareSenderParametersAsync(
         std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
     asio::awaitable<void> SyncScreenShareMetadataAsync(
@@ -1344,5 +1346,15 @@ private:
         incoming_stream_deadlines_;
     std::shared_ptr<asio::steady_timer> incoming_stream_cleanup_timer_;
 };
+
+// Evaluates the effective screen-share resolution ceiling imposed by the
+// selected codec/encoder preference at the target frame rate (e.g. for UI
+// previews in Settings and the Start Screen Share picker).
+ScreenShareQualityConstraint EvaluateScreenShareCodecCeiling(
+    const std::string& requested_codec,
+    const std::string& encoder_preference,
+    int fps,
+    const std::vector<std::string>& server_enabled_codecs = {},
+    bool encrypted = false);
 
 } // namespace livekit

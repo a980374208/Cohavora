@@ -514,16 +514,27 @@ QString buildClientUiNavigationGuidePrompt() {
 		+ QStringLiteral("standalone [%1] entry row (unread badge; opens right-pane [%2] with [%3] and [%4] inbox: [%5] / [%6]); ")
 			.arg(uiTr("Requests"), uiTr("Add External Contact"), uiTr("Send Request"),
 				uiTr("Contact Requests"), uiTr("Accept"), uiTr("Decline"))
+		+ QStringLiteral("Every new contact requires a request. The recipient accepts it in the request inbox to create contacts on both sides. ")
 		+ QStringLiteral("segmented 2-tab pill %1 (auto-hidden when user has no organization or during search): ")
 			.arg(contactsSegmentedTabs)
 		+ QStringLiteral("[%1] unified collapsible tree with online/total counters (%2); ")
 			.arg(uiTr("Contacts"), contactsTreeGroups)
-		+ QStringLiteral("[%1] unified collapsible tree where expanding a department loads sub-departments and inline members ([%2] badge; supports global/per-department visibility policy showing [%3] when restricted to own department while keeping the full department tree visible); ")
-			.arg(uiTr("Org Tree"), uiTr("Lead"), uiTr("Own dept only"))
+		+ QStringLiteral("[%1] initially shows collapsed top-level nodes. Click the arrow beside a node to reveal its next level and load permitted inline members ([%2] badge). ")
+			.arg(uiTr("Org Tree"), uiTr("Lead"))
+		+ QStringLiteral("Under own-department visibility, the tree shows the user's departments and their ancestor paths. Ancestors are navigation nodes and may show [%1] in place of their member lists. ")
+			.arg(uiTr("Own dept only"))
+		+ QStringLiteral("The right-hand counter on a branch shows its direct child-node count by default, or the distinct members in permitted descendant departments when configured by the organization. Leaf groups retain the online/member counter. ")
+		+ QStringLiteral("Enter an exact account in [%1] to find a user across departments, then select the result to open the detail card. Cross-department employee number, department and job title are shown in details by default and follow the organization's current setting. ")
+			.arg(uiTr("Search"))
 		+ QStringLiteral("right contact detail card (fields: %1; actions: %2; self card hides [%3] and shows [%4] + self-only [%5]).")
 			.arg(contactDetailFields, contactDetailActions, uiTr("Remark"),
 				uiTr("Edit Personal Profile"),
 				uiTr("My Employee No. & Organization History (Only Visible to You)")));
+	lines.push_back(QStringLiteral(
+		"  * Organization-wide controls are in the Web Org Admin Console for the founder: top bar [设置] opens [组织设置] with "
+		"[成员查看权限（默认）], [跨部门详情展示工号、部门、职位] and [客户端组织树计数] ([下一级数量] / [下级总人数]). "
+		"Click [确认修改] to stage the changes, then [确认应用并通知客户端] to review them and [确认应用并实时推送] to save. "
+		"The Web console department tree also starts collapsed; filtering reveals matching branches."));
 
 	lines.push_back(QStringLiteral("- [%1] Dialog: %2 / %3, [%4] / [%5], expandable [%6] & [%7].")
 		.arg(uiTr("Join Meeting"), uiTr("Meeting ID"), uiTr("Display Name"),

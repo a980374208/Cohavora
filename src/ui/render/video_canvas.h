@@ -12,7 +12,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
+#include <utility>
 #include <vector>
 
 class ParticipantWindowInspectionAccess;
@@ -30,6 +32,7 @@ public:
     virtual bool rendererPending() const { return false; }
     virtual QString backendName() const = 0;
     const RenderDiagnostics& renderDiagnostics() const noexcept { return *diagnostics_; }
+    bool usesDx11() const noexcept { return diagnostics_->actual_backend == RenderBackend::Dx11; }
     void updateFrame(const std::string& key, VideoRenderFrame::Ptr frame);
     void updateI420Frame(const std::string& key, OwnedI420Frame::Ptr frame) {
         updateFrame(key, VideoRenderFrame::FromI420(std::move(frame)));
@@ -55,6 +58,16 @@ signals:
     void tileDoubleClicked(const QString& key);
     void tilePinRequested(const QString& key);
 protected:
+    // Scenes share one upload per canvas. Only the render worker touches pixels
+    // after publication. Geometry and telemetry remain available for repaints.
+    struct CanvasFrame {
+        explicit CanvasFrame(VideoRenderFrame::Ptr source)
+            : geometry{int(source->view().width), int(source->view().height), source->view().rotation_degrees, true},
+              metadata(source->presentationMetadata()), pixels(std::move(source)) {}
+        const VideoFrameGeometry geometry;
+        const RenderFrameMetadata::Ptr metadata;
+        VideoRenderFrame::Ptr pixels;
+    };
     void render();
     // Read only on the UI owner; render workers receive a copy in their scene.
     std::array<float, 4> stageClearColor() const;
@@ -89,6 +102,7 @@ protected:
 private:
     friend class ::ParticipantWindowInspectionAccess;
     std::string hitTest(const QPoint&, bool pinOnly = false) const;
+    QPoint pointerLocalPos() const;
     void updateHovered(const QPoint&);
     void updateTileToolTip();
     void cancelTileToolTip();
@@ -107,8 +121,9 @@ private:
     std::vector<VideoTileRect> tiles_;
     std::map<std::string, QRectF> video_destinations_;
     std::map<std::string, Decoration> decorations_;
-    std::map<std::string, VideoRenderFrame::Ptr> telemetry_frames_;
+    std::map<std::string, RenderFrameMetadata::Ptr> telemetry_frames_;
     std::string hovered_tile_, pressed_pin_;
+    std::optional<QPoint> hovered_point_;
     std::string remote_input_key_;
     QSize last_physical_size_;
     QTimer* fps_timer_ = nullptr;

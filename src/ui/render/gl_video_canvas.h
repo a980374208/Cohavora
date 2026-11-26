@@ -40,7 +40,7 @@ private:
     class Surface;
     struct Resource {
         lk_render_resource_id id{};
-        VideoRenderFrame::Ptr frame;
+        std::shared_ptr<CanvasFrame> frame;
         QImage image;
     };
     struct Scene;

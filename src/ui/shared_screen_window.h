@@ -36,6 +36,7 @@ public:
     void clearFrame();
     void locate();
     bool usesGpu() const { return _gpu; }
+    bool usesDx11() const;
     bool restoredGeometry() const { return _restoredGeometry; }
     void setZoom(double zoom);
     void toggleFullscreen();

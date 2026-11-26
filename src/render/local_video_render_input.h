@@ -25,7 +25,7 @@ public:
         subscription_ = source->subscribe([weak](const VideoFrame& frame, const VideoCaptureOptions& options) {
             auto state = weak.lock();
             if (!state || !state->active.load(std::memory_order_acquire)) return;
-            auto owned = VideoRenderFrame::CopyFrom(frame, options);
+            auto owned = VideoRenderFrame::FromCapture(frame, options);
             if (!owned) return;
             std::lock_guard lock(state->mutex);
             if (state->active.load(std::memory_order_relaxed)) state->latest = std::move(owned);

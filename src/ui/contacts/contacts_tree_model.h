@@ -20,6 +20,7 @@ enum class ContactsTreeNodeKind {
     Department = 2,
     Member = 3,
     Notice = 4,
+    LoadMore = 5,
 };
 
 enum class ContactsGroupKind {
@@ -141,12 +142,13 @@ public:
     void setDeptMembers(
         const QString &deptId,
         std::vector<ContactsTreeMemberItem> members,
-        bool restricted);
+        bool restricted,
+        bool hasMore = false,
+        bool loadingMore = false);
     void updatePresences(const QHash<QString, OpenMeeting::PresenceStatus> &updates);
 
     QModelIndex indexForDeptId(const QString &deptId) const;
     QModelIndex indexForUserId(const QString &userId) const;
-    QStringList ancestorDeptIds(const QString &deptId) const;
     QStringList loadedMemberUserIds() const;
     bool hasDepartments() const { return !_deptNodeMap.isEmpty(); }
     bool isDeptLoaded(const QString &deptId) const;
@@ -168,6 +170,7 @@ private:
 
         // Department-specific lazy-load state
         int subDeptCount = 0;
+        qint64 descendantMemberCount = -1;
         bool membersLoaded = false;
         bool membersLoading = false;
         int onlineMemberCount = 0;

@@ -11,7 +11,9 @@
 #include <vector>
 #include <asio.hpp>
 #include "api/peer_connection_interface.h"
+#include "api/video_codecs/h264_profile_level_id.h"
 #include "api/video_codecs/video_encoder_factory.h"
+#include "media/screen_share_quality.h"
 #include "rtc_base/thread.h"
 #include "audio_playout_device_selection.h"
 #if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
@@ -83,7 +85,19 @@ private:
 
 std::unique_ptr<webrtc::VideoEncoderFactory> CreateVideoEncoderFactory();
 std::unique_ptr<webrtc::VideoDecoderFactory> CreateVideoDecoderFactory();
-bool IsHardwareH264FormatSupported(const webrtc::SdpVideoFormat& format);
+bool IsHardwareH264FormatSupported(const webrtc::SdpVideoFormat& format,
+    bool screenshare = false);
+// Advertised OpenH264 software send level: Level 5.0 for screen share
+// (1440p@30) and Level 4.0 for camera (1080p@30).
+std::optional<webrtc::H264Level> SoftwareH264SendLevel(bool screenshare = false);
+bool IsSoftwareH264FormatSupported(const webrtc::SdpVideoFormat& format,
+    bool screenshare = false);
+ScreenShareQualityConstraint EvaluateH264ScreenShareConstraint(
+    webrtc::H264Level level, int fps, ScreenShareConstraintReason reason);
+ScreenShareQualityConstraint EvaluateH265ScreenShareConstraint(
+    std::uint8_t level, int fps);
+ScreenShareQualityConstraint RecomputeScreenShareConstraintForFps(
+    const ScreenShareQualityConstraint& active, int fps);
 std::unique_ptr<webrtc::VideoEncoderFactory::EncoderSelectorInterface>
 CreateAutoHardwareH264EncoderSelector(bool allow_vp8_fallback);
 // Process-wide creation preference. Existing encoder sessions keep their backend.
@@ -107,6 +121,11 @@ struct VideoEncoderCapabilities {
 
 // Reads the current snapshot without running or waiting for a hardware probe.
 VideoEncoderCapabilities GetVideoEncoderCapabilities();
+bool IsHardwareH264FormatSupportedForPreference(
+    const webrtc::SdpVideoFormat& format,
+    const std::string& preference,
+    const VideoEncoderCapabilities& capabilities,
+    bool screenshare = false);
 // Run from a background worker; vendor initialization may block. Windows uses
 // the original once-only probe; Linux commits one snapshot per invalidation.
 // Availability proves initialization/cleanup, not successful frame encoding.

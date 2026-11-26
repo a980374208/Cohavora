@@ -640,7 +640,7 @@ void DShowVideoCapture::OnRawFrameReceived(double sample_time, const uint8_t* bu
         } else {
             return;
         }
-        frame = VideoFrame(std::move(nv12_buffer));
+        frame = VideoFrame::fromPooledNV12(std::move(nv12_buffer));
     }
 
     VideoCaptureOptions options;

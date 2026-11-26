@@ -596,7 +596,8 @@ AgentCoordinator::AgentCoordinator(
 	loadProfileFromSettings();
 	_currentAccountKey = AgentSessionStore::accountScopeKey(
 		_sessionManager.isLoggedIn(),
-		_sessionManager.userId());
+		_sessionManager.userId(),
+		_sessionManager.serverBaseUrl());
 	loadAccountSessionsFromDisk();
 
 	connect(&_sessionManager, &SessionManager::authenticationReset,
@@ -4312,7 +4313,8 @@ void AgentCoordinator::onAuthSessionChanged() {
 
 	_currentAccountKey = AgentSessionStore::accountScopeKey(
 		_sessionManager.isLoggedIn(),
-		_sessionManager.userId());
+		_sessionManager.userId(),
+		_sessionManager.serverBaseUrl());
 	loadAccountSessionsFromDisk();
 	emit historyCleared();
 	emit sessionsChanged();

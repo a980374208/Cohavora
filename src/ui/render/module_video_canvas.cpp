@@ -2,6 +2,7 @@
 #include "video_surface_input.h"
 #include "render/canvas_render_timing.h"
 #include "render/api/render_backend_dx11_native.h"
+#include "render/api/render_backend_dx11_texture.h"
 #include "render/api/render_backend_module_info.h"
 #include <QtGui/QWindow>
 #include <QtGui/QResizeEvent>
@@ -15,6 +16,7 @@
 #include <set>
 #include <utility>
 #if defined(Q_OS_WIN)
+#include "render/native_screen_preview_win.h"
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -45,6 +47,26 @@ uint32_t ModuleVersion(BackendDevice& device) {
         sizeof(info), &info) == LK_RENDER_OK && info.struct_size == sizeof(info) &&
         info.abi_version == LK_RENDER_ABI_V1 && !info.reserved ? info.module_version : 0;
 }
+lk_render_result UploadVideoFrame(BackendDevice& device, lk_render_resource_id id,
+        const VideoRenderFrame& frame, [[maybe_unused]] const lk_render_dx11_texture_api& api) {
+#if defined(Q_OS_WIN)
+    if (const auto& native = frame.nativePreview()) {
+        if (api.import_nv12) {
+            lk_render_dx11_retirement ticket{};
+            const auto result = api.import_nv12(api.device, id, &native->view(), &ticket);
+            if (result == LK_RENDER_OK) {
+                native->RecordRead(ticket);
+                return ticket.fence && ticket.value ? LK_RENDER_OK : LK_RENDER_FATAL;
+            }
+            if (result != LK_RENDER_UNSUPPORTED) return result;
+        }
+        const auto mapped = native->ReadPixels();
+        return mapped ? device.Upload(id, mapped->view()) : LK_RENDER_FATAL;
+    }
+#endif
+    return device.Upload(id, frame.view());
+}
+
 QString Dx11DriverDescription(BackendDevice& device) {
 #if defined(Q_OS_WIN)
     lk_render_dx11_native_v1 native{};
@@ -104,6 +126,13 @@ struct ModuleVideoCanvas::Worker {
             if (!device) {
                 failure.store(Failure(result, true));
             } else {
+                lk_render_dx11_texture_api texture_api{};
+#if defined(Q_OS_WIN)
+                if (device->QueryExtension(LK_RENDER_EXT_DX11_TEXTURE, LK_RENDER_DX11_TEXTURE_V1,
+                        sizeof(texture_api), &texture_api) != LK_RENDER_OK ||
+                    texture_api.struct_size != sizeof(texture_api) || texture_api.reserved || !texture_api.device)
+                    texture_api = {};
+#endif
                 const auto description = Dx11DriverDescription(*device);
                 const auto version = ModuleVersion(*device);
                 { std::lock_guard lock(mutex); driver = description; moduleVersion = version; }
@@ -137,8 +166,8 @@ struct ModuleVideoCanvas::Worker {
                             it->second.image.cacheKey() == resource.image.cacheKey()) continue;
                         if (resource.frame) {
                             const auto upload_started_at = std::chrono::steady_clock::now();
-                            result = device->Upload(resource.id, resource.frame->view());
-                            resource.frame->NotifyRenderStage(
+                            result = UploadVideoFrame(*device, resource.id, *resource.frame->pixels, texture_api);
+                            resource.frame->pixels->NotifyRenderStage(
                                 "dx11_upload_cpu_submit",
                                 std::chrono::duration_cast<std::chrono::microseconds>(
                                     std::chrono::steady_clock::now() - upload_started_at));
@@ -153,6 +182,7 @@ struct ModuleVideoCanvas::Worker {
                             result = device->Upload(resource.id, view, true);
                         }
                         if (result != LK_RENDER_OK) break;
+                        if (resource.frame) resource.frame->pixels.reset();
                         uploaded[resource.id.value] = resource;
                     }
                     if (stop.load()) break;
@@ -179,9 +209,9 @@ struct ModuleVideoCanvas::Worker {
                     const auto submitted_at = std::chrono::steady_clock::now();
                     CanvasRenderTimingBatch canvas_timing;
                     for (const auto& resource : scene->resources) {
-                        if (resource.frame && submitted_resources.contains(resource.id.value)) {
-                            canvas_timing.Add(resource.frame->renderMetadata());
-                            resource.frame->NotifyRendered(
+                        if (resource.frame && resource.frame->metadata && submitted_resources.contains(resource.id.value)) {
+                            canvas_timing.Add(*resource.frame->metadata);
+                            resource.frame->metadata->NotifyRendered(
                                 scene->measurement_point.c_str(), submitted_at);
                         }
                     }
@@ -356,7 +386,7 @@ void ModuleVideoCanvas::submitFrame(const std::string& key, VideoRenderFrame::Pt
     }
     auto& video = videos_[key];
     if (!video.id.value) video.id = NewId();
-    video.frame = std::move(frame);
+    video.frame = std::make_shared<CanvasFrame>(std::move(frame));
 }
 void ModuleVideoCanvas::removeFrame(const std::string& key) { videos_.erase(key); }
 void ModuleVideoCanvas::removeDecorationTexture(const std::string& key) { overlays_.erase(key); }
@@ -364,8 +394,7 @@ void ModuleVideoCanvas::clearBackend() { videos_.clear(); overlays_.clear(); bui
 VideoFrameGeometry ModuleVideoCanvas::frameGeometry(const std::string& key) const {
     const auto it = videos_.find(key);
     if (it == videos_.end() || !it->second.frame) return {};
-    const auto& frame = it->second.frame->view();
-    return {int(frame.width), int(frame.height), frame.rotation_degrees, true};
+    return it->second.frame->geometry;
 }
 bool ModuleVideoCanvas::beginFrame(QSize& pixels) {
     if (failed_) return false;

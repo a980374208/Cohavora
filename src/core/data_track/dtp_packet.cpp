@@ -1,6 +1,7 @@
 #include "data_track/dtp_packet.h"
 
 #include <algorithm>
+#include <limits>
 #include <random>
 #include <sstream>
 
@@ -326,6 +327,17 @@ DtpFrameMarker DtpPacketizer::MarkerForChunk(size_t index, size_t packet_count) 
     return DtpFrameMarker::Inter;
 }
 
+size_t DtpPacketizer::MaxFramePayloadBytes(const DtpExtensions& extensions, size_t mtu_size) noexcept {
+    DtpHeader header;
+    header.extensions = extensions;
+    const size_t header_len = header.SerializedLength();
+    if (mtu_size <= header_len) return 0;
+    const size_t payload_per_packet = mtu_size - header_len;
+    constexpr size_t max_size = (std::numeric_limits<size_t>::max)();
+    return payload_per_packet > max_size / kMaxPacketsPerFrame
+        ? max_size : payload_per_packet * kMaxPacketsPerFrame;
+}
+
 bool DtpPacketizer::Packetize(const uint8_t* data,
                               size_t size,
                               const DtpExtensions& extensions,
@@ -350,7 +362,11 @@ bool DtpPacketizer::Packetize(const uint8_t* data,
     }
 
     const size_t max_payload_size = mtu_size_ - header_len;
-    const size_t packet_count = (size + max_payload_size - 1) / max_payload_size;
+    const size_t packet_count = 1 + (size - 1) / max_payload_size;
+    if (packet_count > kMaxPacketsPerFrame) {
+        if (error) *error = "DTP frame exceeds the fragment limit";
+        return false;
+    }
     const uint16_t frame_num = next_frame_number_++;
     const uint32_t ts = clock_.Now();
 

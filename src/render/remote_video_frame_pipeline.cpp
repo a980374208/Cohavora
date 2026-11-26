@@ -7,11 +7,16 @@ namespace {
 class ObservedInput final : public FrameInput {
 public:
     ObservedInput(RetainedVideoFrame::Ptr input, std::function<bool()> valid,
-                  std::shared_ptr<telemetry::VideoActivityProbe> probe)
-        : input_(std::move(input)), valid_(std::move(valid)), probe_(std::move(probe)) {}
+                  std::shared_ptr<telemetry::VideoActivityProbe> probe, std::shared_ptr<size_t> rendered_count)
+        : input_(std::move(input)), valid_(std::move(valid)), probe_(std::move(probe)),
+          rendered_count_(std::move(rendered_count)) {}
     size_t RetainedBytes() const noexcept override { return input_->RetainedBytes(); }
     OwnedI420Frame::Ptr Materialize() const override {
         if (valid_ && !valid_()) return {};
+        if (auto frame = RetainedVideoFrame::TryShareForRender(input_, rendered_count_)) {
+            probe_->delivered_frame_count.fetch_add(1, std::memory_order_relaxed);
+            return frame;
+        }
         probe_->copy_attempts.fetch_add(1, std::memory_order_relaxed);
         auto frame = input_->Materialize();
         if (!frame) probe_->copy_failures.fetch_add(1, std::memory_order_relaxed);
@@ -26,6 +31,7 @@ private:
     RetainedVideoFrame::Ptr input_;
     std::function<bool()> valid_;
     std::shared_ptr<telemetry::VideoActivityProbe> probe_;
+    std::shared_ptr<size_t> rendered_count_;
 };
 }
 RemoteVideoFrameConsumer::~RemoteVideoFrameConsumer() { Retire(); }
@@ -92,7 +98,7 @@ bool RemoteVideoFrameEndpoint::Offer(const webrtc::VideoFrame& frame, RenderFram
     const auto valid = valid_;
     auto input = std::make_shared<ObservedInput>(std::move(retained), [active, valid] {
         return active->load(std::memory_order_acquire) && (!valid || valid());
-    }, probe);
+    }, probe, rendered_count_);
     const auto result = core->Offer(binding_, input, sequence_.fetch_add(1, std::memory_order_relaxed) + 1);
     if (result == LatestVideoFrameCore::OfferResult::Closed ||
         result == LatestVideoFrameCore::OfferResult::InvalidBinding) {

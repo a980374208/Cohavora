@@ -989,6 +989,7 @@ constexpr auto kCloseBudget = std::chrono::milliseconds(100);
 constexpr wchar_t kFrameIdProperty[] = L"PTS";
 
 std::atomic<std::uint64_t> g_dx11_native_frames_submitted{0};
+std::atomic<std::uint64_t> g_dx11_direct_frames_submitted{0};
 std::atomic<std::uint64_t> g_host_frames_submitted{0};
 std::atomic<std::uint64_t> g_simulcast_gpu_scales{0};
 std::atomic<std::uint64_t> g_cross_device_shared_opens{0};
@@ -1701,9 +1702,11 @@ private:
 // submitted via CreateSurfaceFromDX11Native, matching OBS texture-amf.cpp).
 struct InputSlot final : AMFSurfaceObserver {
     void LK_AMF_STD_CALL OnSurfaceDataRelease(AMFSurface*) override {
+        capture_lease.reset();
         available.store(true, std::memory_order_release);
     }
     std::atomic<bool> available{true};
+    std::shared_ptr<const D3d11Nv12FrameBuffer> capture_lease;
     std::vector<std::uint8_t> pixels;
     ComPtr<ID3D11Texture2D> dx11_texture;
 };
@@ -1843,9 +1846,8 @@ public:
         return OpenInternal(config, /*preserve_external_device=*/static_cast<bool>(external_device_));
     }
 
-    // Phase 2 GPU Native DX11 path: copies the GPU NV12 texture into a bounded
-    // encoder-owned DX11 NV12 texture slot and submits via
-    // CreateSurfaceFromDX11Native without CPU readback or host upload.
+    // An idle capture-pool lease on the same device can be submitted directly.
+    // Incompatible inputs and busy pools use the encoder-owned copy path.
     Status EncodeDx11Native(const D3d11Nv12FrameBuffer& gpu_frame,
                             std::uint64_t frame_id,
                             bool force_key_frame,
@@ -1913,6 +1915,30 @@ public:
         InputSlot* slot = AcquireSlot(deadline);
         if (!slot) {
             return Abort(Status::kTimeout, "AMF input surfaces not retired");
+        }
+        if (gpu_frame.device() == session_.device() && !direct_input_rejected_) {
+            slot->capture_lease = gpu_frame.TryLeaseForEncoder();
+            if (slot->capture_lease) {
+                slot->available.store(false, std::memory_order_release);
+                result = session_.context()->CreateSurfaceFromDX11Native(
+                    gpu_frame.texture(), &input_, slot);
+                if (result == AMF_OK && input_) {
+                    bool rejected = false;
+                    const auto status = SubmitAndCollectOutput(frame_id, force_key_frame, deadline, packet, &rejected);
+                    if (!rejected) return status;
+                }
+                direct_input_rejected_ = true;
+                if (input_) {
+                    // No input was accepted. Retire this observer before copying into
+                    // an available encoder slot and retry with the very same PTS.
+                    input_.Release();
+                    slot = AcquireSlot(deadline);
+                    if (!slot) return Abort(Status::kTimeout, "AMF direct surface not retired");
+                } else {
+                    slot->capture_lease.reset();
+                    slot->available.store(true, std::memory_order_release);
+                }
+            }
         }
         if (!slot->dx11_texture) {
             return Fail(Status::kUnsupported,
@@ -2130,7 +2156,8 @@ private:
     Status SubmitAndCollectOutput(std::uint64_t frame_id,
                                   bool force_key_frame,
                                   Clock::time_point deadline,
-                                  Packet* packet) {
+                                  Packet* packet,
+                                  bool* direct_rejected = nullptr) {
         const bool request_idr = force_key_frame || need_idr_;
         input_->SetPts(next_pts_);
         input_->SetDuration(kAmfSecond / config_.framerate_fps);
@@ -2144,7 +2171,17 @@ private:
         do {
             result = session_.encoder()->SubmitInput(input_);
             if (result == AMF_OK || result == AMF_NEED_MORE_INPUT) {
+                if (direct_rejected) {
+                    g_dx11_native_frames_submitted.fetch_add(1, std::memory_order_relaxed);
+                    g_dx11_direct_frames_submitted.fetch_add(1, std::memory_order_relaxed);
+                }
                 break;
+            }
+            if (direct_rejected && (result == AMF_INVALID_ARG || result == AMF_INVALID_FORMAT ||
+                result == AMF_SURFACE_FORMAT_NOT_SUPPORTED || result == AMF_SURFACE_MUST_BE_SHARED ||
+                result == AMF_NOT_SUPPORTED)) {
+                *direct_rejected = true;
+                return Status::kUnsupported;
             }
             if (result != AMF_INPUT_FULL) {
                 return Abort(Status::kError, AmfFailure("SubmitInput", result));
@@ -2643,6 +2680,7 @@ private:
 #endif
 
     void AllocateInputAndLog() {
+        direct_input_rejected_ = false;
         stride_ = (config_.width + 15) & ~15;
         const std::size_t luma_bytes =
             static_cast<std::size_t>(stride_) * config_.height;
@@ -2691,6 +2729,7 @@ private:
     const Codec codec_;
     Config config_;
     AmfCapability capability_;
+    bool direct_input_rejected_ = false;
     std::unique_ptr<std::array<InputSlot, kInputSlots>> slots_ =
         std::make_unique<std::array<InputSlot, kInputSlots>>();
     std::array<SharedTextureCacheEntry, 8> shared_cache_{};
@@ -3377,6 +3416,7 @@ D3d11AmfEncoderDiagnostics GetD3d11AmfEncoderDiagnostics() noexcept {
     D3d11AmfEncoderDiagnostics d;
     d.dx11_native_frames_submitted =
         g_dx11_native_frames_submitted.load(std::memory_order_relaxed);
+    d.dx11_direct_frames_submitted = g_dx11_direct_frames_submitted.load(std::memory_order_relaxed);
     d.host_frames_submitted =
         g_host_frames_submitted.load(std::memory_order_relaxed);
     d.simulcast_gpu_scales =
@@ -3388,6 +3428,7 @@ D3d11AmfEncoderDiagnostics GetD3d11AmfEncoderDiagnostics() noexcept {
 
 void ResetD3d11AmfEncoderDiagnostics() noexcept {
     g_dx11_native_frames_submitted.store(0, std::memory_order_relaxed);
+    g_dx11_direct_frames_submitted.store(0, std::memory_order_relaxed);
     g_host_frames_submitted.store(0, std::memory_order_relaxed);
     g_simulcast_gpu_scales.store(0, std::memory_order_relaxed);
     g_cross_device_shared_opens.store(0, std::memory_order_relaxed);

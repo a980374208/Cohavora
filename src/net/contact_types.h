@@ -80,6 +80,7 @@ struct OrgDepartment {
     int sortOrder = 0;
     QString memberVisibility; // ""=inherit, "all", "own_dept"
     qint64 version = 0;
+    qint64 descendantMemberCount = -1;
 };
 
 struct OrgEmployeeRecord {

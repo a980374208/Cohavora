@@ -1,6 +1,7 @@
 #include "src/core/contact_snapshot_store.h"
 
-#include <QtCore/QCryptographicHash>
+#include "src/core/service_account_scope.h"
+
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
@@ -58,13 +59,8 @@ QString ContactSnapshotStore::resolveBaseDirectory(const QSettings &settings) {
     return QDir(appData).filePath(QStringLiteral("contacts_cache"));
 }
 
-QString ContactSnapshotStore::accountScopeKey(bool loggedIn, const QString &userId) {
-    const QString trimmed = userId.trimmed();
-    if (!loggedIn || trimmed.isEmpty()) {
-        return QStringLiteral("anonymous");
-    }
-    const QByteArray digest = QCryptographicHash::hash(trimmed.toUtf8(), QCryptographicHash::Sha256).toHex();
-    return QStringLiteral("acct_") + QString::fromLatin1(digest.left(24));
+QString ContactSnapshotStore::accountScopeKey(bool loggedIn, const QString &userId, const QString &serviceUrl) {
+    return localServiceAccountScopeKey(loggedIn, userId, serviceUrl);
 }
 
 QString ContactSnapshotStore::snapshotFilePath(const QString &accountKey) const {

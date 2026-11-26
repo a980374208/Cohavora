@@ -48,6 +48,7 @@ public:
     livekit::FloatingStripViewport viewport() const;
     bool viewing() const;
     bool usesGpu() const { return _gpu; }
+    bool usesDx11() const;
     bool isCollapsed() const { return _collapsed; }
     bool isAlwaysOnTop() const { return _onTop; }
     bool restoredGeometry() const { return _restoredGeometry; }

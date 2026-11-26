@@ -1,7 +1,8 @@
 #include "src/agent/agent_session_store.h"
 
+#include "src/core/service_account_scope.h"
+
 #include <QtCore/QCoreApplication>
-#include <QtCore/QCryptographicHash>
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
@@ -366,15 +367,8 @@ QString AgentSessionStore::resolveBaseDirectory(const QSettings &settings) {
 	return QDir(appData).filePath(QStringLiteral("copilot_sessions"));
 }
 
-QString AgentSessionStore::accountScopeKey(bool loggedIn, const QString &userId) {
-	const QString trimmedId = userId.trimmed();
-	if (!loggedIn || trimmedId.isEmpty()) {
-		return QStringLiteral("anonymous");
-	}
-	const QByteArray digest = QCryptographicHash::hash(
-		trimmedId.toUtf8(),
-		QCryptographicHash::Sha256).toHex();
-	return QStringLiteral("acct_") + QString::fromLatin1(digest.left(24));
+QString AgentSessionStore::accountScopeKey(bool loggedIn, const QString &userId, const QString &serviceUrl) {
+	return localServiceAccountScopeKey(loggedIn, userId, serviceUrl);
 }
 
 QString AgentSessionStore::deriveSessionTitle(const QVector<AgentChatMessage> &messages) {

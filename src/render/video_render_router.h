@@ -10,7 +10,7 @@
 #include <string>
 #include <unordered_map>
 
-#include "render/owned_i420_frame.h"
+#include "render/video_render_frame.h"
 #include "../core/video_capacity.h"
 
 namespace livekit::render {
@@ -20,6 +20,8 @@ namespace livekit::render {
 // backend consumes at most one frame per track on its render tick.
 class VideoRenderRouter final {
 public:
+    enum class PreviewTarget { Cpu, Dx11 };
+    using PreviewProducer = std::function<VideoRenderFrame::Ptr(PreviewTarget)>;
     using LazyFrameProducer = std::function<OwnedI420Frame::Ptr()>;
 
     struct Statistics {
@@ -45,6 +47,9 @@ public:
     // previews retain at most the latest pending input, without materializing it.
     // Admission is bounded; false means this preview frame should be dropped.
     bool SubmitLazy(const std::string& track_id, uint64_t generation, LazyFrameProducer producer);
+    bool SubmitPreview(const std::string&, uint64_t, VideoRenderFrame::Ptr);
+    bool SubmitLazyPreview(const std::string&, uint64_t, PreviewProducer);
+    VideoRenderFrame::Ptr TakePreview(const std::string&, uint64_t, PreviewTarget);
     // Bound submissions are used by VideoRenderSession. Registering a new
     // binding atomically invalidates frames from a replaced Track with the
     // same SID, including callbacks already in flight during a reconnect.
@@ -66,12 +71,20 @@ public:
     Statistics statistics() const noexcept;
 
 private:
+    struct ReadyFrame {
+        OwnedI420Frame::Ptr i420;
+        VideoRenderFrame::Ptr render;
+        explicit operator bool() const noexcept { return i420 || render; }
+    };
+    bool SubmitReady(const std::string&, uint64_t, ReadyFrame);
+    ReadyFrame TakeReady(const std::string&, uint64_t, PreviewTarget);
     struct LatestFrameSlot {
         std::mutex mutex;
         std::condition_variable changed;
-        OwnedI420Frame::Ptr frame;
-        std::unique_ptr<LazyFrameProducer> lazy_producer;
-        std::unique_ptr<LazyFrameProducer> retired_producer;
+        ReadyFrame frame;
+        PreviewTarget target = PreviewTarget::Cpu;
+        std::unique_ptr<PreviewProducer> lazy_producer;
+        std::unique_ptr<PreviewProducer> retired_producer;
         uint64_t binding_generation = 0;
         uint64_t epoch = 0;
         bool closed = false;

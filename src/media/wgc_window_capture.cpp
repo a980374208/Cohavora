@@ -116,7 +116,7 @@ public:
                     texture.get(),
                     width,
                     height,
-                    false);
+                    /*populate_cpu_mirror=*/false, /*prepare_nv12=*/true);
                 texture = nullptr;
                 access = nullptr;
                 frame.Close();
@@ -283,8 +283,8 @@ private:
 };
 
 // Project-owned DXGI Output Duplication GPU capturer for full-screen capture.
-// Copies the desktop texture on the GPU into a bounded 2-slot GPU texture pool
-// and releases the DXGI desktop frame immediately without staging CPU readback.
+// Convert the acquired surface while the duplication lease is valid. The
+// delivered snapshot can outlive ReleaseFrame and a duplication reset.
 class OwnedDxgiScreenGpuCapturer final : public webrtc::DesktopCapturer {
 public:
     explicit OwnedDxgiScreenGpuCapturer(std::function<void(DesktopCaptureProbePhase)> report)
@@ -348,11 +348,11 @@ public:
         }
 
         struct DuplFrameReleaser {
-            IDXGIOutputDuplication* dupl;
+            Microsoft::WRL::ComPtr<IDXGIOutputDuplication> dupl;
             ~DuplFrameReleaser() {
                 if (dupl) dupl->ReleaseFrame();
             }
-        } releaser{duplication_.Get()};
+        } releaser{duplication_};
 
         Microsoft::WRL::ComPtr<ID3D11Texture2D> desktop_tex;
         if (FAILED(resource.As(&desktop_tex)) || !desktop_tex) {
@@ -378,7 +378,7 @@ public:
             desktop_tex.Get(),
             width,
             height,
-            false);
+            /*populate_cpu_mirror=*/false, /*prepare_nv12=*/true);
         if (!gpu_shared) {
             std::unique_ptr<webrtc::SharedDesktopFrame> cached;
             if (latest_) {

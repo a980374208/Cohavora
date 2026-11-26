@@ -54,6 +54,7 @@ private:
     ContactListModel *_contactModel = nullptr;
     ContactItemDelegate *_contactDelegate = nullptr;
     QLabel *_summaryLabel = nullptr;
+    QPushButton *_loadMoreBtn = nullptr;
     QPushButton *_confirmBtn = nullptr;
 };
 

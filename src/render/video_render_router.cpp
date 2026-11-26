@@ -43,7 +43,8 @@ bool VideoRenderRouter::StartLazyWorker(const std::shared_ptr<LatestFrameSlot>& 
 
 void VideoRenderRouter::RunLazyWorker(std::shared_ptr<LatestFrameSlot> slot) {
     for (;;) {
-        std::unique_ptr<LazyFrameProducer> producer;
+        std::unique_ptr<PreviewProducer> producer;
+        PreviewTarget target = PreviewTarget::Cpu;
         uint64_t epoch = 0;
         bool materialize = false;
         {
@@ -59,15 +60,16 @@ void VideoRenderRouter::RunLazyWorker(std::shared_ptr<LatestFrameSlot> slot) {
                 producer = std::move(slot->lazy_producer);
                 materialize = !slot->closed && !slot->discard_pending && slot->requested;
                 epoch = slot->epoch;
+                target = slot->target;
                 slot->discard_pending = false;
             } else if (slot->closed) {
                 break;
             }
         }
 
-        OwnedI420Frame::Ptr frame;
+        VideoRenderFrame::Ptr frame;
         if (materialize) {
-            try { frame = (*producer)(); } catch (...) { /* Drop a failed preview. */ }
+            try { frame = (*producer)(target); } catch (...) { /* Drop a failed preview. */ }
         }
         // A producer can retain a D3D texture or perform slow final release.
         // Both materialization and retirement happen outside the metadata lock.
@@ -75,7 +77,7 @@ void VideoRenderRouter::RunLazyWorker(std::shared_ptr<LatestFrameSlot> slot) {
         if (frame) {
             std::lock_guard lock(slot->mutex);
             if (!slot->closed && slot->epoch == epoch && slot->requested && !slot->frame) {
-                slot->frame = std::move(frame);
+                slot->frame = {{}, std::move(frame)};
                 slot->requested = false;
             }
         }
@@ -88,7 +90,7 @@ void VideoRenderRouter::CloseSlot(const std::shared_ptr<LatestFrameSlot>& slot) 
         slot->closed = true;
         ++slot->epoch;
         slot->requested = false;
-        slot->frame.reset();
+        slot->frame = {};
     }
     // The self-contained worker owns its State until its active call and all
     // pending native owners retire. The UI never joins or destroys those owners.
@@ -98,6 +100,15 @@ void VideoRenderRouter::CloseSlot(const std::shared_ptr<LatestFrameSlot>& slot) 
 bool VideoRenderRouter::Submit(const std::string& track_id,
                                uint64_t generation,
                                OwnedI420Frame::Ptr frame) {
+    return SubmitReady(track_id, generation, {std::move(frame), {}});
+}
+
+bool VideoRenderRouter::SubmitPreview(const std::string& track_id, uint64_t generation,
+                                     VideoRenderFrame::Ptr frame) {
+    return SubmitReady(track_id, generation, {{}, std::move(frame)});
+}
+
+bool VideoRenderRouter::SubmitReady(const std::string& track_id, uint64_t generation, ReadyFrame frame) {
     if (track_id.empty() || !frame) {
         dropped_invalid_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -131,6 +142,14 @@ bool VideoRenderRouter::Submit(const std::string& track_id,
 bool VideoRenderRouter::SubmitLazy(const std::string& track_id,
                                    uint64_t generation,
                                    LazyFrameProducer producer) {
+    if (!producer) return SubmitLazyPreview(track_id, generation, {});
+    return SubmitLazyPreview(track_id, generation, [produce = std::move(producer)](PreviewTarget) {
+        return VideoRenderFrame::FromI420(produce());
+    });
+}
+
+bool VideoRenderRouter::SubmitLazyPreview(const std::string& track_id, uint64_t generation,
+                                         PreviewProducer producer) {
     if (track_id.empty() || !producer) {
         dropped_invalid_.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -152,7 +171,7 @@ bool VideoRenderRouter::SubmitLazy(const std::string& track_id,
             dropped_capacity_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
-        auto pending = std::make_unique<LazyFrameProducer>(std::move(producer));
+        auto pending = std::make_unique<PreviewProducer>(std::move(producer));
         if (slot->frame || slot->lazy_producer) {
             replaced_before_render_.fetch_add(1, std::memory_order_relaxed);
         }
@@ -206,7 +225,7 @@ bool VideoRenderRouter::RegisterTrackBinding(const std::string& track_id,
     ++slot->epoch;
     slot->requested = false;
     slot->discard_pending = true;
-    slot->frame.reset();
+    slot->frame = {};
     slot->binding_generation = binding_generation;
     slot->changed.notify_one();
     return true;
@@ -251,7 +270,7 @@ bool VideoRenderRouter::SubmitBound(const std::string& track_id,
     ++slot->epoch;
     slot->requested = false;
     slot->discard_pending = true;
-    slot->frame = std::move(frame);
+    slot->frame = {std::move(frame), {}};
     slot->changed.notify_one();
     submitted_.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -276,9 +295,21 @@ bool VideoRenderRouter::RemoveTrack(const std::string& track_id, uint64_t genera
 }
 
 OwnedI420Frame::Ptr VideoRenderRouter::TakeLatest(const std::string& track_id, uint64_t generation) {
+    auto ready = TakeReady(track_id, generation, PreviewTarget::Cpu);
+    return ready.render ? ready.render->ToOwnedI420() : std::move(ready.i420);
+}
+
+VideoRenderFrame::Ptr VideoRenderRouter::TakePreview(const std::string& track_id, uint64_t generation,
+                                                     PreviewTarget target) {
+    auto ready = TakeReady(track_id, generation, target);
+    return ready.render ? std::move(ready.render) : VideoRenderFrame::FromI420(std::move(ready.i420));
+}
+
+VideoRenderRouter::ReadyFrame VideoRenderRouter::TakeReady(const std::string& track_id, uint64_t generation,
+                                                         PreviewTarget target) {
     if (active_generation_.load(std::memory_order_acquire) != generation) {
         rejected_generation_.fetch_add(1, std::memory_order_relaxed);
-        return nullptr;
+        return {};
     }
 
     std::shared_ptr<LatestFrameSlot> slot;
@@ -286,20 +317,26 @@ OwnedI420Frame::Ptr VideoRenderRouter::TakeLatest(const std::string& track_id, u
         std::lock_guard<std::mutex> lock(tracks_mutex_);
         if (active_generation_.load(std::memory_order_relaxed) != generation) {
             rejected_generation_.fetch_add(1, std::memory_order_relaxed);
-            return nullptr;
+            return {};
         }
         const auto it = tracks_.find(track_id);
         if (it == tracks_.end()) {
-            return nullptr;
+            return {};
         }
         slot = it->second;
     }
 
-    OwnedI420Frame::Ptr frame;
+    ReadyFrame frame;
     {
         std::lock_guard<std::mutex> lock(slot->mutex);
-        if (slot->closed) return nullptr;
-        frame = std::exchange(slot->frame, nullptr);
+        if (slot->closed) return {};
+        if (slot->target != target) {
+            ++slot->epoch;
+            slot->target = target;
+        }
+        frame = std::exchange(slot->frame, ReadyFrame{});
+        if (target == PreviewTarget::Cpu && frame.render && frame.render->nativePreview())
+            frame = {}; // The new CPU request is serviced off the UI thread.
         // One outstanding credit, even when the UI polls during a slow Map.
         // No producer or capture owner ever reaches the consuming UI thread.
         slot->requested = true;
@@ -332,7 +369,7 @@ void VideoRenderRouter::DiscardLatest(const std::string& track_id, uint64_t gene
     ++slot->epoch;
     slot->requested = false;
     slot->discard_pending = true;
-    slot->frame.reset();
+    slot->frame = {};
     slot->changed.notify_one();
 }
 

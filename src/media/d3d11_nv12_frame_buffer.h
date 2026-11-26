@@ -5,6 +5,9 @@
 #include <memory>
 #include <mutex>
 #include <d3d11.h>
+#include <d3d11_4.h>
+#include <array>
+#include "render/api/render_backend_dx11_texture.h"
 #include <dxgi.h>
 #include <wrl/client.h>
 
@@ -19,6 +22,7 @@ namespace livekit {
 
 class D3d11Nv12TexturePool;
 class D3d11VideoProcessorConverter;
+class D3d11Nv12ScaleCache;
 
 constexpr std::uint32_t kD3d11TextureDesktopFrameCapturerIdBit = 0x80000000u;
 
@@ -35,6 +39,8 @@ public:
         std::uint64_t gpu_scales_performed = 0;
         std::uint64_t cpu_readbacks_performed = 0;
         std::uint64_t pool_exhausted_drops = 0;
+        std::uint64_t direct_capture_conversions = 0;
+        std::uint64_t native_preview_imports = 0;
     };
 
     static Diagnostics GetDiagnostics() noexcept;
@@ -73,6 +79,10 @@ public:
         int scaled_height) override;
 
     webrtc::scoped_refptr<webrtc::NV12BufferInterface> ToNV12() const;
+    // At most one encoder input can pin this pool until the surface retires.
+    std::shared_ptr<const D3d11Nv12FrameBuffer> TryLeaseForEncoder() const;
+    bool PreparePreview(lk_render_dx11_texture_view&) const;
+    void RecordPreviewRead(const lk_render_dx11_retirement&) const;
 
     ID3D11Device* device() const noexcept { return device_.Get(); }
     ID3D11Texture2D* texture() const noexcept { return texture_.Get(); }
@@ -99,6 +109,7 @@ private:
     const std::size_t slot_index_;
     const std::uint64_t pool_epoch_;
     std::shared_ptr<std::mutex> device_context_mutex_;
+    std::weak_ptr<D3d11Nv12ScaleCache> scale_cache_;
 
     mutable std::mutex readback_mutex_;
     mutable webrtc::scoped_refptr<webrtc::NV12Buffer> cached_nv12_;
@@ -136,6 +147,14 @@ private:
         int width = 0;
         int height = 0;
         bool in_use = false;
+        uint64_t allocation_id = 0;
+        struct Read {
+            Microsoft::WRL::ComPtr<ID3D11Fence> fence;
+            uint64_t value = 0;
+        };
+        std::array<Read, 3> readers{};
+        bool discard_texture = false;
+        bool preview_reserved = false;
     };
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
@@ -147,11 +166,20 @@ private:
     int width_ = 0;
     int height_ = 0;
     Slot slots_[kPoolSize];
+    std::atomic<bool> encoder_lease_active_{false};
+    std::mutex preview_sync_mutex_;
+    Microsoft::WRL::ComPtr<ID3D11Fence> preview_ready_;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> preview_context_;
+    HANDLE preview_ready_handle_ = nullptr;
+    uint64_t preview_sequence_ = 0;
+    bool preview_sync_unavailable_ = false;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging_;
     int staging_width_ = 0;
     int staging_height_ = 0;
+    std::shared_ptr<D3d11Nv12ScaleCache> scale_cache_;
 
     friend class D3d11Nv12FrameBuffer;
+    std::shared_ptr<D3d11Nv12ScaleCache> GetScaleCache(std::uint64_t epoch);
     bool ReadbackToNV12(ID3D11Texture2D* texture, int width, int height, webrtc::NV12Buffer* dst);
 };
 
@@ -174,7 +202,7 @@ public:
         int dst_width,
         int dst_height,
         int offset_x = 0,
-        int offset_y = 0);
+        int offset_y = 0, bool direct_input_only = false);
 
     void Clear() noexcept;
 
@@ -228,6 +256,7 @@ public:
         return device_context_mutex_;
     }
 
+    const webrtc::scoped_refptr<D3d11Nv12FrameBuffer>& preparedNV12() const noexcept { return prepared_; }
     bool cpu_populated() const noexcept {
         std::lock_guard<std::mutex> lock(cpu_mutex_);
         return cpu_populated_;
@@ -254,6 +283,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture_;
     const LUID adapter_luid_;
     std::shared_ptr<std::mutex> device_context_mutex_;
+    friend class D3d11DesktopFrameTexturePool;
+    webrtc::scoped_refptr<D3d11Nv12FrameBuffer> prepared_;
     mutable std::mutex cpu_mutex_;
     mutable std::unique_ptr<std::uint8_t[]> cpu_data_;
     mutable bool cpu_populated_ = false;
@@ -273,9 +304,10 @@ public:
         ID3D11Texture2D* source_texture,
         int width,
         int height,
-        bool populate_cpu_mirror = false);
+        bool populate_cpu_mirror = false, bool prepare_nv12 = false);
 
     void Clear() noexcept {
+        converter_.reset();
         for (auto& slot : slots_) {
             slot.frame.reset();
             slot.texture_frame = nullptr;
@@ -290,6 +322,7 @@ private:
         D3d11TextureDesktopFrame* texture_frame = nullptr;
     };
     Slot slots_[2];
+    std::unique_ptr<D3d11VideoProcessorConverter> converter_;
 };
 
 bool QueryD3d11AdapterLuid(ID3D11Device* device, LUID* out_luid) noexcept;

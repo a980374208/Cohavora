@@ -17,6 +17,7 @@ struct D3d11AmfEncoderDiagnostics {
     std::uint64_t host_frames_submitted = 0;
     std::uint64_t simulcast_gpu_scales = 0;
     std::uint64_t cross_device_shared_opens = 0;
+    std::uint64_t dx11_direct_frames_submitted = 0;
 };
 
 D3d11AmfEncoderDiagnostics GetD3d11AmfEncoderDiagnostics() noexcept;

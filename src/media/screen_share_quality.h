@@ -4,10 +4,34 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 namespace livekit {
 // Values are persisted as media/screenShareResolution; append new modes.
 enum class ScreenShareResolution { Auto = 0, P720 = 1, P1080 = 2, P1440 = 3, Native = 4, P2160 = 5 };
+
+enum class ScreenShareConstraintReason {
+    None = 0,
+    H264SoftwareLevel,
+    H264HardwareLevel,
+    H264NegotiatedLevel,
+    H265Level,
+};
+
+struct ScreenShareQualityConstraint {
+    ScreenShareConstraintReason reason = ScreenShareConstraintReason::None;
+    std::string codec; // normalized lowercase: "h264", "h265", "vp9", "vp8", "av1"
+    int level_idc = 0; // H.264 level*10 (e.g. 31, 40, 50) or H.265 level_idc (e.g. 93, 120, 150)
+    std::optional<ScreenShareResolution> max_resolution;
+    int max_width = 0;
+    int max_height = 0;
+
+    bool has_cap() const {
+        return reason != ScreenShareConstraintReason::None &&
+            max_resolution.has_value() && max_width > 0 && max_height > 0;
+    }
+    bool operator==(const ScreenShareQualityConstraint&) const = default;
+};
 
 struct ScreenShareQuality {
     ScreenShareResolution resolution = ScreenShareResolution::Auto;
@@ -25,6 +49,12 @@ struct ScreenShareFrameProfile {
     int width = 0, height = 0;
     uint64_t revision = 0;
     bool operator==(const ScreenShareFrameProfile&) const = default;
+};
+
+struct ResolvedScreenShareQuality {
+    ScreenShareFrameProfile profile;
+    ScreenShareQualityConstraint constraint;
+    bool operator==(const ResolvedScreenShareQuality&) const = default;
 };
 
 inline std::optional<ScreenShareFrameProfile> ResolveScreenShareProfile(

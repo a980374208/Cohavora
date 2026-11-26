@@ -398,6 +398,9 @@ livekit::FloatingStripViewport FloatingMemberListWindow::viewport() const {
     return result;
 }
 
+bool FloatingMemberListWindow::usesDx11() const {
+    return _gpu && _canvas && _canvas->usesDx11();
+}
 bool FloatingMemberListWindow::viewing() const {
     return isVisible() && !isMinimized() && !_collapsed &&
         _viewport && _viewport->width() > 0 && _viewport->height() > 0;

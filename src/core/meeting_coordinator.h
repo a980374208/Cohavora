@@ -279,6 +279,8 @@ public:
         return _screenShareAudioOutputs;
     }
     livekit::ScreenShareSnapshot screenShareSnapshot() const { return _screenShareSnapshot; }
+    livekit::ScreenShareQualityConstraint evaluateScreenShareCodecCeiling(int fps) const;
+    livekit::ScreenShareQualityConstraint evaluateActiveScreenShareCodecCeiling(int fps) const;
     void requestRemoteControl(const QString& identity, const QString& trackSid,
         std::shared_ptr<livekit::remote_control::Lease> frontendLease);
     void respondRemoteControl(const QString& requestId, bool allow);

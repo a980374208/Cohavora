@@ -52,6 +52,11 @@ public:
     bool hasOrganization() const { return !_departments.empty(); }
     const QString &orgMemberVisibility() const { return _orgMemberVisibility; }
     bool isDeptMembersRestricted(const QString &deptId) const { return _restrictedDeptIds.contains(deptId); }
+    bool hasDeptMembersResult(const QString &deptId) const {
+        return _deptMembers.contains(deptId) || isDeptMembersRestricted(deptId);
+    }
+    bool hasMoreDeptMembers(const QString &deptId) const { return _nextDeptMemberOffsets.contains(deptId); }
+    bool isDeptMembersLoading(const QString &deptId) const { return _deptMemberRequests.contains(deptId); }
     bool isLoading() const { return _loading; }
     const QString &lastError() const { return _lastError; }
 
@@ -65,14 +70,12 @@ public:
     bool refreshContacts(bool forceFull = false);
     bool refreshOrgTree(bool forceFull = false);
     bool loadDeptMembers(const QString &deptId, qint64 offset = 0, qint64 limit = 100);
+    bool ensureDeptMembersLoaded(const QString &deptId);
+    bool loadMoreDeptMembers(const QString &deptId);
     bool refreshRequests();
     bool searchDirectory(const QString &keyword, const QString &deptId = {}, const QString &scope = QStringLiteral("all"));
-    bool lookupDirectory(
-        const QString &keyword,
-        const QString &deptId,
-        const QString &scope,
-        qint64 limit,
-        ResultCallback<DirectorySearchResponse> callback);
+    bool lookupContactRequestRecipient(
+        const QString &identifier, ResultCallback<std::optional<UserProfile>> callback);
     void clearSearchResults();
 
     bool upsertRelation(const UpsertContactRelationRequest &request, ResultCallback<ContactRelation> callback = {});
@@ -124,6 +127,7 @@ private:
     void handleAccountChange(bool loggedIn);
     void persistSnapshot();
     void cacheProfile(const UserProfile &profile);
+    void cacheContactProfiles();
     void mergeContactRelation(const ContactRelation &rel);
     void removeContactRelationLocal(const QString &targetUserId);
     void recomputePendingCount();
@@ -137,6 +141,8 @@ private:
     std::vector<OrgDepartment> _departments;
     QHash<QString, std::vector<DeptMember>> _deptMembers;
     QSet<QString> _restrictedDeptIds;
+    QHash<QString, quint64> _deptMemberRequests;
+    QHash<QString, qint64> _nextDeptMemberOffsets;
     QString _orgMemberVisibility = QStringLiteral("all");
     std::vector<ContactRequest> _requests;
     std::vector<UserProfile> _searchResults;
@@ -153,6 +159,7 @@ private:
 
     quint64 _snapshotGeneration = 0;
     quint64 _orgTreeGeneration = 0;
+    quint64 _nextDeptMemberRequest = 0;
     quint64 _searchGeneration = 0;
     quint64 _requestsGeneration = 0;
 };

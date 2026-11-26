@@ -46,6 +46,7 @@ add_library(cohavora_meeting_widgets OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_live_dialog.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.h
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_details_dialog.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.h
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/diagnostic_qt_bridge.h
@@ -137,8 +138,16 @@ add_library(cohavora_meeting_window_ui OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/remote_control_key_mapping.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/camera_switch_completion_owner.h
     ${PROJECT_SOURCE_DIR}/src/ui/camera_switch_completion_owner.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/detail/meeting_room_helpers.h
+    ${PROJECT_SOURCE_DIR}/src/ui/video_tile_widget.h
+    ${PROJECT_SOURCE_DIR}/src/ui/video_tile_widget.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/room_top_bar_widget.h
+    ${PROJECT_SOURCE_DIR}/src/ui/room_top_bar_widget.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/room_bottom_bar_widget.h
+    ${PROJECT_SOURCE_DIR}/src/ui/room_bottom_bar_widget.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.h
-    ${PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.cpp)
+    ${PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/meeting_room_window_devices.cpp)
 cohavora_configure_meeting_ui_objects(cohavora_meeting_window_ui)
 target_compile_definitions(cohavora_meeting_window_ui PRIVATE
     COHAVORA_SHOW_CONSOLE_BUTTON=$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,1,0>)

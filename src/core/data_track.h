@@ -80,6 +80,7 @@ enum class LocalDataTrackTryPushErrorCode : uint32_t {
     QueueFull = 3,
     Internal = 4,
     EncryptionFailed = 5,
+    PayloadTooLarge = 6,
 };
 
 struct LocalDataTrackTryPushError {

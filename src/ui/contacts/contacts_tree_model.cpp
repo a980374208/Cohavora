@@ -1,5 +1,7 @@
 #include "src/ui/contacts/contacts_tree_model.h"
 
+#include <QCoreApplication>
+
 #include <algorithm>
 #include <utility>
 
@@ -278,6 +280,15 @@ QVariant OrgDirectoryTreeModel::data(const QModelIndex &index, int role) const {
         return static_cast<int>(ContactsGroupKind::None);
     case TreeRightTextRole:
         if (n->kind == ContactsTreeNodeKind::Department) {
+            if (n->descendantMemberCount >= 0) {
+                return QCoreApplication::translate("MeetingUI", "Members: %1").arg(n->descendantMemberCount);
+            }
+            if (n->depth == 0) {
+                return QCoreApplication::translate("MeetingUI", "Departments: %1").arg(n->subDeptCount);
+            }
+            if (n->subDeptCount > 0) {
+                return QCoreApplication::translate("MeetingUI", "Groups: %1").arg(n->subDeptCount);
+            }
             if (n->isRestricted) return _restrictedTag;
             if (n->membersLoaded) {
                 return QStringLiteral("%1/%2").arg(n->onlineMemberCount).arg(n->totalMemberCount);
@@ -309,7 +320,7 @@ Qt::ItemFlags OrgDirectoryTreeModel::flags(const QModelIndex &index) const {
     if (!index.isValid()) return Qt::NoItemFlags;
     const Node *n = static_cast<const Node *>(index.internalPointer());
     if (!n) return Qt::NoItemFlags;
-    if (n->kind == ContactsTreeNodeKind::Member) {
+    if (n->kind == ContactsTreeNodeKind::Member || n->kind == ContactsTreeNodeKind::LoadMore) {
         return Qt::ItemIsEnabled | Qt::ItemIsSelectable;
     }
     if (n->kind == ContactsTreeNodeKind::Department) {
@@ -379,6 +390,7 @@ void OrgDirectoryTreeModel::setDepartments(
             node->nodeId = d.deptId;
             node->title = d.name;
             node->sortOrder = d.sortOrder;
+            node->descendantMemberCount = d.descendantMemberCount;
             node->depth = depth;
             node->parent = parentNode;
             node->rowInParent = static_cast<int>(parentNode->children.size());
@@ -457,7 +469,9 @@ void OrgDirectoryTreeModel::setDeptLoading(const QString &deptId) {
 void OrgDirectoryTreeModel::setDeptMembers(
         const QString &deptId,
         std::vector<ContactsTreeMemberItem> members,
-        bool restricted) {
+        bool restricted,
+        bool hasMore,
+        bool loadingMore) {
     Node *deptNode = _deptNodeMap.value(deptId, nullptr);
     if (!deptNode) return;
 
@@ -491,12 +505,20 @@ void OrgDirectoryTreeModel::setDeptMembers(
             if (isOnlinePresence(m.presence)) ++online;
             tail.push_back(std::move(n));
         }
-    } else if (deptNode->subDeptCount == 0) {
+    } else if (deptNode->subDeptCount == 0 && !hasMore) {
         auto notice = std::make_unique<Node>();
         notice->kind = ContactsTreeNodeKind::Notice;
         notice->nodeId = QStringLiteral("__empty__:") + deptId;
         notice->title = _emptyText;
         tail.push_back(std::move(notice));
+    }
+    if (hasMore && !restricted) {
+        auto nextPage = std::make_unique<Node>();
+        nextPage->kind = loadingMore ? ContactsTreeNodeKind::Notice : ContactsTreeNodeKind::LoadMore;
+        nextPage->nodeId = deptId;
+        nextPage->title = loadingMore ? _loadingText
+            : QCoreApplication::translate("MeetingUI", "Load more members");
+        tail.push_back(std::move(nextPage));
     }
     deptNode->onlineMemberCount = online;
 
@@ -539,16 +561,6 @@ QModelIndex OrgDirectoryTreeModel::indexForUserId(const QString &userId) const {
     const auto it = _userNodeMap.constFind(userId);
     if (it == _userNodeMap.constEnd() || it.value().empty()) return {};
     return indexForNode(it.value().front());
-}
-
-QStringList OrgDirectoryTreeModel::ancestorDeptIds(const QString &deptId) const {
-    QStringList chain;
-    const Node *cur = _deptNodeMap.value(deptId, nullptr);
-    while (cur && cur->kind == ContactsTreeNodeKind::Department) {
-        chain.prepend(cur->nodeId);
-        cur = cur->parent;
-    }
-    return chain;
 }
 
 QStringList OrgDirectoryTreeModel::loadedMemberUserIds() const {

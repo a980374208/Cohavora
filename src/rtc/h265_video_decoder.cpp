@@ -1,4 +1,5 @@
 #include "h265_video_decoder.h"
+#include "retained_vp8_decoder.h"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -17,6 +18,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstddef>
@@ -35,6 +37,7 @@ extern "C" {
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/video_codecs/video_decoder.h"
 #include "common_video/h265/h265_sps_parser.h"
+#include "common_video/include/video_frame_buffer.h"
 #include "modules/video_coding/include/video_error_codes.h"
 #include "rtc_base/logging.h"
 
@@ -118,6 +121,9 @@ public:
         BIND_UTIL(avutil_version);
         BIND_UTIL(av_frame_alloc);
         BIND_UTIL(av_frame_free);
+        BIND_UTIL(av_frame_get_plane_buffer);
+        BIND_UTIL(av_buffer_ref);
+        BIND_UTIL(av_buffer_unref);
         BIND_UTIL(av_frame_unref);
         BIND_UTIL(av_strerror);
 #undef BIND_CODEC
@@ -153,6 +159,9 @@ public:
     DECLARE_API(avutil_version);
     DECLARE_API(av_frame_alloc);
     DECLARE_API(av_frame_free);
+    DECLARE_API(av_frame_get_plane_buffer);
+    DECLARE_API(av_buffer_ref);
+    DECLARE_API(av_buffer_unref);
     DECLARE_API(av_frame_unref);
     DECLARE_API(av_strerror);
 #undef DECLARE_API
@@ -255,6 +264,18 @@ size_t StartCodeLength(const uint8_t* data, size_t size, size_t offset) {
     if (data[offset + 2] == 1) return 3;
     return size - offset >= 4 && data[offset + 2] == 0 && data[offset + 3] == 1 ? 4 : 0;
 }
+
+// Keep pixel storage and its DLL deleters alive across decoder Release and resize.
+struct HevcPlaneOwner {
+    std::shared_ptr<const FfmpegApi> api;
+    std::shared_ptr<std::atomic<unsigned>> outstanding;
+    std::array<AVBufferRef*, 3> refs{};
+    ~HevcPlaneOwner() {
+        for (auto& ref : refs) if (ref) api->av_buffer_unref(&ref);
+        outstanding->fetch_sub(1, std::memory_order_relaxed);
+    }
+};
+} // namespace
 
 class H265VideoDecoder final : public webrtc::VideoDecoder {
 public:
@@ -493,6 +514,43 @@ private:
         return false;
     }
 
+    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> SharePixels() {
+        // Only this decoder sequence acquires slots. Render threads return them.
+        if (outstanding_->load(std::memory_order_relaxed) >= 3) return nullptr;
+        auto owner = std::make_shared<HevcPlaneOwner>();
+        owner->api = api_;
+        owner->outstanding = outstanding_;
+        outstanding_->fetch_add(1, std::memory_order_relaxed);
+        size_t bytes = 0;
+        for (int i = 0; i < 3; ++i) {
+            auto* ref = api_->av_frame_get_plane_buffer(frame_, i);
+            if (!ref || !ref->data) return nullptr;
+            const auto start = reinterpret_cast<uintptr_t>(ref->data);
+            const auto plane = reinterpret_cast<uintptr_t>(frame_->data[i]);
+            const int rows = i ? frame_->height / 2 : frame_->height;
+            const int columns = i ? frame_->width / 2 : frame_->width;
+            const uint64_t span = uint64_t(rows - 1) * frame_->linesize[i] + columns;
+            if (plane < start || plane - start > ref->size ||
+                span > ref->size - (plane - start)) return nullptr;
+            // Several planes can live in one AVBufferRef.
+            bool held = false;
+            for (int j = 0; j < i; ++j) {
+                if (owner->refs[j] && owner->refs[j]->buffer == ref->buffer &&
+                    owner->refs[j]->data == ref->data && owner->refs[j]->size == ref->size)
+                    held = true;
+            }
+            if (held) continue;
+            if (ref->size > std::numeric_limits<size_t>::max() - bytes) return nullptr;
+            owner->refs[i] = api_->av_buffer_ref(ref);
+            if (!owner->refs[i]) return nullptr;
+            bytes += ref->size;
+        }
+        auto buffer = webrtc::WrapI420Buffer(frame_->width, frame_->height,
+            frame_->data[0], frame_->linesize[0], frame_->data[1], frame_->linesize[1],
+            frame_->data[2], frame_->linesize[2], [owner = std::move(owner)] {});
+        return render::HevcFramePublisher::Publish(std::move(buffer), bytes);
+    }
+
     bool Deliver() {
         const auto found = pending_.find(frame_->pts);
         if (frame_->pts == AV_NOPTS_VALUE || found == pending_.end() || !callback_)
@@ -512,12 +570,15 @@ private:
             frame_->linesize[0] < frame_->width || frame_->linesize[1] < frame_->width / 2 ||
             frame_->linesize[2] < frame_->width / 2)
             return Recover("HEVC decoded planes or strides are invalid") == WEBRTC_VIDEO_CODEC_OK;
-        auto owned = webrtc::I420Buffer::Copy(frame_->width, frame_->height,
-            frame_->data[0], frame_->linesize[0], frame_->data[1], frame_->linesize[1],
-            frame_->data[2], frame_->linesize[2]);
+        auto owned = SharePixels();
+        if (!owned) {
+            owned = render::PublishOwnedDecodedI420(webrtc::I420Buffer::Copy(
+                frame_->width, frame_->height, frame_->data[0], frame_->linesize[0],
+                frame_->data[1], frame_->linesize[1], frame_->data[2], frame_->linesize[2]));
+        }
         if (!owned) return Recover("HEVC owned I420 allocation failed") == WEBRTC_VIDEO_CODEC_OK;
         auto output = webrtc::VideoFrame::Builder()
-            .set_video_frame_buffer(owned)
+            .set_video_frame_buffer(std::move(owned))
             .set_rtp_timestamp(metadata.rtp)
             .set_ntp_time_ms(metadata.ntp_ms)
             .set_presentation_timestamp(metadata.presentation)
@@ -528,7 +589,7 @@ private:
         pending_.erase(found);
         decoded_width_ = frame_->width;
         decoded_height_ = frame_->height;
-        // Output holds an independent refcounted I420 allocation. Decode and
+        // Output owns its CPU planes independently of the decoder. Decode and
         // its synchronous callback finish before Release can clear callback_.
         // Delayed output has no honest codec-only elapsed time, so leave it unset.
         callback_->Decoded(output, std::nullopt, std::nullopt);
@@ -537,6 +598,7 @@ private:
 
     const std::shared_ptr<const FfmpegApi> api_;
     const AVCodec* const codec_;
+    const std::shared_ptr<std::atomic<unsigned>> outstanding_ = std::make_shared<std::atomic<unsigned>>(0);
     AVCodecContext* context_ = nullptr;
     AVPacket* packet_ = nullptr;
     AVFrame* frame_ = nullptr;
@@ -548,7 +610,6 @@ private:
     bool configured_ = false, needs_keyframe_ = true, decoding_ = false;
     std::string error_;
 };
-}
 
 bool IsH265DecoderAvailable() {
     return DecoderRuntime().api != nullptr;

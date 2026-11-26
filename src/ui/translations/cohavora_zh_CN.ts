@@ -4369,6 +4369,10 @@ Do you confirm broadcasting captions to the room?</source>
         <translation>自动（优先硬件 H.264）</translation>
     </message>
     <message>
+        <source>Auto (prefer hardware H.264 / VP9)</source>
+        <translation>自动（优先硬件 H.264 / VP9）</translation>
+    </message>
+    <message>
         <source>This codec is unavailable in the current WebRTC package.</source>
         <translation>当前 WebRTC 包不支持此编解码器。</translation>
     </message>
@@ -4723,6 +4727,54 @@ Do you confirm broadcasting captions to the room?</source>
     <message>
         <source> — Quality state uncertain; stop sharing to recover</source>
         <translation> — 质量状态不确定，请停止共享后重试</translation>
+    </message>
+    <message>
+        <source>H.264 software encoder</source>
+        <translation>H.264 软编</translation>
+    </message>
+    <message>
+        <source>H.264 hardware encoder</source>
+        <translation>H.264 硬件编码</translation>
+    </message>
+    <message>
+        <source>H.264 negotiated session</source>
+        <translation>H.264 协商会话</translation>
+    </message>
+    <message>
+        <source>H.265 encoder</source>
+        <translation>H.265 编码器</translation>
+    </message>
+    <message>
+        <source>%1 (Level %2)</source>
+        <translation>%1（Level %2）</translation>
+    </message>
+    <message>
+        <source>%1 (capped at %2)</source>
+        <translation>%1（上限 %2）</translation>
+    </message>
+    <message>
+        <source>Current encoder (%1) supports up to %2 at this frame rate; selecting this option will apply %2.</source>
+        <translation>当前编码器（%1）在此帧率下最高支持 %2，选择该项后将按 %2 生效。</translation>
+    </message>
+    <message>
+        <source>Current encoder (%1) supports up to %2 at this frame rate. Actual sharing will be adjusted from %3 to %2.</source>
+        <translation>当前编码器（%1）在此帧率下最高支持 %2，实际共享将从 %3 调整为 %2。</translation>
+    </message>
+    <message>
+        <source>Current encoder (%1) supports up to %2 at this frame rate.</source>
+        <translation>当前编码器（%1）在此帧率下最高支持 %2。</translation>
+    </message>
+    <message>
+        <source> — Adjusted from %1 due to %2 limit</source>
+        <translation> — 受%2上限限制，已从 %1 调整</translation>
+    </message>
+    <message>
+        <source> — Adjusted from %1 to fit encoder limit</source>
+        <translation> — 受编码器上限限制，已从 %1 调整</translation>
+    </message>
+    <message>
+        <source>Currently active: %1 × %2, %3 FPS%4</source>
+        <translation>当前生效：%1 × %2，%3 帧/秒%4</translation>
     </message>
     <message>
         <source>Meeting Encryption</source>
@@ -7653,6 +7705,9 @@ Password: %6</source>
     <message><source>No answer (timed out).</source><translation>对方超时未接听。</translation></message>
     <message><source>No blocked contacts.</source><translation>暂无已屏蔽联系人。</translation></message>
     <message><source>No contact requests yet.</source><translation>暂无联系人申请。</translation></message>
+    <message><source>Departments: %1</source><translation>%1 个部门</translation></message>
+    <message><source>Groups: %1</source><translation>%1 个组</translation></message>
+    <message><source>Members: %1</source><translation>%1 人</translation></message>
     <message><source>No contacts yet. Search the directory or open Org Tree to add colleagues.</source><translation>暂无联系人，可搜索目录或从组织架构添加同事。</translation></message>
     <message><source>No matching user found.</source><translation>未找到匹配用户。</translation></message>
     <message><source>No matching users found.</source><translation>未找到匹配用户。</translation></message>
@@ -7660,6 +7715,7 @@ Password: %6</source>
     <message><source>Add External Contact...</source><translation>添加外部联系人…</translation></message>
     <message><source>Lead</source><translation>主管</translation></message>
     <message><source>Loading members...</source><translation>正在加载成员…</translation></message>
+    <message><source>Load more members</source><translation>加载更多成员</translation></message>
     <message><source>More actions</source><translation>更多操作</translation></message>
     <message><source>New Contact Group...</source><translation>新建联系人分组…</translation></message>
     <message><source>Own dept only</source><translation>仅本部门</translation></message>
@@ -7687,7 +7743,7 @@ Password: %6</source>
     <message><source>None selected</source><translation>未选择</translation></message>
     <message><source>Offline</source><translation>离线</translation></message>
     <message><source>Online</source><translation>在线</translation></message>
-    <message><source>Optional greeting message (organization colleagues are added immediately):</source><translation>附言（可选；同组织同事将直接添加）：</translation></message>
+    <message><source>Optional greeting message (the recipient must accept):</source><translation>附言（可选，需对方同意）：</translation></message>
     <message><source>Org Tree</source><translation>组织架构</translation></message>
     <message><source>Organization</source><translation>组织架构</translation></message>
     <message><source>Pending</source><translation>待处理</translation></message>
@@ -7848,7 +7904,7 @@ Greeting: &quot;%2&quot;</source><translation>查找“%1”并发送联系人�
     <message><source>Reordering contact group...</source><translation>正在调整联系人分组排序…</translation></message>
     <message><source>Searched contacts</source><translation>已搜索联系人</translation></message>
     <message><source>Searching contacts...</source><translation>正在搜索联系人…</translation></message>
-    <message><source>Send a contact request to %1 (organization colleagues are added immediately).</source><translation>向 %1 发送联系人申请（同组织同事将直接添加）。</translation></message>
+    <message><source>Send a contact request to %1. The recipient must accept.</source><translation>向 %1 发送联系人申请，需对方同意。</translation></message>
     <message><source>Send a contact request to %1.
 Greeting: &quot;%2&quot;</source><translation>向 %1 发送联系人申请。
 附言：“%2”</translation></message>

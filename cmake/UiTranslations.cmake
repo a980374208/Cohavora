@@ -119,6 +119,8 @@ function(livekit_add_ui_translations target)
     list(APPEND ui_translation_sources
         "${source_root}/src/app/main_meeting_app.cpp"
         "${source_root}/src/core/meeting_coordinator.cpp"
+        "${source_root}/src/core/meeting_coordinator_events.cpp"
+        "${source_root}/src/core/meeting_coordinator_media_transfer.cpp"
         "${source_root}/src/core/meeting_catalog_controller.cpp")
     file(GLOB ui_translation_catalogs CONFIGURE_DEPENDS
         "${source_root}/src/ui/translations/cohavora_*.ts")

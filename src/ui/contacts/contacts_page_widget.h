@@ -91,7 +91,6 @@ private:
     SidebarTab _sidebarTab = SidebarTab::Contacts;
     bool _showingRequests = false;
     bool _contactsExpandInitialized = false;
-    bool _orgExpandInitialized = false;
     QSet<QString> _expandedGroupIds;
     QSet<QString> _expandedDeptIds;
     QString _selectedUserId;

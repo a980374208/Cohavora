@@ -1,8 +1,10 @@
 #include "retained_vp8_decoder.h"
 #include "api/make_ref_counted.h"
+#include "api/video/i420_buffer.h"
 #include "api/video/video_frame_buffer.h"
 #include "api/video_codecs/video_decoder.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 
@@ -10,7 +12,8 @@ namespace livekit::render {
 namespace {
 struct Registry {
     std::mutex mutex;
-    std::unordered_map<const webrtc::VideoFrameBuffer*, size_t> buffers;
+    struct Entry { size_t bytes; bool vp8; };
+    std::unordered_map<const webrtc::VideoFrameBuffer*, Entry> buffers;
 };
 std::shared_ptr<Registry> RegistryOwner() {
     static const auto owner = std::make_shared<Registry>();
@@ -21,12 +24,12 @@ std::shared_ptr<Registry> RegistryOwner() {
 // WebRTC delivery queue without retaining any entry in a global strong cache.
 class CertifiedBuffer : public webrtc::I420BufferInterface {
 public:
-    explicit CertifiedBuffer(webrtc::scoped_refptr<webrtc::VideoFrameBuffer> input)
+    CertifiedBuffer(webrtc::scoped_refptr<webrtc::VideoFrameBuffer> input, bool vp8, size_t backing_bytes = 0)
         : input_(std::move(input)), registry_(RegistryOwner()) {
         const size_t bytes = size_t(StrideY()) * height() +
-            size_t(StrideU() + StrideV()) * ((height() + 1) / 2);
+            (size_t(StrideU()) + size_t(StrideV())) * ((height() + 1) / 2);
         std::lock_guard lock(registry_->mutex);
-        registry_->buffers.emplace(this, bytes);
+        registry_->buffers.emplace(this, Registry::Entry{std::max(bytes, backing_bytes), vp8});
     }
     ~CertifiedBuffer() override {
         std::lock_guard lock(registry_->mutex);
@@ -67,7 +70,7 @@ private:
         // No ToI420: format mismatch fails closed and follows the old path.
         const auto buffer = input.video_frame_buffer();
         if (buffer && buffer->type() == webrtc::VideoFrameBuffer::Type::kI420) {
-            frame.set_video_frame_buffer(webrtc::make_ref_counted<CertifiedBuffer>(buffer));
+            frame.set_video_frame_buffer(webrtc::make_ref_counted<CertifiedBuffer>(buffer, true));
         }
         return frame;
     }
@@ -99,6 +102,27 @@ std::optional<size_t> CertifiedVp8RetainedBytes(const webrtc::VideoFrameBuffer* 
     const auto registry = RegistryOwner();
     std::lock_guard lock(registry->mutex);
     const auto found = registry->buffers.find(buffer);
-    return found == registry->buffers.end() ? std::nullopt : std::optional<size_t>(found->second);
+    if (found == registry->buffers.end() || !found->second.vp8) return {};
+    return found->second.bytes;
+}
+
+webrtc::scoped_refptr<webrtc::VideoFrameBuffer> PublishOwnedDecodedI420(
+        webrtc::scoped_refptr<webrtc::I420Buffer> buffer) {
+    if (!buffer) return nullptr;
+    return webrtc::make_ref_counted<CertifiedBuffer>(std::move(buffer), false);
+}
+
+webrtc::scoped_refptr<webrtc::VideoFrameBuffer> HevcFramePublisher::Publish(
+        webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer, size_t backing_bytes) {
+    if (!buffer) return nullptr;
+    return webrtc::make_ref_counted<CertifiedBuffer>(std::move(buffer), false, backing_bytes);
+}
+
+std::optional<size_t> CertifiedDecodedI420Bytes(const webrtc::VideoFrameBuffer* buffer) {
+    const auto registry = RegistryOwner();
+    std::lock_guard lock(registry->mutex);
+    const auto found = registry->buffers.find(buffer);
+    if (found == registry->buffers.end()) return {};
+    return found->second.bytes;
 }
 }

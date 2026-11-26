@@ -3,11 +3,32 @@
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
 #include <utility>
 
 #include "api/video/i420_buffer.h"
 
 namespace livekit::render {
+namespace {
+struct RenderLeaseBudget {
+    std::mutex mutex;
+    size_t bytes = 0;
+};
+
+struct RenderLease {
+    std::shared_ptr<RenderLeaseBudget> budget;
+    std::shared_ptr<size_t> binding_count;
+    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer;
+    size_t bytes = 0;
+    ~RenderLease() {
+        if (!bytes) return;
+        buffer = nullptr;
+        std::lock_guard lock(budget->mutex);
+        budget->bytes -= bytes;
+        --*binding_count;
+    }
+};
+} // namespace
 
 CpuI420BufferProvenance::CpuI420BufferProvenance(
         webrtc::scoped_refptr<webrtc::I420Buffer> buffer,
@@ -68,16 +89,38 @@ RetainedVideoFrame::Ptr RetainedVideoFrame::TryRetain(
     // operation on an untrusted native or external decoder buffer.
     const auto buffer = frame.video_frame_buffer();
     if (!provenance) {
-        const auto bytes = CertifiedVp8RetainedBytes(buffer.get());
+        const auto bytes = CertifiedDecodedI420Bytes(buffer.get());
         return bytes ? Ptr(new RetainedVideoFrame(frame, std::move(metadata), *bytes)) : Ptr{};
     }
     if (!buffer || buffer.get() != provenance->buffer_.get()) return {};
     return Ptr(new RetainedVideoFrame(frame, std::move(metadata), provenance->retained_bytes(), provenance));
 }
 
+OwnedI420Frame::Ptr RetainedVideoFrame::TryShareForRender(
+        const Ptr& input, const std::shared_ptr<size_t>& binding_count) {
+    if (!input || !binding_count || !input->retained_bytes_) return {};
+    // A paused consumer may keep its last picture across reconnect. Bound both
+    // decoder pool occupancy per binding and pinned pixels across all rooms.
+    static const auto budget = std::make_shared<RenderLeaseBudget>();
+    constexpr size_t max_bytes = 128 * 1024 * 1024;
+    constexpr size_t max_per_binding = 3;
+    auto lease = std::make_shared<RenderLease>();
+    lease->budget = budget;
+    lease->binding_count = binding_count;
+    {
+        std::lock_guard lock(budget->mutex);
+        if (*binding_count >= max_per_binding || input->retained_bytes_ > max_bytes - budget->bytes)
+            return {};
+        lease->bytes = input->retained_bytes_;
+        budget->bytes += lease->bytes;
+        ++*binding_count;
+    }
+    lease->buffer = input->frame_.video_frame_buffer();
+    return OwnedI420Frame::Ptr(new OwnedI420Frame(input->frame_, input->metadata_, std::move(lease)));
+}
+
 OwnedI420Frame::Ptr RetainedVideoFrame::Materialize() const {
-    // The exact CPU allocation is established above. Its I420 conversion is
-    // trivial; OwnedI420Frame remains the only independently owned output.
+    // A consumer beyond its borrowing budget gets its own packed copy.
     return OwnedI420Frame::CopyFrom(frame_, metadata_);
 }
 

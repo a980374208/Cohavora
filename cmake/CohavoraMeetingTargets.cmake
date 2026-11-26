@@ -59,8 +59,11 @@ add_library(cohavora_meeting_runtime STATIC
     ${PROJECT_SOURCE_DIR}/src/core/remote_control/meeting_remote_control.cpp
     ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.h
     ${PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/detail/meeting_coordinator_internal.h
     ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.h
     ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator_events.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator_media_transfer.cpp
     ${PROJECT_SOURCE_DIR}/src/core/contact_snapshot_store.h
     ${PROJECT_SOURCE_DIR}/src/core/contact_snapshot_store.cpp
     ${PROJECT_SOURCE_DIR}/src/core/contact_catalog_controller.h
@@ -108,6 +111,9 @@ endif()
 
 add_library(cohavora_agent STATIC
     ${PROJECT_SOURCE_DIR}/src/agent/agent_types.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_model_capabilities.h
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_model_capabilities.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/agent_image_attachment.h
     ${PROJECT_SOURCE_DIR}/src/agent/agent_secret_store.h
     ${PROJECT_SOURCE_DIR}/src/agent/agent_secret_store.cpp
     ${PROJECT_SOURCE_DIR}/src/agent/agent_session_store.h
@@ -115,8 +121,12 @@ add_library(cohavora_agent STATIC
     ${PROJECT_SOURCE_DIR}/src/agent/agent_transport.h
     ${PROJECT_SOURCE_DIR}/src/agent/openai_compatible_transport.h
     ${PROJECT_SOURCE_DIR}/src/agent/openai_compatible_transport.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/detail/meeting_tool_helpers.h
     ${PROJECT_SOURCE_DIR}/src/agent/meeting_tool_registry.h
     ${PROJECT_SOURCE_DIR}/src/agent/meeting_tool_registry.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/meeting_tools_in_meeting.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/meeting_tools_catalog_contacts.cpp
+    ${PROJECT_SOURCE_DIR}/src/agent/meeting_tools_client_settings.cpp
     ${PROJECT_SOURCE_DIR}/src/agent/agent_coordinator.h
     ${PROJECT_SOURCE_DIR}/src/agent/agent_coordinator.cpp
     ${PROJECT_SOURCE_DIR}/src/agent/agent_speech_service.h

@@ -21,7 +21,7 @@ public:
 	explicit AgentSessionStore(QString baseDirectory = {});
 
 	[[nodiscard]] static QString resolveBaseDirectory(const QSettings &settings);
-	[[nodiscard]] static QString accountScopeKey(bool loggedIn, const QString &userId);
+	[[nodiscard]] static QString accountScopeKey(bool loggedIn, const QString &userId, const QString &serviceUrl = {});
 	[[nodiscard]] static QString deriveSessionTitle(const QVector<AgentChatMessage> &messages);
 	[[nodiscard]] static QString exportSessionMarkdown(const AgentChatSessionData &session);
 

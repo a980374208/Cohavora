@@ -31,7 +31,9 @@ struct ScreenShareSnapshot {
     ScreenShareState state = ScreenShareState::Idle;
     ScreenShareError error = ScreenShareError::None;
     ScreenShareQuality requested_quality;
+    std::optional<ScreenShareFrameProfile> target_quality;
     std::optional<ScreenShareFrameProfile> applied_quality;
+    ScreenShareQualityConstraint quality_constraint;
     ScreenShareQualityStatus quality_status = ScreenShareQualityStatus::Applied;
     // Bounded frame mailbox only; the UI never owns capture/Track resources.
     std::shared_ptr<render::VideoRenderRouter> preview;
@@ -47,6 +49,12 @@ struct ScreenShareSnapshot {
     uint64_t run_id = 0;
     uint64_t audio_epoch = 0;
     std::string audio_output_id;
+
+    bool quality_downgraded() const {
+        return applied_quality && target_quality &&
+            (applied_quality->width < target_quality->width ||
+             applied_quality->height < target_quality->height);
+    }
 };
 
 // Mirrors Flutter's serialized setSourceEnabled(screenShareVideo): capture,
@@ -80,6 +88,9 @@ public:
         // Resolve the effective capture profile before changing sender or
         // capture state. The requested quality remains the user's intent.
         std::function<asio::awaitable<ScreenShareFrameProfile>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> resolve_quality;
+        // Optional side-channel populated by ForRoom's resolve_quality to expose
+        // codec/encoder constraint metadata without shadowing custom resolve_quality mocks.
+        std::function<std::optional<ScreenShareQualityConstraint>(uint64_t)> read_resolved_constraint;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> apply_quality;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> sync_quality;
         std::function<std::optional<ScreenBinding>(

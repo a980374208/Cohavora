@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <list>
 #include <unordered_map>
+#include <utility>
 
 #include "api/make_ref_counted.h"
+#include "libyuv/convert_argb.h"
 
 namespace livekit {
 
@@ -27,12 +30,68 @@ NativeFrameRegistry& FrameRegistry() {
     return *registry;
 }
 
+std::atomic<std::uint64_t> g_next_texture_id{1};
+std::atomic<std::uint64_t> g_direct_capture_conversions{0};
+std::atomic<std::uint64_t> g_native_preview_imports{0};
 std::atomic<std::uint64_t> g_gpu_frames_created{0};
 std::atomic<std::uint64_t> g_gpu_scales_performed{0};
 std::atomic<std::uint64_t> g_cpu_readbacks_performed{0};
 std::atomic<std::uint64_t> g_pool_exhausted_drops{0};
 
 } // namespace
+
+class D3d11Nv12ScaleCache final {
+public:
+    D3d11Nv12ScaleCache(Microsoft::WRL::ComPtr<ID3D11Device> device,
+                       LUID adapter_luid,
+                       std::shared_ptr<std::mutex> device_context_mutex)
+        : device_(std::move(device)),
+          adapter_luid_(adapter_luid),
+          device_context_mutex_(std::move(device_context_mutex)) {}
+
+    std::shared_ptr<D3d11VideoProcessorConverter> Get(
+        int crop_width, int crop_height, int output_width, int output_height) {
+        const Dimensions dimensions{crop_width, crop_height, output_width, output_height};
+        std::shared_ptr<D3d11VideoProcessorConverter> retired;
+        std::lock_guard lock(mutex_);
+        const auto entry = std::find_if(entries_.begin(), entries_.end(),
+            [&dimensions](const Entry& current) { return current.dimensions == dimensions; });
+        if (entry != entries_.end()) {
+            entries_.splice(entries_.begin(), entries_, entry);
+            return entry->converter;
+        }
+
+        auto converter = std::make_shared<D3d11VideoProcessorConverter>(
+            device_, adapter_luid_, device_context_mutex_);
+        entries_.push_front({dimensions, converter});
+        if (entries_.size() > kMaxConfigurations) {
+            // Release the evicted converter and its pool after unlocking.
+            retired = std::move(entries_.back().converter);
+            entries_.pop_back();
+        }
+        return converter;
+    }
+
+private:
+    struct Dimensions {
+        int crop_width;
+        int crop_height;
+        int output_width;
+        int output_height;
+        bool operator==(const Dimensions&) const = default;
+    };
+    struct Entry {
+        Dimensions dimensions;
+        std::shared_ptr<D3d11VideoProcessorConverter> converter;
+    };
+
+    static constexpr std::size_t kMaxConfigurations = 4;
+    Microsoft::WRL::ComPtr<ID3D11Device> device_;
+    const LUID adapter_luid_;
+    std::shared_ptr<std::mutex> device_context_mutex_;
+    std::mutex mutex_;
+    std::list<Entry> entries_;
+};
 
 bool QueryD3d11AdapterLuid(ID3D11Device* device, LUID* out_luid) noexcept {
     if (!device || !out_luid) return false;
@@ -60,6 +119,8 @@ D3d11Nv12FrameBuffer::Diagnostics D3d11Nv12FrameBuffer::GetDiagnostics() noexcep
         g_gpu_scales_performed.load(std::memory_order_relaxed),
         g_cpu_readbacks_performed.load(std::memory_order_relaxed),
         g_pool_exhausted_drops.load(std::memory_order_relaxed),
+        g_direct_capture_conversions.load(std::memory_order_relaxed),
+        g_native_preview_imports.load(std::memory_order_relaxed),
     };
 }
 
@@ -68,6 +129,8 @@ void D3d11Nv12FrameBuffer::ResetDiagnostics() noexcept {
     g_gpu_scales_performed.store(0, std::memory_order_relaxed);
     g_cpu_readbacks_performed.store(0, std::memory_order_relaxed);
     g_pool_exhausted_drops.store(0, std::memory_order_relaxed);
+    g_direct_capture_conversions.store(0, std::memory_order_relaxed);
+    g_native_preview_imports.store(0, std::memory_order_relaxed);
 }
 
 D3d11Nv12FrameBuffer::D3d11Nv12FrameBuffer(
@@ -119,6 +182,84 @@ const D3d11Nv12FrameBuffer* D3d11Nv12FrameBuffer::FromVideoFrameBuffer(
     std::lock_guard lock(registry.mutex);
     const auto found = registry.nv12.find(buffer);
     return found != registry.nv12.end() ? found->second : nullptr;
+}
+
+bool D3d11Nv12FrameBuffer::PreparePreview(lk_render_dx11_texture_view& view) const {
+    if (!owner_pool_ || !shared_handle_ || !device_context_mutex_) return false;
+    auto& pool = *owner_pool_;
+    uint64_t allocation = 0;
+    {
+        std::lock_guard lock(pool.mutex_);
+        if (pool_epoch_ != pool.epoch_ || slot_index_ >= pool.kPoolSize) return false;
+        auto& slot = pool.slots_[slot_index_];
+        unsigned reserved = 0;
+        for (const auto& s : pool.slots_) {
+            if (s.preview_reserved || std::any_of(s.readers.begin(), s.readers.end(),
+                [](const auto& r) { return r.fence && r.fence->GetCompletedValue() < r.value; })) ++reserved;
+        }
+        if (!slot.preview_reserved && reserved >= 2) return false;
+        slot.preview_reserved = true;
+        allocation = slot.allocation_id;
+    }
+    std::lock_guard sync(pool.preview_sync_mutex_);
+    if (pool.preview_sync_unavailable_) return false;
+    std::lock_guard context(*device_context_mutex_);
+    if (!pool.preview_ready_) {
+        Microsoft::WRL::ComPtr<ID3D11Device5> device5;
+        Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;
+        device_->GetImmediateContext(immediate.GetAddressOf());
+        if (FAILED(device_.As(&device5)) || !immediate ||
+            FAILED(immediate.As(&pool.preview_context_)) ||
+            FAILED(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, IID_PPV_ARGS(&pool.preview_ready_))) ||
+            FAILED(pool.preview_ready_->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &pool.preview_ready_handle_))) {
+            pool.preview_sync_unavailable_ = true;
+            return false;
+        }
+    }
+    const auto sequence = ++pool.preview_sequence_;
+    if (FAILED(pool.preview_context_->Signal(pool.preview_ready_.Get(), sequence))) return false;
+    pool.preview_context_->Flush();
+    view = {sizeof(view), uint32_t(width_), uint32_t(height_), adapter_luid_.LowPart,
+        adapter_luid_.HighPart, 0, reinterpret_cast<uintptr_t>(shared_handle_),
+        reinterpret_cast<uintptr_t>(pool.preview_ready_handle_), sequence, allocation};
+    return true;
+}
+
+void D3d11Nv12FrameBuffer::RecordPreviewRead(const lk_render_dx11_retirement& ticket) const {
+    auto& pool = *owner_pool_;
+    std::lock_guard lock(pool.mutex_);
+    if (pool_epoch_ != pool.epoch_ || slot_index_ >= pool.kPoolSize) return;
+    auto& slot = pool.slots_[slot_index_];
+    if (!ticket.fence || !ticket.value) {
+        slot.discard_texture = true;
+        return;
+    }
+    g_native_preview_imports.fetch_add(1, std::memory_order_relaxed);
+    auto* fence = reinterpret_cast<ID3D11Fence*>(ticket.fence);
+    for (auto& read : slot.readers) {
+        if (read.fence.Get() == fence) {
+            read.value = (std::max)(read.value, ticket.value);
+            return;
+        }
+    }
+    for (auto& read : slot.readers) {
+        if (!read.fence || read.fence->GetCompletedValue() >= read.value) {
+            read.fence = fence;
+            read.value = ticket.value;
+            return;
+        }
+    }
+    slot.discard_texture = true;
+}
+
+std::shared_ptr<const D3d11Nv12FrameBuffer> D3d11Nv12FrameBuffer::TryLeaseForEncoder() const {
+    if (!owner_pool_ || owner_pool_->encoder_lease_active_.exchange(true, std::memory_order_acq_rel))
+        return {};
+    return {this, [pool = owner_pool_, owner = webrtc::scoped_refptr<const D3d11Nv12FrameBuffer>(this)]
+        (const D3d11Nv12FrameBuffer*) mutable {
+            owner = nullptr;
+            pool->encoder_lease_active_.store(false, std::memory_order_release);
+        }};
 }
 
 webrtc::scoped_refptr<webrtc::NV12BufferInterface> D3d11Nv12FrameBuffer::ToNV12() const {
@@ -225,11 +366,17 @@ webrtc::scoped_refptr<webrtc::VideoFrameBuffer> D3d11Nv12FrameBuffer::CropAndSca
         even_w == width_ && even_h == height_) {
         return webrtc::scoped_refptr<webrtc::VideoFrameBuffer>(this);
     }
-    if (device_ && texture_) {
-        D3d11VideoProcessorConverter scaler(device_, adapter_luid_, device_context_mutex_);
-        auto scaled_gpu = scaler.ConvertAndScale(
+    if (device_ && texture_ && crop_width > 0 && crop_height > 0) {
+        auto cache = scale_cache_.lock();
+        if (!cache && owner_pool_) cache = owner_pool_->GetScaleCache(pool_epoch_);
+        auto scaler = cache
+            ? cache->Get(crop_width, crop_height, even_w, even_h)
+            : std::make_shared<D3d11VideoProcessorConverter>(device_, adapter_luid_, device_context_mutex_);
+        auto scaled_gpu = scaler->ConvertAndScale(
             texture_.Get(), crop_width, crop_height, even_w, even_h, offset_x, offset_y);
         if (scaled_gpu) {
+            // Derived frames share the cache while the capture pool owns it.
+            scaled_gpu->scale_cache_ = cache;
             g_gpu_scales_performed.fetch_add(1, std::memory_order_relaxed);
             return scaled_gpu;
         }
@@ -255,29 +402,38 @@ D3d11Nv12TexturePool::D3d11Nv12TexturePool(
 
 D3d11Nv12TexturePool::~D3d11Nv12TexturePool() {
     Clear();
+    if (preview_ready_handle_) CloseHandle(preview_ready_handle_);
 }
 
 void D3d11Nv12TexturePool::Clear() noexcept {
+    std::shared_ptr<D3d11Nv12ScaleCache> retired_cache;
     std::lock_guard<std::mutex> lock(mutex_);
     ++epoch_;
+    retired_cache = std::move(scale_cache_);
     width_ = 0;
     height_ = 0;
     for (auto& slot : slots_) {
-        slot.texture.Reset();
-        slot.shared_handle = nullptr;
-        slot.width = 0;
-        slot.height = 0;
-        slot.in_use = false;
+        slot = {};
     }
     staging_.Reset();
     staging_width_ = 0;
     staging_height_ = 0;
 }
 
+std::shared_ptr<D3d11Nv12ScaleCache> D3d11Nv12TexturePool::GetScaleCache(std::uint64_t epoch) {
+    std::lock_guard lock(mutex_);
+    if (epoch != epoch_ || !device_context_mutex_) return nullptr;
+    if (!scale_cache_) {
+        scale_cache_ = std::make_shared<D3d11Nv12ScaleCache>(device_, adapter_luid_, device_context_mutex_);
+    }
+    return scale_cache_;
+}
+
 void D3d11Nv12TexturePool::ReleaseSlot(std::size_t slot_index, std::uint64_t epoch) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (slot_index < kPoolSize && epoch == epoch_) {
         slots_[slot_index].in_use = false;
+        slots_[slot_index].preview_reserved = false;
     }
 }
 
@@ -294,17 +450,23 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11Nv12TexturePool::Acquire(int wi
         width_ = even_w;
         height_ = even_h;
         for (auto& slot : slots_) {
-            slot.texture.Reset();
-            slot.shared_handle = nullptr;
-            slot.width = 0;
-            slot.height = 0;
-            slot.in_use = false;
+            slot = {};
         }
     }
 
     for (std::size_t i = 0; i < kPoolSize; ++i) {
         auto& slot = slots_[i];
         if (slot.in_use) continue;
+        bool gpu_reading = false;
+        for (auto& read : slot.readers) {
+            if (!read.fence) continue;
+            const auto completed = read.fence->GetCompletedValue();
+            if (completed == UINT64_MAX) slot.discard_texture = true;
+            if (completed >= read.value) read = {};
+            else gpu_reading = true;
+        }
+        if (slot.discard_texture) slot = {}; // Retire this allocation, never overwrite it.
+        else if (gpu_reading) continue;
 
         if (!slot.texture || slot.width != even_w || slot.height != even_h) {
             D3D11_TEXTURE2D_DESC desc{};
@@ -331,6 +493,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11Nv12TexturePool::Acquire(int wi
             }
             slot.texture = std::move(tex);
             slot.shared_handle = shared_handle;
+            slot.allocation_id = g_next_texture_id.fetch_add(1, std::memory_order_relaxed);
             slot.width = even_w;
             slot.height = even_h;
         }
@@ -548,7 +711,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     int dst_width,
     int dst_height,
     int offset_x,
-    int offset_y) {
+    int offset_y, bool direct_input_only) {
     if (!src_texture || src_width <= 0 || src_height <= 0 || dst_width <= 0 || dst_height <= 0 || !pool_) {
         return nullptr;
     }
@@ -586,6 +749,7 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     if (FAILED(video_device_->CreateVideoProcessorInputView(
             input_tex_for_view, enumerator_.Get(), &in_view_desc, in_view.GetAddressOf())) ||
         !in_view) {
+        if (direct_input_only) return nullptr;
         if (!bindable_input_ || bindable_in_w_ != src_width || bindable_in_h_ != src_height ||
             bindable_in_format_ != src_desc.Format) {
             bindable_input_.Reset();
@@ -732,6 +896,13 @@ const D3d11TextureDesktopFrame* D3d11TextureDesktopFrame::FromDesktopFrame(
 
 const std::uint8_t* D3d11TextureDesktopFrame::EnsureCpuData() const {
     std::lock_guard<std::mutex> lock(cpu_mutex_);
+    if (!cpu_populated_ && prepared_) {
+        const auto pixels = prepared_->ToNV12();
+        cpu_populated_ = pixels && libyuv::NV12ToARGBMatrix(pixels->DataY(), pixels->StrideY(),
+            pixels->DataUV(), pixels->StrideUV(), cpu_data_.get(), stride(),
+            &libyuv::kYuvH709Constants, size().width(), size().height()) == 0;
+        return cpu_populated_ ? data_ : nullptr;
+    }
     if (cpu_populated_ || !device_ || !texture_) {
         return data_;
     }
@@ -780,7 +951,7 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
     ID3D11Texture2D* source_texture,
     int width,
     int height,
-    bool populate_cpu_mirror) {
+    bool populate_cpu_mirror, bool prepare_nv12) {
     if (!device || !context || !source_texture || width <= 0 || height <= 0) {
         return nullptr;
     }
@@ -793,7 +964,33 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
         if (slot.frame && slot.frame->size().equals(target_size)) {
             tex_frame = slot.texture_frame;
         }
-        if (!tex_frame || tex_frame->device() != device) {
+        if (tex_frame) tex_frame->prepared_ = nullptr;
+        if (prepare_nv12 && !(width & 1) && !(height & 1)) {
+            if (!converter_ || converter_->device() != device)
+                converter_ = std::make_unique<D3d11VideoProcessorConverter>(
+                    device, adapter_luid, device_context_mutex);
+            // This command is submitted and flushed on the capture device while
+            // the WGC frame / DXGI duplication surface still belongs to us.
+            if (auto native = converter_->ConvertAndScale(source_texture, width, height,
+                    width, height, 0, 0, true)) {
+                if (!tex_frame || tex_frame->device() != device) {
+                    auto owned = std::make_unique<D3d11TextureDesktopFrame>(target_size, device,
+                        nullptr, adapter_luid, device_context_mutex);
+                    tex_frame = owned.get();
+                    slot.frame = webrtc::SharedDesktopFrame::Wrap(std::move(owned));
+                    slot.texture_frame = tex_frame;
+                }
+                g_direct_capture_conversions.fetch_add(1, std::memory_order_relaxed);
+                tex_frame->texture_.Reset();
+                tex_frame->prepared_ = std::move(native);
+                tex_frame->ResetCpuPopulated();
+                if (populate_cpu_mirror && !tex_frame->EnsureCpuData()) return nullptr;
+                auto shared = slot.frame->Share();
+                shared->set_capturer_id(slot.frame->capturer_id() | kD3d11TextureDesktopFrameCapturerIdBit);
+                return shared;
+            }
+        }
+        if (!tex_frame || tex_frame->device() != device || !tex_frame->texture()) {
             D3D11_TEXTURE2D_DESC desc{};
             source_texture->GetDesc(&desc);
             desc.Width = static_cast<UINT>(width);

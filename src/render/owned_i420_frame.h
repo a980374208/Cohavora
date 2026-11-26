@@ -50,6 +50,7 @@ public:
 };
 
 struct RenderFrameMetadata {
+    using Ptr = std::shared_ptr<const RenderFrameMetadata>;
     using Clock = std::chrono::steady_clock;
 
     std::string series_key;
@@ -62,6 +63,19 @@ struct RenderFrameMetadata {
     bool valid() const noexcept {
         return !series_key.empty() && room_generation != 0 &&
             binding_epoch != 0 && frame_token != 0 && observer;
+    }
+
+    void SetRenderExpected(bool expected, RenderExpectationReason reason = RenderExpectationReason::SurfaceVisible,
+                           Clock::time_point at = Clock::now()) const {
+        if (valid()) observer->SetExpected(expected, reason, at);
+    }
+    void NotifyRendered(const char* point, Clock::time_point at = Clock::now()) const {
+        if (valid() && point && *point) observer->OnSubmitted(*this, point, at);
+    }
+    void NotifyRenderStage(const char* point, std::chrono::microseconds duration,
+                           Clock::time_point at = Clock::now()) const {
+        if (valid() && point && *point && duration.count() >= 0)
+            observer->OnStageTiming(*this, point, duration, at);
     }
 
     bool same_binding_as(const RenderFrameMetadata& other) const noexcept {
@@ -92,9 +106,8 @@ struct RenderColorSpace {
     RenderColorRange range = RenderColorRange::Unspecified;
 };
 
-// An immutable, tightly packed I420 frame owned by the rendering pipeline.
-// The object remains valid after WebRTC returns its source buffer to the
-// decoder, which makes it safe to hand across worker/UI/render threads.
+// Immutable I420. Owned copies are packed; certified decoder views preserve
+// their original strides and carry a lease for all three planes.
 class OwnedI420Frame final {
 public:
     using Ptr = std::shared_ptr<const OwnedI420Frame>;
@@ -132,9 +145,9 @@ public:
     int chroma_width() const noexcept { return chroma_width_; }
     int chroma_height() const noexcept { return chroma_height_; }
 
-    const uint8_t* data_y() const noexcept { return storage_->bytes.get(); }
-    const uint8_t* data_u() const noexcept { return storage_->bytes.get() + u_offset_; }
-    const uint8_t* data_v() const noexcept { return storage_->bytes.get() + v_offset_; }
+    const uint8_t* data_y() const noexcept { return y_; }
+    const uint8_t* data_u() const noexcept { return u_; }
+    const uint8_t* data_v() const noexcept { return v_; }
     int stride_y() const noexcept { return stride_y_; }
     int stride_u() const noexcept { return stride_u_; }
     int stride_v() const noexcept { return stride_v_; }
@@ -147,6 +160,8 @@ public:
     }
 
 private:
+    friend class RetainedVideoFrame;
+    OwnedI420Frame(const webrtc::VideoFrame&, RenderFrameMetadata, std::shared_ptr<const void> lease);
     struct StorageBlock {
         explicit StorageBlock(size_t count)
             : bytes(std::make_unique_for_overwrite<uint8_t[]>(count)), size(count) {}
@@ -180,6 +195,10 @@ private:
     RenderColorSpace color_space_;
     RenderFrameMetadata render_metadata_;
     std::shared_ptr<StorageBlock> storage_;
+    std::shared_ptr<const void> decoder_lease_;
+    const uint8_t* y_ = nullptr;
+    const uint8_t* u_ = nullptr;
+    const uint8_t* v_ = nullptr;
 };
 
 } // namespace livekit::render

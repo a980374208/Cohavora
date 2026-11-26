@@ -88,9 +88,8 @@ ContactPickerDialog::ContactPickerDialog(
             if (!current.isValid()) return;
             _selectedDeptId = current.data(OrgDeptIdRole).toString();
             if (!_selectedDeptId.isEmpty() &&
-                _selectedDeptId != QStringLiteral("__org_root__") &&
-                _catalog.deptMembers(_selectedDeptId).empty()) {
-                _catalog.loadDeptMembers(_selectedDeptId);
+                _selectedDeptId != QStringLiteral("__org_root__")) {
+                _catalog.ensureDeptMembersLoaded(_selectedDeptId);
             }
             populateList();
         });
@@ -125,6 +124,14 @@ ContactPickerDialog::ContactPickerDialog(
     auto *footer = new QHBoxLayout();
     _summaryLabel = new QLabel(this);
     footer->addWidget(_summaryLabel, 1);
+
+    _loadMoreBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Load more members"), this);
+    _loadMoreBtn->setAutoDefault(false);
+    _loadMoreBtn->hide();
+    connect(_loadMoreBtn, &QPushButton::clicked, this, [this] {
+        _catalog.loadMoreDeptMembers(_selectedDeptId);
+    });
+    footer->addWidget(_loadMoreBtn);
 
     auto *cancelBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Cancel"), this);
     connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
@@ -187,7 +194,7 @@ void ContactPickerDialog::rebuildOrgTree() {
         _selectedDeptId = target.data(OrgDeptIdRole).toString();
     }
     if (!_selectedDeptId.isEmpty() && _selectedDeptId != QStringLiteral("__org_root__")) {
-        _catalog.loadDeptMembers(_selectedDeptId);
+        _catalog.ensureDeptMembersLoaded(_selectedDeptId);
     }
     populateList();
 }
@@ -245,6 +252,12 @@ void ContactPickerDialog::populateList() {
     }
 
     _contactModel->setEntries(std::move(entries));
+    const bool loading = _catalog.isDeptMembersLoading(_selectedDeptId);
+    _loadMoreBtn->setVisible(_catalog.hasMoreDeptMembers(_selectedDeptId));
+    _loadMoreBtn->setEnabled(!loading);
+    _loadMoreBtn->setText(loading
+        ? QCoreApplication::translate("MeetingUI", "Loading members...")
+        : QCoreApplication::translate("MeetingUI", "Load more members"));
 }
 
 void ContactPickerDialog::updateSelectionSummary() {

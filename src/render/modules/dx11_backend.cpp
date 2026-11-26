@@ -1,5 +1,8 @@
 #include "render/api/render_backend_api.h"
 #include "render/api/render_backend_dx11_native.h"
+#include "render/api/render_backend_dx11_texture.h"
+#include <d3d11_4.h>
+#include <array>
 #include "render/api/render_backend_module_info.h"
 #include "ui/dx11/dx11_renderer.h"
 #include <algorithm>
@@ -22,6 +25,16 @@ struct GpuFrame {
 struct Resource {
     uint64_t generation = 0;
     GpuFrame active, spare;
+    struct Imported {
+        uint64_t allocation = 0;
+        GpuFrame frame;
+        ComPtr<ID3D11Fence> ready;
+    };
+    std::array<Imported, 4> imports{};
+    size_t next_import = 0;
+    ComPtr<ID3D11Fence> retired;
+    uint64_t last_ticket = 0;
+    bool imported_active = false;
 };
 template<class F> lk_render_result Guard(F&& call) noexcept {
     try { return call(); }
@@ -37,6 +50,9 @@ bool ValidColor(const float* rgba) {
 }
 struct lk_render_device {
     Dx11Renderer renderer;
+    ComPtr<ID3D11Device5> device5;
+    ComPtr<ID3D11DeviceContext4> context4;
+    LUID adapter{};
     std::map<uint64_t, Resource> resources;
     std::thread::id owner = std::this_thread::get_id();
     uint64_t surface_generation = 0;
@@ -79,10 +95,28 @@ lk_render_result LK_RENDER_CALL Create(const lk_render_create_info* info, lk_ren
         device->surface_generation = info->surface_generation;
         device->max_resources = info->max_resources;
         if (!device->renderer.Initialize(hwnd, rect.right, rect.bottom)) return LK_RENDER_DEVICE_LOST;
+        auto* native = device->renderer.device();
+        native->QueryInterface(IID_PPV_ARGS(&device->device5));
+        device->renderer.context()->QueryInterface(IID_PPV_ARGS(&device->context4));
+        ComPtr<IDXGIDevice> dxgi;
+        ComPtr<IDXGIAdapter> adapter;
+        DXGI_ADAPTER_DESC description{};
+        if (SUCCEEDED(native->QueryInterface(IID_PPV_ARGS(&dxgi))) &&
+            SUCCEEDED(dxgi->GetAdapter(&adapter)) && SUCCEEDED(adapter->GetDesc(&description)))
+            device->adapter = description.AdapterLuid;
         *out = device.release();
         return LK_RENDER_OK;
     });
 }
+bool RetireImported(lk_render_device* d, Resource& r) noexcept {
+    if (!r.imported_active) return true;
+    if (FAILED(d->context4->Signal(r.retired.Get(), r.last_ticket))) return false;
+    d->context4->Flush();
+    r.imported_active = false;
+    r.active = {};
+    return true;
+}
+
 void LK_RENDER_CALL Destroy(lk_render_device* d, uint32_t) noexcept {
     if (!d) return;
     if (!OnOwner(d)) std::terminate();
@@ -92,6 +126,7 @@ void LK_RENDER_CALL Destroy(lk_render_device* d, uint32_t) noexcept {
         catch (...) { /* An inspection callback must never unwind across the C ABI. */ }
     }
 #endif
+    for (auto& [id, resource] : d->resources) RetireImported(d, resource);
     d->resources.clear();
     d->renderer.Cleanup();
     delete d;
@@ -164,11 +199,74 @@ lk_render_result Upload(lk_render_device* d, lk_render_resource_id id, const lk_
     candidate.color = {static_cast<livekit::render::RenderColorMatrix>(f->color_matrix),
         static_cast<livekit::render::RenderColorRange>(f->color_range)};
     auto& resource = d->resources[id.value];
+    if (!RetireImported(d, resource)) return LK_RENDER_DEVICE_LOST;
     resource.generation = id.generation;
     resource.spare = std::move(resource.active);
     resource.active = std::move(candidate);
     return LK_RENDER_OK;
 }
+lk_render_result LK_RENDER_CALL ImportNv12(lk_render_device* d, lk_render_resource_id id,
+        const lk_render_dx11_texture_view* input, lk_render_dx11_retirement* ticket) noexcept {
+    return Guard([&]() -> lk_render_result {
+        if (!OnOwner(d) || !id.value || !id.generation || !input || !ticket ||
+            input->struct_size != sizeof(*input) || input->reserved || !input->allocation_id ||
+            !input->texture_handle || !input->ready_fence_handle || !input->ready_value ||
+            !input->width || !input->height || input->width > 16384 || input->height > 16384)
+            return LK_RENDER_INVALID_ARGUMENT;
+        if (!d->device5 || !d->context4 || input->adapter_low != d->adapter.LowPart ||
+            input->adapter_high != d->adapter.HighPart) return LK_RENDER_UNSUPPORTED;
+        auto it = d->resources.find(id.value);
+        if (it != d->resources.end() && it->second.generation != id.generation) return LK_RENDER_INVALID_ARGUMENT;
+        if (it == d->resources.end() && d->resources.size() >= d->max_resources) return LK_RENDER_OUT_OF_MEMORY;
+        Resource first;
+        auto& r = it == d->resources.end() ? first : it->second;
+        auto entry = std::find_if(r.imports.begin(), r.imports.end(),
+            [&](const auto& e) { return e.allocation == input->allocation_id; });
+        if (entry == r.imports.end()) {
+            Resource::Imported next;
+            ComPtr<ID3D11Texture2D> texture;
+            if (FAILED(d->device5->OpenSharedResource(reinterpret_cast<HANDLE>(input->texture_handle),
+                    IID_PPV_ARGS(&texture))) ||
+                FAILED(d->device5->OpenSharedFence(reinterpret_cast<HANDLE>(input->ready_fence_handle),
+                    IID_PPV_ARGS(&next.ready)))) return LK_RENDER_UNSUPPORTED;
+            D3D11_TEXTURE2D_DESC desc{};
+            texture->GetDesc(&desc);
+            if (desc.Format != DXGI_FORMAT_NV12 || desc.Width != input->width || desc.Height != input->height ||
+                desc.MipLevels != 1 || desc.ArraySize != 1 || desc.SampleDesc.Count != 1) return LK_RENDER_UNSUPPORTED;
+            next.allocation = input->allocation_id;
+            auto& frame = next.frame;
+            frame.format = LK_RENDER_NV12;
+            frame.width = desc.Width;
+            frame.height = desc.Height;
+            frame.count = 2;
+            frame.color = {livekit::render::RenderColorMatrix::Bt709, livekit::render::RenderColorRange::Limited};
+            for (unsigned plane = 0; plane < 2; ++plane) {
+                D3D11_SHADER_RESOURCE_VIEW_DESC srv{};
+                srv.Format = plane ? DXGI_FORMAT_R8G8_UNORM : DXGI_FORMAT_R8_UNORM;
+                srv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                srv.Texture2D.MipLevels = 1;
+                if (FAILED(d->device5->CreateShaderResourceView(texture.Get(), &srv, &frame.views[plane])))
+                    return LK_RENDER_UNSUPPORTED;
+            }
+            entry = r.imports.begin() + (r.next_import++ % r.imports.size());
+            *entry = std::move(next);
+        }
+        if (!r.retired && FAILED(d->device5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&r.retired))))
+            return LK_RENDER_UNSUPPORTED;
+        if (!RetireImported(d, r) || FAILED(d->context4->Wait(entry->ready.Get(), input->ready_value)))
+            return LK_RENDER_DEVICE_LOST;
+        r.active = entry->frame;
+        r.generation = id.generation;
+        r.imported_active = true;
+        ++r.last_ticket;
+        auto* fence = r.retired.Get();
+        const auto value = r.last_ticket;
+        if (it == d->resources.end()) d->resources.emplace(id.value, std::move(first));
+        *ticket = {reinterpret_cast<uintptr_t>(fence), value};
+        return LK_RENDER_OK;
+    });
+}
+
 lk_render_result LK_RENDER_CALL UploadFrame(lk_render_device* d, lk_render_resource_id id, const lk_render_frame_view* f) noexcept {
     return Guard([&] { return Upload(d, id, f, false); });
 }
@@ -178,7 +276,10 @@ lk_render_result LK_RENDER_CALL UploadOverlay(lk_render_device* d, lk_render_res
 void LK_RENDER_CALL Remove(lk_render_device* d, lk_render_resource_id id) noexcept {
     if (!OnOwner(d)) return;
     const auto it = d->resources.find(id.value);
-    if (it != d->resources.end() && it->second.generation == id.generation) d->resources.erase(it);
+    if (it != d->resources.end() && it->second.generation == id.generation) {
+        RetireImported(d, it->second);
+        d->resources.erase(it);
+    }
 }
 lk_render_result LK_RENDER_CALL Render(lk_render_device* d, const lk_render_frame_target* t, const lk_render_scene_view* scene) noexcept {
     return Guard([&]() -> lk_render_result {
@@ -252,6 +353,12 @@ lk_render_result LK_RENDER_CALL Query(lk_render_device* d, uint32_t id, uint32_t
         return LK_RENDER_OK;
     }
 #endif
+    if (id == LK_RENDER_EXT_DX11_TEXTURE && version == LK_RENDER_DX11_TEXTURE_V1) {
+        if (!OnOwner(d) || !out || size < sizeof(lk_render_dx11_texture_api)) return LK_RENDER_INVALID_ARGUMENT;
+        if (!d->context4 || !d->device5) return LK_RENDER_UNSUPPORTED;
+        *static_cast<lk_render_dx11_texture_api*>(out) = {sizeof(lk_render_dx11_texture_api), 0, d, ImportNv12};
+        return LK_RENDER_OK;
+    }
     if (id == LK_RENDER_EXT_MODULE_INFO && version == LK_RENDER_MODULE_INFO_V1) {
         if (!OnOwner(d) || !out) return LK_RENDER_INVALID_ARGUMENT;
         if (size < sizeof(lk_render_module_info_v1)) return LK_RENDER_INVALID_ARGUMENT;

@@ -57,6 +57,7 @@ QImage QtCpuVideoRenderer::Convert(const OwnedI420Frame& frame) const {
 }
 
 QImage QtCpuVideoRenderer::Convert(const VideoRenderFrame& frame) const {
+    if (frame.nativePreview()) return {};
     if (frame.i420Owner()) return Convert(*frame.i420Owner());
     const auto& v = frame.view();
     QImage image;

@@ -853,7 +853,21 @@ QString formatSchedulingClockPrompt(
 			"1) Use 'get_my_profile' to inspect the signed-in user's own profile (account, employee number, department, job title, email, phone, bio/signature) and self-only historical employee numbers / organization removal reasons. "
 			"2) Use 'update_my_profile' to edit the signed-in user's own nickname, email, phone, or bio/signature (allowed whether in an organization or not; requires user confirmation). "
 			"NEVER claim to edit employeeNo (auto-assigned on joining an organization, immutable and never reused) or jobTitle (only editable by the organization founder in the Web Org Admin Console). "
-			"3) When 'list_org_departments' or 'search_contacts' reports 'membersRestricted=true' for a department, explain clearly that organization visibility settings restrict viewing members outside the user's own department (the full department tree remains visible) rather than reporting the department as empty."));
+			"3) Treat 'list_org_departments' as the current account's visible tree. When 'orgMemberVisibility' is 'own_dept', only the user's departments and their ancestor paths are available. "
+			"An ancestor can be visible while its member list is restricted. Treat 'membersRestricted=true' as a permission result, 'membersLoading=true' as pending, and 'cachedMemberCount' as cached rows rather than a department total. "
+			"Do not infer that unseen departments or members do not exist. "
+			"4) For a specific person, prefer an exact account with 'search_contacts'. A cross-department match can identify someone without granting access to their department's member list. "
+			"'remoteSearchTriggered=true' means a background lookup started. An empty cached result at that point does not establish that the account is missing. "
+			"Search results can omit employee number, department and job title. Guide the user to select the result and open its detail card for those fields. "
+			"Cross-department detail fields are enabled by default and follow the founder's current setting. Report only details actually returned, and never substitute another user's data or use 'get_my_profile' for someone else. "
+			"5) Both the desktop and Web console organization trees start collapsed. In the desktop tree, branch counters show direct child nodes by default or the number of distinct members in permitted descendants if configured. "
+			"Leaf groups show online/member counts. Do not infer the active count mode or a total from cached member rows. "
+			"6) Organization visibility, cross-department detail display and tree counters are founder-managed in the Web Org Admin Console via the top-bar Settings dialog and the subsequent apply confirmation. "
+			"These are organization-wide controls. The desktop preference tools cannot read or change them. "
+			"7) Send new contact requests with 'manage_contact_request' and action 'send', including for coworkers in the same department. "
+			"Use the exact account, email, employee number, or user ID. If a search only yields fuzzy candidates, ask the user to select the intended recipient before sending. "
+			"After sending, report that the request is awaiting the recipient when the tool returns a pending request. Only recipient acceptance creates a mutual contact. "
+			"Do not describe a pending or rejected request as an added contact."));
 	}
 	return lines.join(QLatin1Char('\n'));
 }

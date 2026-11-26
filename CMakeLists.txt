@@ -263,6 +263,10 @@ set(LIVEKIT_SOURCES
     src/signal/signal_client.cpp
     src/core/participant.cpp
     src/core/room.cpp
+    src/core/room_publish_negotiation.cpp
+    src/core/room_remote_subscription.cpp
+    src/core/room_data_rpc.cpp
+    src/core/room_data_track.cpp
     src/core/local_audio_track.cpp
     src/core/local_video_track.cpp
     src/core/screen_share_session.cpp
@@ -328,6 +332,10 @@ set(LIVEKIT_SOURCES
     src/telemetry/telemetry_report.cpp
 )
 
+if(WIN32)
+    list(APPEND LIVEKIT_SOURCES src/render/native_screen_preview_win.cpp)
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(REMOVE_ITEM LIVEKIT_SOURCES
         src/core/screen_share_session.cpp
@@ -379,6 +387,7 @@ set(LIVEKIT_HEADERS
     src/signal/signal_stream.h
     src/signal/signal_client.h
     src/core/room.h
+    src/core/detail/room_internal.h
     src/core/operation.h
     src/core/participant.h
     src/core/track.h
@@ -516,7 +525,6 @@ target_include_directories(cohavora_core BEFORE PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/e2ee
     ${CMAKE_CURRENT_SOURCE_DIR}/src/rpc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/telemetry
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/app
     ${GEN_DIR}
     ${WEBRTC_ROOT}/include
     ${WEBRTC_ROOT}/include/third_party/libyuv/include

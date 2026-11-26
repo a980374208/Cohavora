@@ -61,20 +61,21 @@ private:
     const size_t retained_bytes_;
 };
 
-// Native-side retained input. Only Materialize's immutable OwnedI420Frame may
-// cross into the existing UI/render pipeline. This class does not schedule work.
+// Scheduler input. The renderer receives immutable planes with independent ownership.
 class RetainedVideoFrame final : public FrameInput {
 public:
     using Ptr = std::shared_ptr<const RetainedVideoFrame>;
 
-    // Accept the exact controlled allocation capability or the pinned VP8
-    // factory's registered output identity. Other kI420 inputs fail closed;
-    // rejection never calls ToI420 or accesses pixel planes.
+    // Accept the controlled allocation or registered VP8/HEVC decoder output.
+    // Reject other inputs without conversion or pixel access.
     static Ptr TryRetain(const webrtc::VideoFrame& frame,
                          RenderFrameMetadata metadata = {},
                          const CpuI420BufferProvenance::Ptr& provenance = {});
 
     OwnedI420Frame::Ptr Materialize() const override;
+    // Charge frames retained by asynchronous consumers until their final release,
+    // independently of the scheduler's input budget and shutdown barrier.
+    static OwnedI420Frame::Ptr TryShareForRender(const Ptr&, const std::shared_ptr<size_t>& binding_count);
     int width() const noexcept { return frame_.width(); }
     int height() const noexcept { return frame_.height(); }
     size_t retained_bytes() const noexcept { return retained_bytes_; }

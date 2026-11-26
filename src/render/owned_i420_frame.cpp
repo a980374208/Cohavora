@@ -135,7 +135,24 @@ OwnedI420Frame::OwnedI420Frame(int width,
       render_metadata_(std::move(render_metadata)),
       // All bytes are filled by CopyFromPlanes before the immutable frame is
       // published. Avoid clearing a full decoder frame immediately before copy.
-      storage_(AcquireStorage(y_size + u_size + u_size)) {}
+      storage_(AcquireStorage(y_size + u_size + u_size)),
+      y_(storage_->bytes.get()), u_(y_ + u_offset_), v_(y_ + v_offset_) {}
+
+OwnedI420Frame::OwnedI420Frame(const webrtc::VideoFrame& frame, RenderFrameMetadata metadata,
+                               std::shared_ptr<const void> lease)
+    : width_(frame.width()), height_(frame.height()),
+      chroma_width_((width_ + 1) / 2), chroma_height_((height_ + 1) / 2),
+      timestamp_us_(frame.timestamp_us()), rotation_(ToVideoRotation(frame.rotation())),
+      color_space_(ToRenderColorSpace(frame.color_space())), render_metadata_(std::move(metadata)),
+      decoder_lease_(std::move(lease)) {
+    const auto* buffer = frame.video_frame_buffer()->GetI420();
+    stride_y_ = buffer->StrideY();
+    stride_u_ = buffer->StrideU();
+    stride_v_ = buffer->StrideV();
+    y_ = buffer->DataY();
+    u_ = buffer->DataU();
+    v_ = buffer->DataV();
+}
 
 OwnedI420Frame::Ptr OwnedI420Frame::CopyFrom(
         const webrtc::VideoFrame& frame,

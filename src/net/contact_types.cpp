@@ -109,6 +109,7 @@ OrgDepartment parseOrgDepartment(const QJsonObject &obj) {
     d.sortOrder = obj.value(QStringLiteral("sortOrder")).toInt(0);
     d.memberVisibility = obj.value(QStringLiteral("memberVisibility")).toString();
     d.version = readInt64(obj, QStringLiteral("version"));
+    d.descendantMemberCount = readInt64(obj, QStringLiteral("descendantMemberCount"), -1);
     return d;
 }
 
@@ -126,6 +127,9 @@ QJsonObject serializeOrgDepartment(const OrgDepartment &dept) {
     }
     if (!dept.memberVisibility.isEmpty()) {
         obj.insert(QStringLiteral("memberVisibility"), dept.memberVisibility);
+    }
+    if (dept.descendantMemberCount >= 0) {
+        obj.insert(QStringLiteral("descendantMemberCount"), static_cast<double>(dept.descendantMemberCount));
     }
     return obj;
 }

@@ -44,7 +44,7 @@ public:
     }
     ShareViewTransform* transform = nullptr;
     QImage image;
-    livekit::render::VideoRenderFrame::Ptr frame;
+    livekit::render::RenderFrameMetadata::Ptr frame;
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
@@ -228,6 +228,9 @@ livekit::DetachedShareViewport SharedScreenWindow::viewport() const {
     result.minimized = isMinimized();
     return result;
 }
+bool SharedScreenWindow::usesDx11() const {
+    return _gpu && _canvas && _canvas->usesDx11();
+}
 bool SharedScreenWindow::viewing() const {
     return isVisible() && !isMinimized() && _view->width() > 0 && _view->height() > 0;
 }
@@ -262,7 +265,7 @@ void SharedScreenWindow::setFrame(const QImage& image, livekit::render::VideoRen
     updateFrameGeometry(frame ? frame->view().width : image.width(),
         frame ? frame->view().height : image.height(), frame ? frame->view().rotation_degrees : 0);
     _view->image = image;
-    _view->frame = std::move(frame);
+    _view->frame = frame ? frame->presentationMetadata() : nullptr;
     if (_view->frame) _view->frame->SetRenderExpected(true);
     ++_receivedFrames;
     updateTransform();

@@ -122,6 +122,13 @@ ContactsPageWidget::ContactsPageWidget(
 
     initUi();
 
+    connect(&_session, &OpenMeeting::SessionManager::authenticationReset, this, [this] {
+        _quickAddAccountEdit->clear();
+        _quickAddGreetingEdit->clear();
+        _quickAddSendBtn->setEnabled(true);
+        _quickAddStatusLabel->hide();
+    });
+
     connect(&_catalog, &OpenMeeting::ContactCatalogController::contactsChanged, this, [this] {
         rebuildContactsTree();
         if (!_searchKeyword.isEmpty()) {
@@ -162,9 +169,6 @@ ContactsPageWidget::ContactsPageWidget(
         }
     });
     connect(&_catalog, &OpenMeeting::ContactCatalogController::selfProfileChanged, this, [this] {
-        if (!_orgExpandInitialized && _catalog.hasOrganization()) {
-            rebuildOrgTree();
-        }
         if (!_selectedUserId.isEmpty() && _selectedUserId == _session.userId() && _rightStack->currentIndex() == 1) {
             showContactDetail(_selectedUserId, false);
         }
@@ -262,10 +266,10 @@ void ContactsPageWidget::initUi() {
     _requestsEntryBtn->setObjectName(QStringLiteral("contactsRequestsEntry"));
     _requestsEntryBtn->setCheckable(true);
     _requestsEntryBtn->setCursor(Qt::PointingHandCursor);
-    _requestsEntryBtn->setFixedHeight(38);
+    _requestsEntryBtn->setFixedHeight(34);
     auto *entryRowLayout = new QHBoxLayout(_requestsEntryBtn);
     entryRowLayout->setContentsMargins(10, 0, 10, 0);
-    entryRowLayout->setSpacing(8);
+    entryRowLayout->setSpacing(6);
 
     _requestsEntryTitle = new QLabel(_requestsEntryBtn);
     _requestsEntryTitle->setObjectName(QStringLiteral("contactsRequestsEntryTitle"));
@@ -275,9 +279,11 @@ void ContactsPageWidget::initUi() {
     _requestsBadgeLabel = new QLabel(_requestsEntryBtn);
     _requestsBadgeLabel->setObjectName(QStringLiteral("contactsRequestsBadge"));
     _requestsBadgeLabel->setAlignment(Qt::AlignCenter);
+    _requestsBadgeLabel->setFixedHeight(16);
+    _requestsBadgeLabel->setMinimumWidth(16);
     _requestsBadgeLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     _requestsBadgeLabel->hide();
-    entryRowLayout->addWidget(_requestsBadgeLabel);
+    entryRowLayout->addWidget(_requestsBadgeLabel, 0, Qt::AlignVCenter);
 
     _requestsChevronLabel = new QLabel(QStringLiteral("›"), _requestsEntryBtn);
     _requestsChevronLabel->setObjectName(QStringLiteral("contactsRequestsChevron"));
@@ -418,7 +424,7 @@ void ContactsPageWidget::initUi() {
                 _expandedDeptIds.insert(deptId);
                 if (!_orgDirModel->isDeptLoaded(deptId)) {
                     _orgDirModel->setDeptLoading(deptId);
-                    _catalog.loadDeptMembers(deptId);
+                    _catalog.ensureDeptMembersLoaded(deptId);
                 }
             }
         }
@@ -434,6 +440,10 @@ void ContactsPageWidget::initUi() {
         if (kind == ContactsTreeNodeKind::Department) {
             if (_orgTreeView->isExpanded(index)) _orgTreeView->collapse(index);
             else _orgTreeView->expand(index);
+            return;
+        }
+        if (kind == ContactsTreeNodeKind::LoadMore) {
+            _catalog.loadMoreDeptMembers(index.data(TreeNodeIdRole).toString());
             return;
         }
         if (kind == ContactsTreeNodeKind::Member) {
@@ -452,6 +462,11 @@ void ContactsPageWidget::initUi() {
         const bool isBlocked = index.data(TreeIsBlockedRole).toBool();
         if (!uid.isEmpty() && !isBlocked && uid != _session.userId()) {
             emit videoCallRequested(uid);
+        }
+    });
+    connect(_orgTreeView, &QTreeView::activated, this, [this](const QModelIndex &index) {
+        if (static_cast<ContactsTreeNodeKind>(index.data(TreeNodeKindRole).toInt()) == ContactsTreeNodeKind::LoadMore) {
+            _catalog.loadMoreDeptMembers(index.data(TreeNodeIdRole).toString());
         }
     });
     _leftStack->addWidget(_orgTreeView);
@@ -743,6 +758,7 @@ void ContactsPageWidget::initUi() {
 
     auto *addCard = new QFrame(_requestsPage);
     addCard->setObjectName(QStringLiteral("contactQuickAddCard"));
+    addCard->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
     auto *addLayout = new QVBoxLayout(addCard);
     addLayout->setContentsMargins(16, 14, 16, 14);
     addLayout->setSpacing(10);
@@ -756,12 +772,18 @@ void ContactsPageWidget::initUi() {
     auto *addRow = new QHBoxLayout();
     addRow->setSpacing(8);
     _quickAddAccountEdit = new QLineEdit(addCard);
+    _quickAddAccountEdit->setObjectName(QStringLiteral("contactQuickAddAccount"));
     _quickAddAccountEdit->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Enter exact account, email, or employee no."));
     _quickAddGreetingEdit = new QLineEdit(addCard);
+    _quickAddGreetingEdit->setObjectName(QStringLiteral("contactQuickAddGreeting"));
     _quickAddGreetingEdit->setMaxLength(120);
     _quickAddGreetingEdit->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Greeting message (optional)"));
     _quickAddSendBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Send Request"), addCard);
+    _quickAddSendBtn->setObjectName(QStringLiteral("contactQuickAddSend"));
     _quickAddSendBtn->setCursor(Qt::PointingHandCursor);
+    _quickAddAccountEdit->setMinimumHeight(34);
+    _quickAddGreetingEdit->setMinimumHeight(34);
+    _quickAddSendBtn->setMinimumHeight(34);
     connect(_quickAddSendBtn, &QPushButton::clicked, this, [this] { handleQuickAddSearch(); });
     addRow->addWidget(_quickAddAccountEdit, 2);
     addRow->addWidget(_quickAddGreetingEdit, 2);
@@ -776,12 +798,13 @@ void ContactsPageWidget::initUi() {
     reqOuter->addWidget(addCard);
 
     auto *inboxTitle = new QLabel(QCoreApplication::translate("MeetingUI", "Contact Requests"), _requestsPage);
+    inboxTitle->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     inboxTitle->setFont(tf);
     reqOuter->addWidget(inboxTitle);
 
     _requestsEmptyLabel = new QLabel(QCoreApplication::translate("MeetingUI", "No contact requests yet."), _requestsPage);
     _requestsEmptyLabel->setObjectName(QStringLiteral("contactsRequestsEmpty"));
-    reqOuter->addWidget(_requestsEmptyLabel);
+    reqOuter->addWidget(_requestsEmptyLabel, 1, Qt::AlignTop);
 
     _requestModel = new ContactRequestListModel(this);
     _requestDelegate = new ContactRequestItemDelegate(this);
@@ -877,7 +900,7 @@ void ContactsPageWidget::refreshTheme() {
         "QPushButton#contactsRequestsEntry:hover { background: %11; }"
         "QPushButton#contactsRequestsEntry:checked { background: %7; }"
         "QLabel#contactsRequestsEntryTitle { color: %4; font-size: 13px; font-weight: 500; background: transparent; }"
-        "QLabel#contactsRequestsBadge { background: %9; color: #ffffff; border-radius: 9px; padding: 1px 6px; font-size: 11px; font-weight: 600; min-width: 18px; }"
+        "QLabel#contactsRequestsBadge { background: %6; color: %8; border-radius: 8px; padding: 0 4px; font-size: 11px; font-weight: 600; }"
         "QLabel#contactsRequestsChevron { color: %12; font-size: 16px; background: transparent; }"
         "QFrame#contactsSegTrack { background: %10; border-radius: 8px; }"
         "QPushButton#contactsSegContacts, QPushButton#contactsSegOrg { "
@@ -885,6 +908,10 @@ void ContactsPageWidget::refreshTheme() {
         "QPushButton#contactsSegContacts:checked, QPushButton#contactsSegOrg:checked { "
         "  background: %2; color: %6; font-weight: 600; }"
         "QFrame#contactDetailInfoCard, QFrame#contactQuickAddCard { background: %2; border: 1px solid %3; border-radius: 10px; }"
+        "QLineEdit#contactQuickAddAccount, QLineEdit#contactQuickAddGreeting { background: %2; color: %4; border: 1px solid %3; border-radius: 8px; padding: 0 10px; }"
+        "QLineEdit#contactQuickAddAccount:focus, QLineEdit#contactQuickAddGreeting:focus { border-color: %6; }"
+        "QPushButton#contactQuickAddSend { background: %6; color: %8; border: none; border-radius: 8px; padding: 0 14px; font-weight: 600; }"
+        "QPushButton#contactQuickAddSend:disabled { background: %10; color: %12; }"
         "QLabel#contactsEmptyPlaceholder, QLabel#contactDetailSubtitle, QLabel#contactsListStatus, QLabel#contactsRequestsEmpty { color: %5; }"
         "QLabel#contactDetailName, QLabel#contactDetailHistoryTitle { color: %4; }"
         "QLabel#contactDetailBlockedBanner { background: %3; color: %9; border-radius: 8px; padding: 8px 12px; }"
@@ -949,7 +976,7 @@ void ContactsPageWidget::setSidebarTab(SidebarTab tab) {
             for (const auto &deptId : _expandedDeptIds) {
                 if (_orgDirModel && !_orgDirModel->isDeptLoaded(deptId)) {
                     _orgDirModel->setDeptLoading(deptId);
-                    _catalog.loadDeptMembers(deptId);
+                    _catalog.ensureDeptMembersLoaded(deptId);
                 }
             }
         }
@@ -1123,30 +1150,8 @@ void ContactsPageWidget::rebuildOrgTree() {
 
     if (!_orgDirModel->hasDepartments()) {
         _expandedDeptIds.clear();
-        _orgExpandInitialized = false;
         syncViewportWatch();
         return;
-    }
-
-    if (!_orgExpandInitialized) {
-        QString targetDept;
-        if (_catalog.selfProfile()) {
-            for (const auto &did : _catalog.selfProfile()->primaryDeptIds) {
-                if (_orgDirModel->indexForDeptId(did).isValid()) {
-                    targetDept = did;
-                    break;
-                }
-            }
-        }
-        if (targetDept.isEmpty() && !_catalog.departments().empty()) {
-            targetDept = _catalog.departments().front().deptId;
-        }
-        if (!targetDept.isEmpty()) {
-            _orgExpandInitialized = true;
-            for (const auto &ancId : _orgDirModel->ancestorDeptIds(targetDept)) {
-                _expandedDeptIds.insert(ancId);
-            }
-        }
     }
 
     // Prune deleted departments from expanded state & restore valid ones
@@ -1157,12 +1162,11 @@ void ContactsPageWidget::rebuildOrgTree() {
         validExpanded.insert(deptId);
         _orgTreeView->setExpanded(idx, true);
 
-        const auto cachedMembers = _catalog.deptMembers(deptId);
-        if (!cachedMembers.empty() || _catalog.isDeptMembersRestricted(deptId)) {
+        if (_catalog.hasDeptMembersResult(deptId)) {
             applyDeptMembersToTree(deptId);
         } else {
             _orgDirModel->setDeptLoading(deptId);
-            _catalog.loadDeptMembers(deptId);
+            _catalog.ensureDeptMembersLoaded(deptId);
         }
     }
     _expandedDeptIds = std::move(validExpanded);
@@ -1201,7 +1205,8 @@ void ContactsPageWidget::applyDeptMembersToTree(const QString &deptId) {
         return a.displayName.localeAwareCompare(b.displayName) < 0;
     });
 
-    _orgDirModel->setDeptMembers(deptId, std::move(items), restricted);
+    _orgDirModel->setDeptMembers(deptId, std::move(items), restricted,
+        _catalog.hasMoreDeptMembers(deptId), _catalog.isDeptMembersLoading(deptId));
     syncViewportWatch();
 }
 
@@ -1515,7 +1520,7 @@ void ContactsPageWidget::handleAddOrRequestContact() {
     const QString greeting = QInputDialog::getText(
         this,
         QCoreApplication::translate("MeetingUI", "Add Contact"),
-        QCoreApplication::translate("MeetingUI", "Optional greeting message (organization colleagues are added immediately):"),
+        QCoreApplication::translate("MeetingUI", "Optional greeting message (the recipient must accept):"),
         QLineEdit::Normal,
         QString(),
         &ok).trimmed();
@@ -1604,8 +1609,8 @@ void ContactsPageWidget::handleQuickAddSearch() {
     _quickAddStatusLabel->show();
 
     QPointer<ContactsPageWidget> self(this);
-    _session.httpClient().searchDirectory(keyword, {}, QStringLiteral("all"), 0, 5,
-        [self, greeting](bool ok, const OpenMeeting::DirectorySearchResponse &resp, const OpenMeeting::HttpError &err) {
+    const bool lookupStarted = _catalog.lookupContactRequestRecipient(keyword, [self, greeting](
+            bool ok, const std::optional<OpenMeeting::UserProfile> &target, const OpenMeeting::HttpError &err) {
             if (!self) return;
             if (!ok) {
                 self->_quickAddSendBtn->setEnabled(true);
@@ -1614,14 +1619,13 @@ void ContactsPageWidget::handleQuickAddSearch() {
                     : err.message);
                 return;
             }
-            if (resp.users.empty()) {
+            if (!target) {
                 self->_quickAddSendBtn->setEnabled(true);
                 self->_quickAddStatusLabel->setText(QCoreApplication::translate("MeetingUI", "No matching user found."));
                 return;
             }
-            const auto &target = resp.users.front();
-            self->_catalog.sendContactRequest(target.userId, greeting,
-                [self, targetName = target.displayName()](bool reqOk, const OpenMeeting::SendContactRequestResponse &reqResp, const OpenMeeting::HttpError &reqErr) {
+            const bool sendStarted = self->_catalog.sendContactRequest(target->userId, greeting,
+                [self, targetName = target->displayName()](bool reqOk, const OpenMeeting::SendContactRequestResponse &reqResp, const OpenMeeting::HttpError &reqErr) {
                     if (!self) return;
                     self->_quickAddSendBtn->setEnabled(true);
                     if (!reqOk) {
@@ -1636,7 +1640,15 @@ void ContactsPageWidget::handleQuickAddSearch() {
                         ? QCoreApplication::translate("MeetingUI", "%1 has been added to your contacts.").arg(targetName)
                         : QCoreApplication::translate("MeetingUI", "Contact request sent to %1.").arg(targetName));
                 });
+            if (!sendStarted && self) {
+                self->_quickAddSendBtn->setEnabled(true);
+                self->_quickAddStatusLabel->setText(QCoreApplication::translate("MeetingUI", "Failed to send contact request."));
+            }
         });
+    if (!lookupStarted && self) {
+        self->_quickAddSendBtn->setEnabled(true);
+        self->_quickAddStatusLabel->setText(QCoreApplication::translate("MeetingUI", "Directory lookup failed."));
+    }
 }
 
 } // namespace MeetingUI

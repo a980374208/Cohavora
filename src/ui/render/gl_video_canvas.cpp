@@ -178,8 +178,8 @@ struct GlVideoCanvas::Worker {
                 if (it != uploaded.end() && it->second.frame == resource.frame && it->second.image.cacheKey() == resource.image.cacheKey()) continue;
                 if (resource.frame) {
                     const auto upload_started_at = Clock::now();
-                    result = device->Upload(resource.id, resource.frame->view());
-                    resource.frame->NotifyRenderStage(
+                    result = device->Upload(resource.id, resource.frame->pixels->view());
+                    resource.frame->pixels->NotifyRenderStage(
                         "opengl_upload_cpu_submit",
                         std::chrono::duration_cast<std::chrono::microseconds>(
                             Clock::now() - upload_started_at));
@@ -193,6 +193,7 @@ struct GlVideoCanvas::Worker {
                     result = device->Upload(resource.id, view, true);
                 }
                 if (result != LK_RENDER_OK) break;
+                if (resource.frame) resource.frame->pixels.reset();
                 uploaded[resource.id.value] = resource;
             }
             std::chrono::microseconds render_duration{-1};
@@ -227,9 +228,9 @@ struct GlVideoCanvas::Worker {
             const auto submitted_at = Clock::now();
             CanvasRenderTimingBatch canvas_timing;
             for (const auto& resource : scene->resources) {
-                if (resource.frame && submitted_resources.contains(resource.id.value)) {
-                    canvas_timing.Add(resource.frame->renderMetadata());
-                    resource.frame->NotifyRendered(
+                if (resource.frame && resource.frame->metadata && submitted_resources.contains(resource.id.value)) {
+                    canvas_timing.Add(*resource.frame->metadata);
+                    resource.frame->metadata->NotifyRendered(
                         scene->measurement_point.c_str(), submitted_at);
                 }
             }
@@ -516,7 +517,7 @@ void GlVideoCanvas::submitFrame(const std::string& key, VideoRenderFrame::Ptr fr
     if (!videos_.count(key) && videos_.size() + overlays_.size() >= kMaxResources) { fail(RenderGpuFailure::ResourceLimit); return; }
     auto& resource = videos_[key];
     if (!resource.id.value) resource.id = {next_resource_++, target_.surface_generation};
-    resource.frame = std::move(frame);
+    resource.frame = std::make_shared<CanvasFrame>(std::move(frame));
 }
 void GlVideoCanvas::removeFrame(const std::string& key) { videos_.erase(key); }
 void GlVideoCanvas::removeDecorationTexture(const std::string& key) { overlays_.erase(key); }
@@ -524,8 +525,7 @@ void GlVideoCanvas::clearBackend() { videos_.clear(); overlays_.clear(); buildin
 VideoFrameGeometry GlVideoCanvas::frameGeometry(const std::string& key) const {
     const auto it = videos_.find(key);
     if (it == videos_.end() || !it->second.frame) return {};
-    const auto& view = it->second.frame->view();
-    return {int(view.width), int(view.height), view.rotation_degrees, true};
+    return it->second.frame->geometry;
 }
 bool GlVideoCanvas::beginFrame(QSize& pixels) {
     if (failed_ || !worker_) return false;

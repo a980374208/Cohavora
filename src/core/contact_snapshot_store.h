@@ -23,7 +23,7 @@ public:
     explicit ContactSnapshotStore(QString baseDirectory = {});
 
     [[nodiscard]] static QString resolveBaseDirectory(const QSettings &settings);
-    [[nodiscard]] static QString accountScopeKey(bool loggedIn, const QString &userId);
+    [[nodiscard]] static QString accountScopeKey(bool loggedIn, const QString &userId, const QString &serviceUrl = {});
 
     [[nodiscard]] const QString &baseDirectory() const { return _baseDirectory; }
 

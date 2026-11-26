@@ -8,6 +8,7 @@
 #include <cmath>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 
 namespace livekit {
 
@@ -310,8 +311,12 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
             (server_enabled_codecs.empty() || server.contains(codec));
     };
 
-    constexpr std::array<const char*, 4> kFallbackOrder{
+    const bool screenshare = requested_options.source == TrackSource::ScreenShareVideo;
+    constexpr std::array<const char*, 4> kCameraFallbackOrder{
         "vp8", "h264", "vp9", "av1"};
+    constexpr std::array<const char*, 4> kScreenShareAutoOrder{
+        "vp9", "vp8", "av1", "h264"};
+    const auto& auto_order = screenshare ? kScreenShareAutoOrder : kCameraFallbackOrder;
     const bool auto_hardware_h264 = plan.requested_codec == "auto" &&
         prefer_hardware_h264 && allowed("h264");
     plan.effective_codec = plan.requested_codec;
@@ -319,18 +324,18 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
         plan.effective_codec = "h264";
     } else if (plan.requested_codec == "auto") {
         const auto selected = std::find_if(
-            kFallbackOrder.begin(), kFallbackOrder.end(),
+            auto_order.begin(), auto_order.end(),
             [&](const char* codec) { return allowed(codec); });
-        if (selected == kFallbackOrder.end()) {
+        if (selected == auto_order.end()) {
             plan.error = "no video codec is available in the local/server publish intersection";
             return plan;
         }
         plan.effective_codec = *selected;
     } else if (!allowed(plan.effective_codec)) {
         const auto fallback = std::find_if(
-            kFallbackOrder.begin(), kFallbackOrder.end(),
+            kCameraFallbackOrder.begin(), kCameraFallbackOrder.end(),
             [&](const char* codec) { return allowed(codec); });
-        if (fallback == kFallbackOrder.end()) {
+        if (fallback == kCameraFallbackOrder.end()) {
             plan.error = "no video codec is available in the local/server publish intersection";
             return plan;
         }
@@ -346,10 +351,23 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
     plan.effective.auto_hardware_h264 = auto_hardware_h264;
     plan.effective.preflight_h264_formats.clear();
     // After publication the negotiated H264 codec keeps its software fallback;
-    // preflight may instead resolve VP8 before any SFU metadata is sent.
+    // preflight may instead resolve VP9/VP8 before any SFU metadata is sent.
     plan.effective.allow_vp8_fallback = false;
     if (plan.requested_codec != "auto" && plan.used_fallback()) {
         plan.effective.scalability_mode.clear();
+    }
+
+    const bool auto_screenshare_single_stream = screenshare &&
+        plan.requested_codec == "auto" &&
+        (plan.effective_codec == "vp9" || plan.effective_codec == "av1") &&
+        !requested_options.backup_codec.has_value();
+    if (auto_screenshare_single_stream) {
+        // Automatic screen share uses single-stream VP9/AV1 without spawning a
+        // second backup encoder, keeping CPU load bounded and E2EE compatible.
+        plan.effective.simulcast = false;
+        if (plan.effective_codec == "av1" && plan.effective.scalability_mode.empty()) {
+            plan.effective.scalability_mode = "L1T1";
+        }
     }
 
     if (plan.effective_codec == "h265") {
@@ -373,7 +391,8 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
         }
     }
 
-    const bool wants_backup = plan.effective.simulcast &&
+    const bool wants_backup = !auto_screenshare_single_stream &&
+        plan.effective.simulcast &&
         (plan.effective_codec == "vp9" || plan.effective_codec == "av1") &&
         (requested_options.auto_backup_codec || requested_options.backup_codec.has_value());
     std::optional<std::string> backup;
@@ -426,16 +445,41 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolveHardwarePreflightFallback(
     failed.effective.allow_vp8_fallback = false;
     failed.effective.preflight_h264_formats.clear();
     failed.requested.preflight_h264_formats.clear();
-    if (!local.contains("vp8") ||
-        (!server_enabled_codecs.empty() && !server.contains("vp8"))) {
-        failed.error = "hardware H264 preflight failed and VP8 is unavailable in the local/server publish intersection";
+    const bool screenshare_auto =
+        original_plan.requested.source == TrackSource::ScreenShareVideo &&
+        original_plan.requested_codec == "auto";
+    const auto allowed = [&](const char* codec) {
+        return local.contains(codec) &&
+            (server_enabled_codecs.empty() || server.contains(codec));
+    };
+    const char* selected = nullptr;
+    if (screenshare_auto) {
+        for (const char* candidate : {"vp9", "vp8", "av1"}) {
+            if (allowed(candidate)) {
+                selected = candidate;
+                break;
+            }
+        }
+    } else if (allowed("vp8")) {
+        selected = "vp8";
+    }
+    if (!selected) {
+        failed.error = screenshare_auto
+            ? "hardware H264 preflight failed and no fallback codec is available in the local/server publish intersection"
+            : "hardware H264 preflight failed and VP8 is unavailable in the local/server publish intersection";
         return failed;
     }
     auto options = original_plan.requested;
-    options.video_codec = "vp8";
+    options.video_codec = selected;
     options.scalability_mode.clear();
     options.backup_codec.reset();
     options.auto_backup_codec = false;
+    if (screenshare_auto && (std::string_view(selected) == "vp9" || std::string_view(selected) == "av1")) {
+        options.simulcast = false;
+        if (std::string_view(selected) == "av1") {
+            options.scalability_mode = "L1T1";
+        }
+    }
     auto fallback = ResolvePublishPlan(width, height, options,
         local_sender_codecs, server_enabled_codecs, false);
     fallback.requested = failed.requested;

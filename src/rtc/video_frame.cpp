@@ -70,6 +70,12 @@ VideoFrame::VideoFrame(webrtc::scoped_refptr<webrtc::NV12Buffer> nv12_buffer)
       size_(CalculateBufferSize(width_, height_, VideoBufferType::NV12)),
       nv12_buffer_(std::move(nv12_buffer)) {}
 
+VideoFrame VideoFrame::fromPooledNV12(webrtc::scoped_refptr<webrtc::NV12Buffer> buffer) {
+    VideoFrame frame(std::move(buffer));
+    frame.immutable_nv12_ = frame.nv12_buffer_ != nullptr;
+    return frame;
+}
+
 VideoFrame::VideoFrame(webrtc::scoped_refptr<webrtc::VideoFrameBuffer> native_buffer,
                        VideoBufferType reported_type)
     : width_(native_buffer ? native_buffer->width() : 0),
@@ -105,15 +111,48 @@ VideoFrame VideoFrame::createUninit(int width, int height, VideoBufferType type)
     return frame;
 }
 
+webrtc::scoped_refptr<const webrtc::NV12BufferInterface> VideoFrame::readOnlyNV12() const {
+    if (nv12_buffer_) return nv12_buffer_;
+    if (!native_buffer_) return nullptr;
+#if defined(_WIN32)
+    if (const auto* native = D3d11Nv12FrameBuffer::FromVideoFrameBuffer(native_buffer_.get()))
+        return native->ToNV12();
+#endif
+    // Foreign mapped buffers may require final release on their owner thread.
+    // The screen worker copies those before handing any pixels to the renderer.
+    return nullptr;
+}
+
+std::uint8_t* VideoFrame::overwriteNV12() {
+    if (native_buffer_ || !nv12_buffer_) return nullptr;
+    immutable_nv12_ = false;
+    if (!HasExclusiveNV12Ref(nv12_buffer_))
+        nv12_buffer_ = webrtc::NV12Buffer::Create(width_, height_);
+    return nv12_buffer_->MutableDataY();
+}
+
 std::uint8_t* VideoFrame::data() noexcept {
+    immutable_nv12_ = false;
     if (!nv12_buffer_ && !shared_data_ && native_buffer_) {
         (void)static_cast<const VideoFrame*>(this)->data();
     }
     if (nv12_buffer_) {
         if (!HasExclusiveNV12Ref(nv12_buffer_)) {
             auto copy = webrtc::NV12Buffer::Create(width_, height_);
-            std::memcpy(copy->MutableDataY(), nv12_buffer_->DataY(), size_);
+            libyuv::NV12Copy(
+                nv12_buffer_->DataY(), nv12_buffer_->StrideY(),
+                nv12_buffer_->DataUV(), nv12_buffer_->StrideUV(),
+                copy->MutableDataY(), copy->StrideY(),
+                copy->MutableDataUV(), copy->StrideUV(),
+                width_, height_);
             nv12_buffer_ = std::move(copy);
+        }
+        // A writable mapping makes the owned CPU pixels authoritative for this copy.
+        if (native_buffer_) {
+            type_ = VideoBufferType::NV12;
+            size_ = CalculateBufferSize(width_, height_, type_);
+            native_buffer_ = nullptr;
+            mapped_i420_ = nullptr;
         }
         return nv12_buffer_->MutableDataY();
     }

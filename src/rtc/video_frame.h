@@ -40,6 +40,9 @@ public:
     VideoFrame(int width, int height, VideoBufferType type, std::vector<std::uint8_t> data);
 #ifndef LK_RENDER_MODULE_BUILD
     explicit VideoFrame(webrtc::scoped_refptr<webrtc::NV12Buffer> nv12_buffer);
+    // The producer may recycle these pixels only after all readers release them.
+    static VideoFrame fromPooledNV12(webrtc::scoped_refptr<webrtc::NV12Buffer> buffer);
+    bool canRetainNV12() const noexcept { return immutable_nv12_; }
     explicit VideoFrame(webrtc::scoped_refptr<webrtc::VideoFrameBuffer> native_buffer,
                         VideoBufferType reported_type = VideoBufferType::NV12);
 #endif
@@ -57,6 +60,9 @@ public:
     std::size_t dataSize() const noexcept { return size_; }
 
 #ifndef LK_RENDER_MODULE_BUILD
+    webrtc::scoped_refptr<const webrtc::NV12BufferInterface> readOnlyNV12() const;
+    // For producers about to overwrite every pixel in a CPU NV12 frame.
+    std::uint8_t* overwriteNV12();
     webrtc::scoped_refptr<webrtc::NV12BufferInterface> nv12Buffer() const noexcept {
         return nv12_buffer_;
     }
@@ -82,6 +88,7 @@ private:
     webrtc::scoped_refptr<webrtc::VideoFrameBuffer> native_buffer_;
     mutable webrtc::scoped_refptr<webrtc::NV12Buffer> nv12_buffer_;
     mutable webrtc::scoped_refptr<webrtc::I420BufferInterface> mapped_i420_;
+    bool immutable_nv12_ = false;
 #endif
     std::shared_ptr<std::vector<std::uint8_t>> shared_data_;
 };

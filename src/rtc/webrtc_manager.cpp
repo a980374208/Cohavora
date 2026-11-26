@@ -6,6 +6,7 @@
 #include "auto_hardware_video_encoder.h"
 #include "bounded_encoder_worker.h"
 #include "final_h264_level_guard.h"
+#include "h265_level_constraints.h"
 #include "retained_vp8_decoder.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include "telemetry/sdp_negotiation_trace.h"
@@ -63,6 +64,7 @@
 #include "h265_video_decoder.h"
 #endif
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -138,6 +140,19 @@ detail::LinuxEncoderCapabilityCache<VideoEncoderCapabilities>& LinuxEncoderCapab
     return *cache;
 }
 #endif
+
+EncoderPreference ParseEncoderPreference(const std::string& preference) {
+    if (CompareCodecName(preference.c_str(), "software") == 0) return EncoderPreference::kSoftware;
+#if !defined(__linux__)
+    if (CompareCodecName(preference.c_str(), "amf") == 0) return EncoderPreference::kAmf;
+#endif
+    if (CompareCodecName(preference.c_str(), "nvenc") == 0) return EncoderPreference::kNvenc;
+    if (CompareCodecName(preference.c_str(), "qsv") == 0) return EncoderPreference::kQsv;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    if (CompareCodecName(preference.c_str(), "vaapi") == 0) return EncoderPreference::kVaapi;
+#endif
+    return EncoderPreference::kAuto;
+}
 
 const char* PreferenceName(EncoderPreference preference) {
     switch (preference) {
@@ -224,12 +239,35 @@ bool HardwareRetirementFailed() {
         webrtc::external_encoder::Status::kRetirementFailed;
 }
 
+bool IsAmfH264Level5Format(const webrtc::SdpVideoFormat& format) {
+    if (!CodecNameEquals(format, "H264")) return false;
+    const auto mode = format.parameters.find("packetization-mode");
+    const auto profile = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+    return mode != format.parameters.end() && mode->second == "1" && profile &&
+        profile->profile == webrtc::H264Profile::kProfileConstrainedBaseline &&
+        profile->level == webrtc::H264Level::kLevel5;
+}
+
 const std::vector<webrtc::SdpVideoFormat>& CachedBackendFormats() {
     // Discovery may initialize hardware. Run it once per process, rather than
     // on every settings/UI capability query. Creation still checks live state.
     static const auto formats = [] {
         try {
-            return webrtc::InternalEncoderFactory().GetSupportedFormats();
+            auto formats = webrtc::InternalEncoderFactory().GetSupportedFormats();
+            // The SDK's Level 4.0 hardware format is Baseline. LiveKit's
+            // default matching profile is Constrained Baseline (42e0xx).
+            // Put the matching Level 5.0 format ahead of the SDK's Level 3.1
+            // format because WebRTC treats levels of the same profile as one codec.
+            const webrtc::SdpVideoFormat amf_probe("H264", {
+                {"profile-level-id", "420032"}, {"packetization-mode", "1"},
+                {"level-asymmetry-allowed", "1"}});
+            if (webrtc::ProbeAmfVideoEncoderAvailability(amf_probe) ==
+                    webrtc::external_encoder::Status::kOk) {
+                auto screen_format = amf_probe;
+                screen_format.parameters["profile-level-id"] = "42e032";
+                formats.insert(formats.begin(), std::move(screen_format));
+            }
+            return formats;
         } catch (...) {
             // Cache failure too: a later UI read must not retry discovery.
             return std::vector<webrtc::SdpVideoFormat>{};
@@ -239,11 +277,55 @@ const std::vector<webrtc::SdpVideoFormat>& CachedBackendFormats() {
 }
 #endif
 
+bool IsSoftwareScreenShareH264Level5Format(const webrtc::SdpVideoFormat& format) {
+    if (CompareCodecName(format.name.c_str(), "H264") != 0) return false;
+    const auto mode = format.parameters.find("packetization-mode");
+    const auto profile = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+    return mode != format.parameters.end() && mode->second == "1" && profile &&
+        profile->profile == webrtc::H264Profile::kProfileConstrainedBaseline &&
+        profile->level == webrtc::H264Level::kLevel5;
+}
+
+std::vector<webrtc::SdpVideoFormat> BuildSoftwareH264Formats() {
+    auto base = webrtc::SupportedH264Codecs(true);
+    if (base.empty()) return base;
+    std::vector<webrtc::SdpVideoFormat> result;
+    // Advertise Constrained Baseline Level 5.0 (42e032) ahead of lower levels
+    // so WebRTC's CodecVendor exposes 42e032 for screen share (matching LiveKit's
+    // 42e0xx profile), while camera software plans clamp to Level 4.0 via
+    // SoftwareH264SendLevel(false). Advertise Baseline Level 4.0 (420028) ahead
+    // of 42001f as well, and retain all base formats for direct lookup.
+    result.push_back(webrtc::CreateH264Format(
+        webrtc::H264Profile::kProfileConstrainedBaseline,
+        webrtc::H264Level::kLevel5, "1", true));
+    result.push_back(webrtc::CreateH264Format(
+        webrtc::H264Profile::kProfileBaseline,
+        webrtc::H264Level::kLevel4, "1", true));
+    result.push_back(webrtc::CreateH264Format(
+        webrtc::H264Profile::kProfileConstrainedBaseline,
+        webrtc::H264Level::kLevel4, "1", true));
+    result.push_back(webrtc::CreateH264Format(
+        webrtc::H264Profile::kProfileConstrainedBaseline,
+        webrtc::H264Level::kLevel4, "0", true));
+    result.push_back(webrtc::CreateH264Format(
+        webrtc::H264Profile::kProfileBaseline,
+        webrtc::H264Level::kLevel4, "0", true));
+    for (auto& format : base) {
+        if (std::none_of(result.begin(), result.end(), [&](const auto& existing) {
+                return existing.name == format.name &&
+                    existing.parameters == format.parameters;
+            })) {
+            result.push_back(std::move(format));
+        }
+    }
+    return result;
+}
+
 #if defined(COHAVORA_HAS_BACKEND_ENCODERS) || defined(COHAVORA_HAS_X265_ENCODER) || defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
 const std::vector<webrtc::SdpVideoFormat>& CachedSoftwareFormats() {
     static const auto formats = [] {
         try {
-            auto result = webrtc::SupportedH264Codecs(true);
+            auto result = BuildSoftwareH264Formats();
 #if defined(COHAVORA_HAS_BACKEND_ENCODERS) || defined(COHAVORA_HAS_X265_ENCODER)
             // Explicit software intent must not initialize a vendor GPU backend.
             for (const char* level : {"120", "93"}) {
@@ -369,8 +451,12 @@ public:
 #endif
 #else
         if (webrtc::H264Encoder::IsSupported()) {
-            auto h264 = webrtc::SupportedH264Codecs();
-            formats.insert(formats.end(), h264.begin(), h264.end());
+            auto h264 = BuildSoftwareH264Formats();
+            for (auto& format : h264) {
+                if (!format.IsCodecInList(formats)) {
+                    formats.push_back(std::move(format));
+                }
+            }
         }
 #endif
         const auto vp9 = webrtc::SupportedVP9Codecs(true);
@@ -584,7 +670,16 @@ public:
                         [&](const auto& existing) {
                             return existing.name == format.name &&
                                 existing.parameters == format.parameters;
-                        })) stable_formats_.push_back(format);
+                        })) {
+                    if (IsSoftwareScreenShareH264Level5Format(format)) {
+                        // Place 42e032 ahead of lower-level Constrained Baseline
+                        // formats (e.g. 42e01f on non-AMF hosts) so CodecVendor
+                        // advertises Level 5.0 for software screen sharing.
+                        stable_formats_.insert(stable_formats_.begin(), format);
+                    } else {
+                        stable_formats_.push_back(format);
+                    }
+                }
             }
             std::erase_if(stable_formats_, [](const auto& format) {
                 return CodecNameEquals(format, "H265") &&
@@ -1260,16 +1355,7 @@ std::optional<std::string> AudioDeviceIdentityAtIndex(
 } // namespace
 
 void SetVideoEncoderPreference(const std::string& preference) {
-    auto selected = EncoderPreference::kAuto;
-    if (CompareCodecName(preference.c_str(), "software") == 0) selected = EncoderPreference::kSoftware;
-#if !defined(__linux__)
-    else if (CompareCodecName(preference.c_str(), "amf") == 0) selected = EncoderPreference::kAmf;
-#endif
-    else if (CompareCodecName(preference.c_str(), "nvenc") == 0) selected = EncoderPreference::kNvenc;
-    else if (CompareCodecName(preference.c_str(), "qsv") == 0) selected = EncoderPreference::kQsv;
-#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
-    else if (CompareCodecName(preference.c_str(), "vaapi") == 0) selected = EncoderPreference::kVaapi;
-#endif
+    const auto selected = ParseEncoderPreference(preference);
     const auto previous = video_encoder_preference.exchange(selected, std::memory_order_relaxed);
     if (previous != selected) {
         RTC_LOG(LS_INFO) << "Product video encoder preference=" << PreferenceName(selected)
@@ -1412,6 +1498,9 @@ std::optional<std::size_t> InvalidPreflightLayer(
 }
 
 bool IsPreflightH264Format(const webrtc::SdpVideoFormat& format) {
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+    if (IsAmfH264Level5Format(format)) return true;
+#endif
     if (!CodecNameEquals(format, "H264")) return false;
     const auto mode = format.parameters.find("packetization-mode");
     const auto profile = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
@@ -1702,6 +1791,8 @@ VideoEncoderPreflightResult PreflightVideoEncoder(
                 continue;
             }
             for (const auto& format : formats) {
+                if (IsAmfH264Level5Format(format) &&
+                    (!request.screenshare || candidate.vendor != Vendor::kAmf)) continue;
                 if (PreflightCancelled(cancelled)) {
                     result.status = PreflightStatus::Cancelled;
                     return result;
@@ -1835,14 +1926,135 @@ std::shared_ptr<webrtc::VideoEncoderFactory> CreateLinuxPublicationVideoEncoderF
 }
 #endif
 
-bool IsHardwareH264FormatSupported(const webrtc::SdpVideoFormat& format) {
+bool IsHardwareH264FormatSupportedForPreference(
+        const webrtc::SdpVideoFormat& format,
+        const std::string& preference,
+        const VideoEncoderCapabilities& capabilities,
+        [[maybe_unused]] bool screenshare) {
+    const auto parsed_pref = ParseEncoderPreference(preference);
+    if (parsed_pref == EncoderPreference::kSoftware) return false;
 #if defined(COHAVORA_HAS_BACKEND_ENCODERS)
-    return webrtc::IsBackendH264FormatSupported(format);
+    if (webrtc::IsBackendH264FormatSupported(format)) return true;
+    if (!screenshare || !IsAmfH264Level5Format(format)) return false;
+    return capabilities.ready && capabilities.amf.h264 &&
+        (parsed_pref == EncoderPreference::kAmf ||
+         (parsed_pref == EncoderPreference::kAuto &&
+          !capabilities.nvenc.h264 && !capabilities.qsv.h264));
 #elif defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    (void)capabilities;
     return detail::IsLinuxHardwareH264FormatSupported(format);
 #else
+    (void)format;
+    (void)capabilities;
     return false;
 #endif
+}
+
+bool IsHardwareH264FormatSupported(const webrtc::SdpVideoFormat& format,
+                                  bool screenshare) {
+    return IsHardwareH264FormatSupportedForPreference(
+        format, GetVideoEncoderPreference(), GetVideoEncoderCapabilities(), screenshare);
+}
+
+std::optional<webrtc::H264Level> SoftwareH264SendLevel(bool screenshare) {
+    if (!webrtc::H264Encoder::IsSupported() || webrtc::SupportedH264Codecs(true).empty()) {
+        return std::nullopt;
+    }
+    return screenshare ? webrtc::H264Level::kLevel5 : webrtc::H264Level::kLevel4;
+}
+
+bool IsSoftwareH264FormatSupported(const webrtc::SdpVideoFormat& format, bool screenshare) {
+    if (CompareCodecName(format.name.c_str(), "H264") != 0) return false;
+    const auto max_level = SoftwareH264SendLevel(screenshare);
+    if (!max_level) return false;
+    const auto parsed = webrtc::ParseSdpForH264ProfileLevelId(format.parameters);
+    if (!parsed) return false;
+    if (parsed->profile != webrtc::H264Profile::kProfileConstrainedBaseline &&
+        parsed->profile != webrtc::H264Profile::kProfileBaseline) {
+        return false;
+    }
+    return parsed->level <= *max_level;
+}
+
+ScreenShareQualityConstraint EvaluateH264ScreenShareConstraint(
+        webrtc::H264Level level, int fps, ScreenShareConstraintReason reason) {
+    ScreenShareQualityConstraint result;
+    result.codec = "h264";
+    result.level_idc = static_cast<int>(level);
+    const auto rate = static_cast<std::uint32_t>(fps > 0 ? fps : 20);
+    struct Tier { ScreenShareResolution res; int width; int height; };
+    constexpr std::array<Tier, 4> kTiers{{
+        {ScreenShareResolution::P2160, 3840, 2160},
+        {ScreenShareResolution::P1440, 2560, 1440},
+        {ScreenShareResolution::P1080, 1920, 1080},
+        {ScreenShareResolution::P720, 1280, 720},
+    }};
+    for (const auto& tier : kTiers) {
+        if (detail::CheckH264LevelConstraints(level, tier.width, tier.height, rate) ==
+            detail::H264LevelConstraintStatus::Supported) {
+            if (tier.res == ScreenShareResolution::P2160) {
+                result.reason = ScreenShareConstraintReason::None;
+                return result;
+            }
+            result.reason = reason;
+            result.max_resolution = tier.res;
+            result.max_width = tier.width;
+            result.max_height = tier.height;
+            return result;
+        }
+    }
+    result.reason = reason;
+    result.max_resolution = ScreenShareResolution::P720;
+    result.max_width = 1280;
+    result.max_height = 720;
+    return result;
+}
+
+ScreenShareQualityConstraint EvaluateH265ScreenShareConstraint(
+        std::uint8_t level, int fps) {
+    ScreenShareQualityConstraint result;
+    result.codec = "h265";
+    result.level_idc = static_cast<int>(level);
+    const auto rate = static_cast<std::uint32_t>(fps > 0 ? fps : 20);
+    struct Tier { ScreenShareResolution res; int width; int height; };
+    constexpr std::array<Tier, 4> kTiers{{
+        {ScreenShareResolution::P2160, 3840, 2160},
+        {ScreenShareResolution::P1440, 2560, 1440},
+        {ScreenShareResolution::P1080, 1920, 1080},
+        {ScreenShareResolution::P720, 1280, 720},
+    }};
+    for (const auto& tier : kTiers) {
+        if (detail::CheckH265LevelConstraints(level, tier.width, tier.height, rate) ==
+            detail::H265LevelConstraintStatus::Supported) {
+            if (tier.res == ScreenShareResolution::P2160) {
+                result.reason = ScreenShareConstraintReason::None;
+                return result;
+            }
+            result.reason = ScreenShareConstraintReason::H265Level;
+            result.max_resolution = tier.res;
+            result.max_width = tier.width;
+            result.max_height = tier.height;
+            return result;
+        }
+    }
+    result.reason = ScreenShareConstraintReason::H265Level;
+    result.max_resolution = ScreenShareResolution::P720;
+    result.max_width = 1280;
+    result.max_height = 720;
+    return result;
+}
+
+ScreenShareQualityConstraint RecomputeScreenShareConstraintForFps(
+        const ScreenShareQualityConstraint& active, int fps) {
+    if (active.reason == ScreenShareConstraintReason::None || active.level_idc <= 0) {
+        return active;
+    }
+    if (active.reason == ScreenShareConstraintReason::H265Level) {
+        return EvaluateH265ScreenShareConstraint(
+            static_cast<std::uint8_t>(active.level_idc), fps);
+    }
+    return EvaluateH264ScreenShareConstraint(
+        static_cast<webrtc::H264Level>(active.level_idc), fps, active.reason);
 }
 
 std::unique_ptr<webrtc::VideoEncoderFactory::EncoderSelectorInterface>

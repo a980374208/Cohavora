@@ -12,6 +12,9 @@ static_assert(uint32_t(RenderColorMatrix::Unspecified) == LK_RENDER_MATRIX_UNSPE
 static_assert(uint32_t(RenderColorRange::Unspecified) == LK_RENDER_RANGE_UNSPECIFIED &&
     uint32_t(RenderColorRange::Limited) == LK_RENDER_RANGE_LIMITED &&
     uint32_t(RenderColorRange::Full) == LK_RENDER_RANGE_FULL);
+uint64_t PlaneSpan(uint32_t stride, uint32_t rows, uint32_t row_bytes) {
+    return uint64_t(rows - 1) * stride + row_bytes;
+}
 bool ValidRotation(uint32_t rotation) {
     return rotation == 0 || rotation == 90 || rotation == 180 || rotation == 270;
 }
@@ -22,6 +25,8 @@ VideoRenderFrame::Ptr VideoRenderFrame::FromI420(OwnedI420Frame::Ptr frame) {
     auto result = std::shared_ptr<VideoRenderFrame>(new VideoRenderFrame);
     result->i420_ = std::move(frame);
     const auto& source = *result->i420_;
+    if (source.render_metadata().valid())
+        result->presentation_ = std::make_shared<const RenderFrameMetadata>(source.render_metadata());
     auto& v = result->view_;
     v.struct_size = sizeof(v); v.format = LK_RENDER_I420;
     v.width = source.width(); v.height = source.height(); v.plane_count = 3;
@@ -29,13 +34,99 @@ VideoRenderFrame::Ptr VideoRenderFrame::FromI420(OwnedI420Frame::Ptr frame) {
     v.timestamp_us = source.timestamp_us();
     v.color_matrix = static_cast<uint32_t>(source.color_space().matrix);
     v.color_range = static_cast<uint32_t>(source.color_space().range);
-    v.planes[0] = {source.data_y(), uint64_t(source.stride_y()) * source.height(),
+    v.planes[0] = {source.data_y(), PlaneSpan(source.stride_y(), v.height, v.width),
         uint32_t(source.stride_y()), v.width, v.height, 0};
-    v.planes[1] = {source.data_u(), uint64_t(source.stride_u()) * source.chroma_height(),
+    v.planes[1] = {source.data_u(), PlaneSpan(source.stride_u(), source.chroma_height(), source.chroma_width()),
         uint32_t(source.stride_u()), uint32_t(source.chroma_width()), uint32_t(source.chroma_height()), 0};
-    v.planes[2] = {source.data_v(), uint64_t(source.stride_v()) * source.chroma_height(),
+    v.planes[2] = {source.data_v(), PlaneSpan(source.stride_v(), source.chroma_height(), source.chroma_width()),
         uint32_t(source.stride_v()), uint32_t(source.chroma_width()), uint32_t(source.chroma_height()), 0};
     return result;
+}
+
+VideoRenderFrame::Ptr VideoRenderFrame::FromCapture(const VideoFrame& frame, const VideoCaptureOptions& options) {
+    if (!frame.canRetainNV12()) return CopyFrom(frame, options);
+    return FromNV12(frame.nv12Buffer(), options, {RenderColorMatrix::Bt601, RenderColorRange::Limited});
+}
+
+VideoRenderFrame::Ptr VideoRenderFrame::FromNV12(
+        webrtc::scoped_refptr<const webrtc::NV12BufferInterface> nv12,
+        const VideoCaptureOptions& options, RenderColorSpace color) {
+    if (!nv12 || nv12->width() <= 0 || nv12->height() <= 0 ||
+        !ValidRotation(uint32_t(options.rotation))) return {};
+    auto result = std::shared_ptr<VideoRenderFrame>(new VideoRenderFrame);
+    result->pixel_owner_ = std::make_shared<decltype(nv12)>(nv12);
+    auto& view = result->view_;
+    view.struct_size = sizeof(view);
+    view.format = LK_RENDER_NV12;
+    view.width = nv12->width();
+    view.height = nv12->height();
+    view.plane_count = 2;
+    view.rotation_degrees = uint32_t(options.rotation);
+    view.timestamp_us = options.timestamp_us;
+    view.color_matrix = uint32_t(color.matrix);
+    view.color_range = uint32_t(color.range);
+    const auto uvWidth = (view.width + 1) / 2;
+    const auto uvHeight = (view.height + 1) / 2;
+    view.planes[0] = {nv12->DataY(), PlaneSpan(nv12->StrideY(), view.height, view.width),
+        uint32_t(nv12->StrideY()), view.width, view.height, 0};
+    view.planes[1] = {nv12->DataUV(), PlaneSpan(nv12->StrideUV(), uvHeight, uvWidth * 2),
+        uint32_t(nv12->StrideUV()), uvWidth, uvHeight, 0};
+    return result;
+}
+
+VideoRenderFrame::Ptr VideoRenderFrame::FromScreenPixels(const VideoFrame& frame) {
+    if (frame.type() != VideoBufferType::NV12 && frame.type() != VideoBufferType::I420) return {};
+    if (frame.type() == VideoBufferType::NV12) {
+        if (auto nv12 = frame.readOnlyNV12()) {
+            const auto color = frame.hasNativeBuffer() &&
+                frame.videoFrameBuffer()->type() == webrtc::VideoFrameBuffer::Type::kNative
+                ? RenderColorSpace{RenderColorMatrix::Bt709, RenderColorRange::Limited}
+                : RenderColorSpace{};
+            return FromNV12(std::move(nv12), {}, color);
+        }
+    }
+    if (frame.hasNativeBuffer()) {
+        // An external adapter can report NV12 but expose only a ToI420 mapper.
+        // Finish the map and release that adapter on the conversion worker.
+        const auto pixels = frame.videoFrameBuffer()->ToI420();
+        if (!pixels) return {};
+        return FromI420(OwnedI420Frame::CopyFromPlanes(pixels->width(), pixels->height(),
+            pixels->DataY(), pixels->StrideY(), pixels->DataU(), pixels->StrideU(),
+            pixels->DataV(), pixels->StrideV()));
+    }
+    if (frame.type() != VideoBufferType::I420) return {};
+    auto owner = std::make_shared<const VideoFrame>(frame);
+    const auto planes = owner->planeInfos();
+    if (planes.size() != 3) return {};
+    auto result = std::shared_ptr<VideoRenderFrame>(new VideoRenderFrame);
+    result->pixel_owner_ = std::move(owner);
+    auto& v = result->view_;
+    v.struct_size = sizeof(v);
+    v.format = LK_RENDER_I420;
+    v.width = frame.width();
+    v.height = frame.height();
+    v.plane_count = 3;
+    for (unsigned i = 0; i < 3; ++i) {
+        const auto& plane = planes[i];
+        v.planes[i] = {reinterpret_cast<const uint8_t*>(plane.data_ptr), plane.size, plane.stride,
+            i ? (v.width + 1) / 2 : v.width, i ? (v.height + 1) / 2 : v.height, 0};
+    }
+    return result;
+}
+
+OwnedI420Frame::Ptr VideoRenderFrame::ToOwnedI420() const {
+    if (native_preview_) return {};
+    if (i420_) return i420_;
+    const auto& v = view_;
+    const auto& p = v.planes;
+    if (v.format == LK_RENDER_NV12)
+        return OwnedI420Frame::CopyFromNV12(v.width, v.height, p[0].data, p[0].stride_bytes,
+            p[1].data, p[1].stride_bytes, v.timestamp_us, VideoRotation(v.rotation_degrees), colorSpace());
+    if (v.format == LK_RENDER_I420)
+        return OwnedI420Frame::CopyFromPlanes(v.width, v.height, p[0].data, p[0].stride_bytes,
+            p[1].data, p[1].stride_bytes, p[2].data, p[2].stride_bytes, v.timestamp_us,
+            VideoRotation(v.rotation_degrees), colorSpace());
+    return {};
 }
 
 VideoRenderFrame::Ptr VideoRenderFrame::CopyFrom(const VideoFrame& frame, const VideoCaptureOptions& options) {
@@ -113,30 +204,19 @@ void VideoRenderFrame::SetRenderExpected(
         bool expected,
         RenderExpectationReason reason,
         std::chrono::steady_clock::time_point source_time) const {
-    const auto& metadata = renderMetadata();
-    if (metadata.valid()) {
-        metadata.observer->SetExpected(expected, reason, source_time);
-    }
+    renderMetadata().SetRenderExpected(expected, reason, source_time);
 }
 
 void VideoRenderFrame::NotifyRendered(
         const char* measurement_point,
         std::chrono::steady_clock::time_point source_time) const {
-    const auto& metadata = renderMetadata();
-    if (metadata.valid() && measurement_point && *measurement_point) {
-        metadata.observer->OnSubmitted(metadata, measurement_point, source_time);
-    }
+    renderMetadata().NotifyRendered(measurement_point, source_time);
 }
 
 void VideoRenderFrame::NotifyRenderStage(
         const char* measurement_point,
         std::chrono::microseconds duration,
         std::chrono::steady_clock::time_point source_time) const {
-    const auto& metadata = renderMetadata();
-    if (metadata.valid() && measurement_point && *measurement_point &&
-        duration.count() >= 0) {
-        metadata.observer->OnStageTiming(
-            metadata, measurement_point, duration, source_time);
-    }
+    renderMetadata().NotifyRenderStage(measurement_point, duration, source_time);
 }
 } // namespace livekit::render

@@ -2527,16 +2527,16 @@ void MeetingMainWindow::setupContactsAndCallRuntime() {
 		});
 
 	connect(_callInvite, &OpenMeeting::CallInviteController::callEnded,
-		this, [this](const QString &, const QString &reason) {
+		this, [this](const QString &, OpenMeeting::CallEndReason reason) {
 			if (_incomingCallWindow) _incomingCallWindow->dismiss();
 			if (_outgoingCallOverlay) _outgoingCallOverlay->dismiss();
-			if (reason == QStringLiteral("busy")) {
+			if (reason == OpenMeeting::CallEndReason::Busy) {
 				QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Call Busy"),
 					QCoreApplication::translate("MeetingUI", "The callee is currently in another meeting or call."));
-			} else if (reason == QStringLiteral("rejected")) {
+			} else if (reason == OpenMeeting::CallEndReason::Rejected) {
 				QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Call Declined"),
 					QCoreApplication::translate("MeetingUI", "The call was declined."));
-			} else if (reason == QStringLiteral("timeout")) {
+			} else if (reason == OpenMeeting::CallEndReason::Timeout) {
 				QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "No Answer"),
 					QCoreApplication::translate("MeetingUI", "The call was not answered in time."));
 			}

@@ -41,6 +41,7 @@ private:
     std::function<bool()> valid_;
     std::mutex mutex_;
     std::vector<std::weak_ptr<RemoteVideoFrameConsumer>> consumers_;
+    std::shared_ptr<size_t> rendered_count_ = std::make_shared<size_t>(0);
     std::atomic<bool> used_retained_{false};
     std::atomic<uint64_t> sequence_{0};
 };

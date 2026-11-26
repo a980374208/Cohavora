@@ -365,6 +365,8 @@ public:
         if (joined) Notify(DesktopCaptureProbePhase::Joined);
         frame_ = {};
         ended_ = {};
+        scaled_texture_ = nullptr;
+        scaled_source_ = nullptr;
         gpu_converter_.reset();
         converted_.reset();
         scaled_.reset();
@@ -458,15 +460,35 @@ private:
         const int w = frame->size().width(), h = frame->size().height();
 
         if (const auto* gpu_frame = D3d11TextureDesktopFrame::FromDesktopFrame(frame.get())) {
-            if (!gpu_converter_ || gpu_converter_->device() != gpu_frame->device()) {
-                gpu_converter_ = std::make_unique<D3d11VideoProcessorConverter>(
-                    gpu_frame->device(),
-                    gpu_frame->adapter_luid(),
-                    gpu_frame->device_context_mutex());
+            const auto& prepared = gpu_frame->preparedNV12();
+            if (scaled_source_ != prepared || (scaled_texture_ &&
+                (scaled_texture_->width() != profile.width || scaled_texture_->height() != profile.height))) {
+                scaled_texture_ = nullptr;
+                scaled_source_ = nullptr;
             }
-            if (auto gpu_nv12 = gpu_converter_->ConvertAndScale(
-                    gpu_frame->texture(), w, h, profile.width, profile.height)) {
-                VideoFrame delivered_gpu(std::move(gpu_nv12), VideoBufferType::NV12);
+            webrtc::scoped_refptr<webrtc::VideoFrameBuffer> nv12;
+            if (prepared) {
+                if (prepared->width() == profile.width && prepared->height() == profile.height) {
+                    nv12 = prepared;
+                } else {
+                    // WGC/DXGI can repeat a static image. Scale each snapshot once per
+                    // target size and keep the full-resolution source for quality changes.
+                    if (!scaled_texture_) {
+                        scaled_texture_ = prepared->Scale(profile.width, profile.height);
+                        if (scaled_texture_) scaled_source_ = prepared;
+                    }
+                    nv12 = scaled_texture_;
+                }
+            } else {
+                if (!gpu_converter_ || gpu_converter_->device() != gpu_frame->device()) {
+                    gpu_converter_ = std::make_unique<D3d11VideoProcessorConverter>(
+                        gpu_frame->device(), gpu_frame->adapter_luid(), gpu_frame->device_context_mutex());
+                }
+                nv12 = gpu_converter_->ConvertAndScale(
+                    gpu_frame->texture(), w, h, profile.width, profile.height);
+            }
+            if (nv12) {
+                VideoFrame delivered_gpu(std::move(nv12), VideoBufferType::NV12);
                 last_frame_ns_.store(NowNs(), std::memory_order_relaxed);
                 if (!stopped_.load(std::memory_order_acquire) && frame_) {
                     frame_(delivered_gpu);
@@ -480,8 +502,15 @@ private:
             }
             // If GPU VideoProcessor conversion fails on this adapter, ensure CPU BGRA
             // bytes are mapped before falling back to the Phase 1 libyuv path.
-            gpu_frame->EnsureCpuData();
+            if (!gpu_frame->EnsureCpuData() || !gpu_frame->cpu_populated()) {
+                Fail(CaptureFailure::Conversion);
+                return;
+            }
+        } else {
+            gpu_converter_.reset();
         }
+        scaled_texture_ = nullptr;
+        scaled_source_ = nullptr;
 
         if (!converted_ || converted_->width() != w || converted_->height() != h ||
                 converted_->type() != VideoBufferType::NV12) {
@@ -489,7 +518,7 @@ private:
         }
         auto& output = *converted_;
         const int uv_stride = ((w + 1) / 2) * 2;
-        auto* y = output.data();
+        auto* y = output.overwriteNV12();
         auto* uv = y + static_cast<std::size_t>(w) * h;
         // DesktopFrame BGRA bytes are libyuv's little-endian ARGB input.
         if (libyuv::ARGBToNV12(frame->data(), frame->stride(), y, w, uv, uv_stride, w, h) != 0) {
@@ -504,7 +533,7 @@ private:
                 scaled_ = VideoFrame::createUninit(dw, dh, VideoBufferType::NV12);
             }
             const int duv_stride = ((dw + 1) / 2) * 2;
-            auto* dy = scaled_->data();
+            auto* dy = scaled_->overwriteNV12();
             auto* duv = dy + static_cast<std::size_t>(dw) * dh;
             if (libyuv::NV12Scale(y, w, uv, uv_stride, w, h,
                     dy, dw, duv, duv_stride, dw, dh, libyuv::kFilterBox) != 0) {
@@ -535,6 +564,8 @@ private:
     QualityCallback requested_callback_, active_callback_;
     std::optional<ScreenShareFrameProfile> last_applied_; // converter only
     std::unique_ptr<D3d11VideoProcessorConverter> gpu_converter_; // converter only
+    webrtc::scoped_refptr<D3d11Nv12FrameBuffer> scaled_source_;
+    webrtc::scoped_refptr<webrtc::VideoFrameBuffer> scaled_texture_;
     std::optional<VideoFrame> converted_, scaled_; // converter-owned reusable buffers
     FrameCallback frame_;
     EndCallback ended_;

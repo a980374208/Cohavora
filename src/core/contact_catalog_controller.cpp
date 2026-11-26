@@ -116,6 +116,8 @@ void ContactCatalogController::handleAccountChange(bool loggedIn) {
     _departments.clear();
     _deptMembers.clear();
     _restrictedDeptIds.clear();
+    _deptMemberRequests.clear();
+    _nextDeptMemberOffsets.clear();
     _orgMemberVisibility = QStringLiteral("all");
     _requests.clear();
     _searchResults.clear();
@@ -130,7 +132,7 @@ void ContactCatalogController::handleAccountChange(bool loggedIn) {
     _lastError.clear();
 
     if (loggedIn && _session.isLoggedIn()) {
-        const QString key = ContactSnapshotStore::accountScopeKey(true, _session.userId());
+        const QString key = ContactSnapshotStore::accountScopeKey(true, _session.userId(), _session.serverBaseUrl());
         const auto cached = _store.load(key);
         _syncSeq = cached.syncSeq;
         _treeVersion = cached.treeVersion;
@@ -138,9 +140,7 @@ void ContactCatalogController::handleAccountChange(bool loggedIn) {
         _contacts = cached.contacts;
         _groups = cached.groups;
         _departments = cached.departments;
-        for (const auto &rel : _contacts) {
-            if (rel.profile) cacheProfile(*rel.profile);
-        }
+        cacheContactProfiles();
     }
 
     emit contactsChanged();
@@ -166,7 +166,7 @@ void ContactCatalogController::persistSnapshot() {
     snap.contacts = _contacts;
     snap.groups = _groups;
     snap.departments = _departments;
-    const QString key = ContactSnapshotStore::accountScopeKey(true, _session.userId());
+    const QString key = ContactSnapshotStore::accountScopeKey(true, _session.userId(), _session.serverBaseUrl());
     _store.save(key, snap);
 }
 
@@ -183,6 +183,34 @@ void ContactCatalogController::cacheProfile(const UserProfile &profile) {
             if (m.profile.userId == profile.userId) {
                 m.profile = profile;
             }
+        }
+    }
+}
+
+void ContactCatalogController::cacheContactProfiles() {
+    QHash<QString, UserProfile> snapshotProfiles;
+    snapshotProfiles.reserve(static_cast<qsizetype>(_contacts.size()));
+    for (const auto &rel : _contacts) {
+        if (rel.profile && !rel.profile->userId.isEmpty() &&
+            !snapshotProfiles.contains(rel.profile->userId)) {
+            snapshotProfiles.insert(rel.profile->userId, *rel.profile);
+        }
+    }
+    if (snapshotProfiles.isEmpty()) return;
+
+    // Update matching rows from the contact list. The shared index can also
+    // contain profiles from earlier requests and other endpoints.
+    for (auto it = snapshotProfiles.cbegin(); it != snapshotProfiles.cend(); ++it) {
+        _profileIndex.insert(it.key(), it.value());
+    }
+    for (auto &rel : _contacts) {
+        const auto profile = snapshotProfiles.constFind(rel.targetUserId);
+        if (profile != snapshotProfiles.cend()) rel.profile = profile.value();
+    }
+    for (auto &members : _deptMembers) {
+        for (auto &member : members) {
+            const auto profile = snapshotProfiles.constFind(member.profile.userId);
+            if (profile != snapshotProfiles.cend()) member.profile = profile.value();
         }
     }
 }
@@ -264,9 +292,7 @@ bool ContactCatalogController::refreshContacts(bool forceFull) {
                 self->mergeContactRelation(rel);
             }
         }
-        for (const auto &rel : self->_contacts) {
-            if (rel.profile) self->cacheProfile(*rel.profile);
-        }
+        self->cacheContactProfiles();
         self->_groups = resp.groups;
         self->_pendingRequestCount = resp.pendingCount;
         self->persistSnapshot();
@@ -283,12 +309,28 @@ bool ContactCatalogController::refreshOrgTree(bool forceFull) {
     const quint64 gen = ++_orgTreeGeneration;
     const qint64 reqVersion = forceFull ? 0 : _treeVersion;
     const QPointer<ContactCatalogController> self(this);
+    if (forceFull) {
+        // Revocation can arrive while a member request is still in flight.
+        _deptMemberRequests.clear();
+        auto changedDeptIds = _restrictedDeptIds;
+        for (auto it = _deptMembers.cbegin(); it != _deptMembers.cend(); ++it) {
+            changedDeptIds.insert(it.key());
+        }
+        _deptMembers.clear();
+        _restrictedDeptIds.clear();
+        _nextDeptMemberOffsets.clear();
+        for (const auto &deptId : changedDeptIds) {
+            emit deptMembersChanged(deptId);
+            if (!self || self->_orgTreeGeneration != gen || !self->isContextCurrent(*ctx)) return false;
+        }
+    }
     _backend.getOrgTree(reqVersion, [self, ctx = *ctx, gen, forceFull](
             bool ok, const OrgTreeResponse &resp, const HttpError &err) {
         if (!self || gen != self->_orgTreeGeneration || !self->isContextCurrent(ctx)) return;
         if (!ok) {
             spdlog::warn("[Contacts] get_org_tree failed {}",
                          livekit::secure_log::ErrorCodeSummary("get_org_tree", err.code, "http"));
+            if (forceFull) emit self->orgTreeChanged();
             return;
         }
         if (resp.notModified && !forceFull) return;
@@ -299,59 +341,81 @@ bool ContactCatalogController::refreshOrgTree(bool forceFull) {
             self->_orgMemberVisibility = QStringLiteral("all");
         }
         self->_departments = resp.departments;
-        if (forceFull || self->_departments.empty()) {
-            self->_deptMembers.clear();
-            self->_restrictedDeptIds.clear();
-        } else {
-            QSet<QString> validIds;
-            for (const auto &d : self->_departments) {
-                validIds.insert(d.deptId);
-            }
-            for (auto it = self->_deptMembers.begin(); it != self->_deptMembers.end(); ) {
-                if (!validIds.contains(it.key())) {
-                    self->_restrictedDeptIds.remove(it.key());
-                    it = self->_deptMembers.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
+        // Even surviving department IDs can have different membership permissions.
+        self->_deptMemberRequests.clear();
+        self->_nextDeptMemberOffsets.clear();
+        self->_deptMembers.clear();
+        self->_restrictedDeptIds.clear();
         self->persistSnapshot();
         emit self->orgTreeChanged();
     });
     return true;
 }
 
+bool ContactCatalogController::ensureDeptMembersLoaded(const QString &deptId) {
+    return !hasDeptMembersResult(deptId) && !isDeptMembersLoading(deptId) && loadDeptMembers(deptId);
+}
+
+bool ContactCatalogController::loadMoreDeptMembers(const QString &deptId) {
+    const auto offset = _nextDeptMemberOffsets.constFind(deptId);
+    return offset != _nextDeptMemberOffsets.cend() && !isDeptMembersLoading(deptId) &&
+        loadDeptMembers(deptId, offset.value());
+}
+
 bool ContactCatalogController::loadDeptMembers(const QString &deptId, qint64 offset, qint64 limit) {
     const auto ctx = captureContext();
     if (!ctx || deptId.trimmed().isEmpty() || !_backend.getDeptMembers) return false;
+    offset = std::max<qint64>(offset, 0);
+    if (limit <= 0 || limit > 200) limit = 100;
+    const quint64 requestId = ++_nextDeptMemberRequest;
+    _deptMemberRequests.insert(deptId, requestId);
     const QPointer<ContactCatalogController> self(this);
-    _backend.getDeptMembers(deptId, offset, limit, [self, ctx = *ctx, deptId, offset](
+    _backend.getDeptMembers(deptId, offset, limit, [self, ctx = *ctx, deptId, offset, limit, requestId](
             bool ok, const DeptMembersResponse &resp, const HttpError &err) {
-        if (!self || !self->isContextCurrent(ctx)) return;
+        if (!self || !self->isContextCurrent(ctx) ||
+            self->_deptMemberRequests.value(deptId) != requestId) return;
+        self->_deptMemberRequests.remove(deptId);
         if (!ok) {
             spdlog::warn("[Contacts] get_dept_members failed {}",
                          livekit::secure_log::ErrorCodeSummary("get_dept_members", err.code, "http"));
             emit self->errorOccurred(err.message);
+            if (self && offset > 0 && self->isContextCurrent(ctx)) emit self->deptMembersChanged(deptId);
+            return;
+        }
+        if (resp.restricted) {
+            self->_deptMembers.remove(deptId);
+            self->_nextDeptMemberOffsets.remove(deptId);
+            self->_restrictedDeptIds.insert(deptId);
+            emit self->deptMembersChanged(deptId);
             return;
         }
         for (const auto &m : resp.members) {
             self->cacheProfile(m.profile);
         }
-        if (resp.restricted) {
-            self->_restrictedDeptIds.insert(deptId);
+        self->_restrictedDeptIds.remove(deptId);
+        // The server pages membership records before omitting disabled or missing users.
+        if (resp.total > offset && resp.total - offset > limit) {
+            self->_nextDeptMemberOffsets.insert(deptId, offset + limit);
         } else {
-            self->_restrictedDeptIds.remove(deptId);
+            self->_nextDeptMemberOffsets.remove(deptId);
         }
         if (offset == 0) {
             self->_deptMembers.insert(deptId, resp.members);
         } else {
-            auto list = self->_deptMembers.value(deptId);
-            list.insert(list.end(), resp.members.begin(), resp.members.end());
-            self->_deptMembers.insert(deptId, std::move(list));
+            auto &list = self->_deptMembers[deptId];
+            QSet<QString> knownUsers;
+            for (const auto &member : list) knownUsers.insert(member.profile.userId);
+            for (const auto &member : resp.members) {
+                if (knownUsers.contains(member.profile.userId)) continue;
+                knownUsers.insert(member.profile.userId);
+                list.push_back(member);
+            }
         }
         emit self->deptMembersChanged(deptId);
     });
+    if (self && offset > 0 && self->_deptMemberRequests.value(deptId) == requestId) {
+        emit self->deptMembersChanged(deptId);
+    }
     return true;
 }
 
@@ -403,26 +467,25 @@ bool ContactCatalogController::searchDirectory(const QString &keyword, const QSt
     return true;
 }
 
-bool ContactCatalogController::lookupDirectory(
-        const QString &keyword,
-        const QString &deptId,
-        const QString &scope,
-        qint64 limit,
-        ResultCallback<DirectorySearchResponse> callback) {
+bool ContactCatalogController::lookupContactRequestRecipient(
+        const QString &identifier, ResultCallback<std::optional<UserProfile>> callback) {
     const auto ctx = captureContext();
-    if (!ctx || !_backend.searchDirectory) return false;
-    const qint64 clampedLimit = std::clamp<qint64>(limit, 1, 50);
+    const QString keyword = identifier.trimmed();
+    if (!ctx || !_backend.searchDirectory || keyword.isEmpty() || !callback) return false;
     const QPointer<ContactCatalogController> self(this);
-    _backend.searchDirectory(keyword, deptId, scope, 0, clampedLimit, [self, ctx = *ctx, cb = std::move(callback)](
-            bool ok, const DirectorySearchResponse &resp, const HttpError &err) {
-        if (!self || !self->isContextCurrent(ctx)) return;
-        if (ok) {
-            for (const auto &u : resp.users) {
-                self->cacheProfile(u);
+    _backend.searchDirectory(keyword, {}, QStringLiteral("exact"), 0, 1,
+        [self, ctx = *ctx, cb = std::move(callback)](
+                bool ok, const DirectorySearchResponse &resp, const HttpError &err) {
+            if (!self || !self->isContextCurrent(ctx)) return;
+            std::optional<UserProfile> recipient;
+            if (ok && resp.users.size() == 1) {
+                const auto &match = resp.users.front();
+                if (!match.userId.trimmed().isEmpty() && match.userId != ctx.userId) {
+                    recipient = match;
+                }
             }
-        }
-        if (cb) cb(ok, resp, err);
-    });
+            cb(ok, recipient, err);
+        });
     return true;
 }
 
@@ -438,11 +501,15 @@ bool ContactCatalogController::upsertRelation(
     const auto ctx = captureContext();
     if (!ctx || !_backend.upsertRelation) return false;
     const QPointer<ContactCatalogController> self(this);
-    _backend.upsertRelation(request, [self, ctx = *ctx, cb = std::move(callback)](
+    _backend.upsertRelation(request, [self, ctx = *ctx, targetId = request.targetUserId, cb = std::move(callback)](
             bool ok, const ContactRelation &rel, const HttpError &err) {
         if (!self || !self->isContextCurrent(ctx)) return;
         if (ok) {
-            self->mergeContactRelation(rel);
+            if (rel.targetUserId.isEmpty()) {
+                self->removeContactRelationLocal(targetId);
+            } else {
+                self->mergeContactRelation(rel);
+            }
             self->persistSnapshot();
             emit self->contactsChanged();
         }

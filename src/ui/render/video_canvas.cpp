@@ -61,9 +61,8 @@ void VideoCanvas::updateFrame(const std::string& key, VideoRenderFrame::Ptr fram
     Q_ASSERT(QThread::currentThread() == thread());
     if (!frame || key.empty() || renderer_unavailable_emitted_) return;
     const auto previous = telemetry_frames_.find(key);
-    if (previous != telemetry_frames_.end() && previous->second != frame &&
-        !previous->second->renderMetadata().same_binding_as(
-            frame->renderMetadata())) {
+    if (previous != telemetry_frames_.end() &&
+        !previous->second->same_binding_as(frame->renderMetadata())) {
         previous->second->SetRenderExpected(
             false, RenderExpectationReason::BindingEnded);
     }
@@ -72,7 +71,8 @@ void VideoCanvas::updateFrame(const std::string& key, VideoRenderFrame::Ptr fram
         expected,
         expected ? RenderExpectationReason::SurfaceVisible
                  : hidden_expectation_reason_);
-    telemetry_frames_[key] = frame;
+    if (frame->presentationMetadata()) telemetry_frames_[key] = frame->presentationMetadata();
+    else telemetry_frames_.erase(key);
     submitFrame(key, std::move(frame));
     frame_dirty_.store(true, std::memory_order_release);
 }
@@ -163,7 +163,7 @@ void VideoCanvas::render() {
     const auto tileColor = MeetingUI::AppTheme::color(Role::Tile);
     const auto letterboxColor = MeetingUI::AppTheme::color(Role::Letterbox);
     const auto speakingColor = MeetingUI::AppTheme::color(Role::Success);
-    std::vector<VideoRenderFrame::Ptr> submitted_frames;
+    std::vector<RenderFrameMetadata::Ptr> submitted_frames;
     for (const auto& logical : tiles_) {
         auto tile = ScaleVideoTile(logical, width(), height(), physical.width(), physical.height());
         if (tile.width <= 0 || tile.height <= 0 ||
@@ -309,6 +309,12 @@ void VideoCanvas::updateRenderExpectations() {
                      : hidden_expectation_reason_);
     }
 }
+QPoint VideoCanvas::pointerLocalPos() const {
+    if (!isVisible() && !hovered_tile_.empty() && hovered_point_) {
+        return *hovered_point_;
+    }
+    return mapFromGlobal(QCursor::pos());
+}
 void VideoCanvas::setTilesLayout(const std::vector<VideoTileRect>& tiles) {
     Q_ASSERT(QThread::currentThread() == thread());
     const bool trackingPointer = underMouse() || !hovered_tile_.empty();
@@ -329,14 +335,16 @@ void VideoCanvas::setTilesLayout(const std::vector<VideoTileRect>& tiles) {
     }
     // A layout change must not transfer an in-flight click to a new card.
     pressed_pin_.clear();
-    hovered_tile_ = trackingPointer ? hitTest(mapFromGlobal(QCursor::pos())) : std::string();
+    const auto pointerPos = pointerLocalPos();
+    hovered_tile_ = trackingPointer ? hitTest(pointerPos) : std::string();
+    if (hovered_tile_.empty()) hovered_point_.reset();
     if (previousHover != hovered_tile_ || previousBounds != hoverBounds(tiles_, hovered_tile_))
         cancelTileToolTip();
     updateTileToolTip();
     // Presentation-only refreshes must not starve a stationary pointer's
     // pending tooltip or dismiss the current person's unchanged name.
     if (trackingPointer && !tool_tip_timer_->isActive() && visible_tool_tip_.isEmpty())
-        scheduleTileToolTip(mapFromGlobal(QCursor::pos()));
+        scheduleTileToolTip(pointerPos);
     frame_dirty_.store(true, std::memory_order_release);
     updateRenderExpectations();
 }
@@ -399,6 +407,7 @@ std::string VideoCanvas::hitTest(const QPoint& point, bool pinOnly) const {
 
 void VideoCanvas::updateHovered(const QPoint& point) {
     const auto hovered = hitTest(point);
+    hovered_point_ = hovered.empty() ? std::nullopt : std::optional<QPoint>(point);
     if (hovered_tile_ != hovered) {
         hovered_tile_ = hovered;
         frame_dirty_.store(true, std::memory_order_release);
@@ -415,7 +424,7 @@ void VideoCanvas::updateTileToolTip() {
     if (next == toolTip()) return;
     cancelTileToolTip();
     setToolTip(next);
-    if (!next.isEmpty()) scheduleTileToolTip(mapFromGlobal(QCursor::pos()));
+    if (!next.isEmpty()) scheduleTileToolTip(pointerLocalPos());
 }
 
 void VideoCanvas::cancelTileToolTip() {
@@ -450,7 +459,7 @@ void VideoCanvas::scheduleTileToolTip(const QPoint& point) {
 
 void VideoCanvas::showTileToolTip() {
     const auto key = std::exchange(tool_tip_key_, {});
-    const auto point = mapFromGlobal(QCursor::pos());
+    const auto point = pointerLocalPos();
     if (key.empty() || key != hovered_tile_ || !canShowTileToolTip(point)) {
         cancelTileToolTip();
         return;
@@ -523,6 +532,7 @@ void VideoCanvas::mouseReleaseEvent(QMouseEvent* e) {
 void VideoCanvas::leaveEvent(QEvent* e) {
     cancelTileToolTip();
     hovered_tile_.clear();
+    hovered_point_.reset();
     updateTileToolTip();
     frame_dirty_.store(true, std::memory_order_release);
     QWidget::leaveEvent(e);
