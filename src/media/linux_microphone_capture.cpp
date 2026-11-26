@@ -38,7 +38,10 @@ bool MicrophoneCapture::Start() {
     }
     if (!observer_.joinable()) {
         stop_observer_.store(false);
-        observer_ = std::thread([this] { ObserveDevice(); });
+        try {
+            observer_ = std::thread([this] { ObserveDevice(); });
+        } catch (...) {
+        }
     }
     return success;
 }
@@ -66,21 +69,25 @@ bool MicrophoneCapture::IsRunning() const noexcept {
     return prepared_.load(std::memory_order_acquire);
 }
 void MicrophoneCapture::SetMute(bool muted) noexcept {
-    bool success = true;
-    {
-        std::lock_guard owner_lock(native_owner_mutex);
-        std::lock_guard lock(operation_mutex_);
-        muted_.store(muted);
-        if (!initialized_ || (native_owner && native_owner != this)) return;
-        if (muted && native_owner != this) return;
-        native_owner = this;
-        auto& manager = WebRTCManager::Instance();
-        success = muted ? manager.StopRecording() :
-            manager.Initialize() && manager.SetRecordingDeviceById(config_.device_id) && manager.EnsureRecording();
-        if (!muted || !success) prepared_.store(success);
-        // Stopping a failed device does not make it available. Notifications
-        // stay ordered with native state transitions under the owner lock.
-        Notify(success && prepared_.load());
+    try {
+        bool success = true;
+        {
+            std::lock_guard owner_lock(native_owner_mutex);
+            std::lock_guard lock(operation_mutex_);
+            muted_.store(muted);
+            if (!initialized_ || (native_owner && native_owner != this)) return;
+            if (muted && native_owner != this) return;
+            native_owner = this;
+            auto& manager = WebRTCManager::Instance();
+            success = muted ? manager.StopRecording() :
+                manager.Initialize() && manager.SetRecordingDeviceById(config_.device_id) && manager.EnsureRecording();
+            if (!muted || !success) prepared_.store(success);
+            // Stopping a failed device does not make it available. Notifications
+            // stay ordered with native state transitions under the owner lock.
+            Notify(success && prepared_.load());
+        }
+    } catch (...) {
+        prepared_.store(false);
     }
 }
 std::uint64_t MicrophoneCapture::SwitchDeviceTracked(const std::string& device_id) {
@@ -119,24 +126,30 @@ void MicrophoneCapture::Notify(bool available) {
     if (reported_available_.exchange(available) == available) return;
     std::function<void(bool)> callback;
     { std::lock_guard lock(callback_mutex_); callback = state_callback_; }
-    if (callback) callback(available);
+    if (callback) {
+        try { callback(available); } catch (...) {}
+    }
 }
 void MicrophoneCapture::ObserveDevice() {
-    std::unique_lock wait_lock(observer_mutex_);
-    while (!observer_wake_.wait_for(wait_lock, std::chrono::milliseconds(500),
-                                   [this] { return stop_observer_.load(); })) {
-        wait_lock.unlock();
-        {
-            std::lock_guard owner_lock(native_owner_mutex);
-            std::lock_guard operation_lock(operation_mutex_);
-            const bool available = native_owner == this && prepared_.load() &&
-                (muted_.load() || WebRTCManager::Instance().RecordingActive());
-            // Remember real acquisition failure across the UI's automatic mute.
-            // A successful StopRecording must never manufacture device recovery.
-            if (!available) prepared_.store(false);
-            if (!stop_observer_.load()) Notify(available);
+    try {
+        std::unique_lock wait_lock(observer_mutex_);
+        while (!observer_wake_.wait_for(wait_lock, std::chrono::milliseconds(500),
+                                       [this] { return stop_observer_.load(); })) {
+            wait_lock.unlock();
+            {
+                std::lock_guard owner_lock(native_owner_mutex);
+                std::lock_guard operation_lock(operation_mutex_);
+                const bool available = native_owner == this && prepared_.load() &&
+                    (muted_.load() || WebRTCManager::Instance().RecordingActive());
+                // Remember real acquisition failure across the UI's automatic mute.
+                // A successful StopRecording must never manufacture device recovery.
+                if (!available) prepared_.store(false);
+                if (!stop_observer_.load()) Notify(available);
+            }
+            wait_lock.lock();
         }
-        wait_lock.lock();
+    } catch (...) {
+        prepared_.store(false);
     }
 }
 }

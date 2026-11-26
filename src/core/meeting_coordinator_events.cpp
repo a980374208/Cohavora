@@ -201,9 +201,10 @@ void MeetingCoordinator::CoordinatorRoomListener::OnDisconnected(livekit::RoomDi
             const auto admissionGeneration = owner->_admissionGeneration;
             owner->setState(MeetingState::Leaving, qDetail);
             if (!current()) return;
+            auto disconnectedEmitted = std::make_shared<bool>(false);
             // A server disconnect retires the native session too. Publish
             // the terminal UI state only after its managed cleanup joins.
-            owner->stopRoomSession([owner, generation, admissionGeneration, qDetail] {
+            owner->stopRoomSession([owner, generation, admissionGeneration, qDetail, reason, disconnectedEmitted] {
                 const auto stillStopped = [&] {
                     return owner && owner->_nextSessionGeneration == generation &&
                         owner->_admissionGeneration == admissionGeneration &&
@@ -213,16 +214,21 @@ void MeetingCoordinator::CoordinatorRoomListener::OnDisconnected(livekit::RoomDi
                 if (!stillStopped() || owner->_state != MeetingState::Leaving) return;
                 owner->setState(MeetingState::Idle, qDetail);
                 if (!stillStopped() || owner->_state != MeetingState::Idle) return;
+                if (!std::exchange(*disconnectedEmitted, true)) {
+                    emit owner->meetingDisconnected(reason);
+                }
+                if (!stillStopped() || owner->_state != MeetingState::Idle) return;
                 emit owner->meetingLeft();
             });
             if (owner && owner->_nextSessionGeneration == generation &&
                 owner->_admissionGeneration == admissionGeneration &&
                 !owner->_sessionRunning.load(std::memory_order_acquire) &&
                 !owner->_sessionInvalidated &&
-                (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle)) {
+                (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle) &&
+                !std::exchange(*disconnectedEmitted, true)) {
                 // Window lifetime must not depend on a native join. Keep
                 // meetingLeft as the fully drained business terminal.
-                emit owner->meetingDisconnected();
+                emit owner->meetingDisconnected(reason);
             }
         }
     });
@@ -292,7 +298,7 @@ void MeetingCoordinator::CoordinatorRoomListener::OnReconnected() {
                     !owner->_sessionRunning.load(std::memory_order_acquire) &&
                     !owner->_sessionInvalidated &&
                     (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle)) {
-                    emit owner->meetingDisconnected();
+                    emit owner->meetingDisconnected(livekit::RoomDisconnectReason::RoomDeleted);
                 }
                 return;
             }

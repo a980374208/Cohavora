@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <future>
 #include <map>
@@ -164,7 +165,20 @@ public:
     void Start() {
         listener_ = std::make_shared<SessionListener>(weak_from_this());
         room_->AddListener(listener_);
-        runner_ = std::thread([this] { io_.run(); });
+        try {
+            runner_ = std::thread([this] {
+                for (;;) {
+                    try {
+                        io_.run();
+                        break;
+                    } catch (...) {
+                        std::fprintf(stderr, "Native session worker caught an unexpected exception.\n");
+                    }
+                }
+            });
+        } catch (...) {
+            std::fprintf(stderr, "Failed to start native session worker thread.\n");
+        }
     }
 
     void RefreshDevices() {

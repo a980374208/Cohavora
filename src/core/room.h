@@ -132,6 +132,8 @@ enum class RoomDisconnectReason {
     ServerShutdown,
     DuplicateIdentity,
     ParticipantRemoved,
+    RoomDeleted,
+    RoomClosed,
 };
 
 const char* ToString(RoomDisconnectReason reason);

@@ -253,7 +253,12 @@ bool WasapiAudioCapture::Start() {
     std::unique_lock<std::mutex> startup_lock(startup_mutex_);
     startup_complete_ = false;
 
-    capture_thread_ = std::thread(&WasapiAudioCapture::CaptureThreadLoop, this);
+    try {
+        capture_thread_ = std::thread(&WasapiAudioCapture::CaptureThreadLoop, this);
+    } catch (...) {
+        spdlog::error("[WasapiAudioCapture] Failed to start capture worker thread");
+        return false;
+    }
     if (!startup_condition_.wait_for(startup_lock, std::chrono::seconds(3),
                                      [this] { return startup_complete_; })) {
         spdlog::warn("[WasapiAudioCapture] Initial device startup timed out; awaiting device state notification.");
@@ -316,8 +321,9 @@ void WasapiAudioCapture::SetCaptureRunning(bool running, bool force_notification
 }
 
 void WasapiAudioCapture::CaptureThreadLoop() {
-    HRESULT hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const auto config = GetConfig();
+    HRESULT hr_co = E_FAIL;
+    HANDLE mmcss_handle = nullptr;
+    bool startup_completed = false;
     const auto emit_capture_state = [](diagnostic::Outcome outcome,
                                        diagnostic::DeviceSwitchReason reason) {
         diagnostic::Event event;
@@ -328,23 +334,56 @@ void WasapiAudioCapture::CaptureThreadLoop() {
         event.device_switch_reason = reason;
         diagnostic::EmitBusinessEvent(event);
     };
-    auto complete_startup = [this]() {
+    auto complete_startup = [this, &startup_completed]() {
+        if (startup_completed) return;
+        startup_completed = true;
         {
             std::lock_guard<std::mutex> lock(startup_mutex_);
             startup_complete_ = true;
         }
         startup_condition_.notify_all();
     };
+    const auto cleanup_all = [&]() noexcept {
+        try {
+            CleanupAudioClient();
+        } catch (...) {
+        }
+        try {
+            SetCaptureRunning(false);
+        } catch (...) {
+        }
+        complete_startup();
+        try {
+            if (enumerator_ && notify_client_) {
+                enumerator_->UnregisterEndpointNotificationCallback(notify_client_.Get());
+                notify_client_.Reset();
+            }
+            enumerator_.Reset();
+        } catch (...) {
+        }
+        if (mmcss_handle) {
+            AvRevertMmThreadCharacteristics(mmcss_handle);
+            mmcss_handle = nullptr;
+        }
+        if (SUCCEEDED(hr_co)) {
+            CoUninitialize();
+            hr_co = E_FAIL;
+        }
+    };
+
+    try {
+    hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const auto config = GetConfig();
     if (FAILED(hr_co)) {
         spdlog::error("[WasapiAudioCapture] COM initialization failed, hr=0x{:08x}", static_cast<uint32_t>(hr_co));
         SetCaptureRunning(false, true);
-        complete_startup();
+        cleanup_all();
         return;
     }
 
     // MMCSS 注册高优先级专业音频捕获调度
     DWORD task_index = 0;
-    HANDLE mmcss_handle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
+    mmcss_handle = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
     if (!mmcss_handle) {
         spdlog::debug("[WasapiAudioCapture] AvSetMmThreadCharacteristicsW Pro Audio fallback to Audio");
         mmcss_handle = AvSetMmThreadCharacteristicsW(L"Audio", &task_index);
@@ -581,21 +620,20 @@ void WasapiAudioCapture::CaptureThreadLoop() {
             }
         }
     }
+    } catch (...) {
+        spdlog::error("[WasapiAudioCapture] Unhandled exception in capture worker loop");
+        try {
+            emit_capture_state(diagnostic::Outcome::Failure,
+                diagnostic::DeviceSwitchReason::CaptureStalled);
+        } catch (...) {
+        }
+        try {
+            SetCaptureRunning(false, true);
+        } catch (...) {
+        }
+    }
 
-    CleanupAudioClient();
-    SetCaptureRunning(false);
-    if (enumerator_ && notify_client_) {
-        enumerator_->UnregisterEndpointNotificationCallback(notify_client_.Get());
-        notify_client_.Reset();
-    }
-    enumerator_.Reset();
-
-    if (mmcss_handle) {
-        AvRevertMmThreadCharacteristics(mmcss_handle);
-    }
-    if (SUCCEEDED(hr_co)) {
-        CoUninitialize();
-    }
+    cleanup_all();
 }
 
 } // namespace livekit

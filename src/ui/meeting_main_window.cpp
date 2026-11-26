@@ -1233,6 +1233,11 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	});
 }
 
+MeetingMainWindow::~MeetingMainWindow() {
+	clearPendingMeetingEntry();
+	MeetingRoomWindow::closeStandaloneNotices();
+}
+
 void MeetingMainWindow::showEvent(QShowEvent *e) {
 	Ui::RpWidget::showEvent(e);
 	setupNativeWindow();
@@ -1247,6 +1252,7 @@ void MeetingMainWindow::closeEvent(QCloseEvent *e) {
 	if (_incomingCallWindow) _incomingCallWindow->dismiss();
 	if (_outgoingCallOverlay) _outgoingCallOverlay->dismiss();
 	closeMeetingWindows();
+	MeetingRoomWindow::closeStandaloneNotices();
 	hideLogConsole();
 	Ui::RpWidget::closeEvent(e);
 }
@@ -1930,6 +1936,7 @@ void MeetingMainWindow::handleUserLogout() {
 	_sessionInvalidationDialogActive = true;
 	const auto reset = qScopeGuard([this] { _sessionInvalidationDialogActive = false; });
 	closeMeetingWindows();
+	MeetingRoomWindow::closeStandaloneNotices();
 	hideLogConsole();
 	OpenMeeting::SessionManager::instance().logout();
 	showLoginDialog();
@@ -1939,21 +1946,28 @@ void MeetingMainWindow::showLoginDialog() {
 	// The main window is unavailable while no account is authenticated.  The
 	// login dialog has no parent so the hidden main window is never exposed.
 	hide();
-	LoginDialog loginDlg;
-	if (loginDlg.exec() == QDialog::Accepted &&
-		OpenMeeting::SessionManager::instance().isLoggedIn()) {
-		syncAccountBadge();
-		syncJoinPresets();
-		if (_meetingCatalog) _meetingCatalog->refreshUpcoming();
-		startEventStreamForSession();
-		if (_contactCatalog) _contactCatalog->refreshAll();
-		show();
-		raise();
-		activateWindow();
-		return;
+	for (;;) {
+		LoginDialog loginDlg;
+		if (loginDlg.exec() != QDialog::Accepted) {
+			close();
+			return;
+		}
+		if (OpenMeeting::SessionManager::instance().isLoggedIn()) {
+			syncAccountBadge();
+			syncJoinPresets();
+			if (_meetingCatalog) _meetingCatalog->refreshUpcoming();
+			startEventStreamForSession();
+			if (_contactCatalog) _contactCatalog->refreshAll();
+			show();
+			raise();
+			activateWindow();
+			return;
+		}
+		QMessageBox::warning(
+			nullptr,
+			QCoreApplication::translate("MeetingUI", "Sign-In Incomplete"),
+			QCoreApplication::translate("MeetingUI", "Your sign-in session could not be established. Please sign in again."));
 	}
-
-	close();
 }
 
 void MeetingMainWindow::closeMeetingWindows() {
@@ -1999,6 +2013,7 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 			roomWindow->onSessionInvalidated(reason);
 		}
 	}
+	MeetingRoomWindow::closeStandaloneNotices();
 
 	QMessageBox::warning(nullptr,
 	                     duplicatedLogin ? QCoreApplication::translate("MeetingUI", "Account Signed Out")
@@ -2045,6 +2060,13 @@ void MeetingMainWindow::openQuickMeeting(
 	if (!session.isLoggedIn()) {
 		LoginDialog loginDlg(this);
 		if (loginDlg.exec() != QDialog::Accepted) return;
+		if (!session.isLoggedIn()) {
+			QMessageBox::warning(
+				this,
+				QCoreApplication::translate("MeetingUI", "Sign-In Incomplete"),
+				QCoreApplication::translate("MeetingUI", "Your sign-in session could not be established. Please sign in again."));
+			return;
+		}
 	}
 
 	livekit::MeetingEncryptionRequest encryption;
@@ -2141,7 +2163,13 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	}
 
 	auto encryption = dialog.takeEncryptionRequest();
-	if (!encryption) return;
+	if (!encryption) {
+		QMessageBox::warning(
+			this,
+			QCoreApplication::translate("MeetingUI", "Unable to Join Meeting"),
+			QCoreApplication::translate("MeetingUI", "Meeting encryption settings could not be prepared. Please try again."));
+		return;
+	}
 	auto coordinator = OpenMeeting::MeetingCoordinator::create();
 	coordinator->observeJoinTiming(dialog.takeJoinTiming());
 	coordinator->observePageTiming(dialog.takePageTiming());
@@ -2323,6 +2351,13 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 			if (!sessionManager->isLoggedIn() || sessionManager->authGeneration() != authGeneration) {
 				encryption.Revoke();
 				if (window) window->close();
+				if (!sessionManager->isSessionInvalidating()) {
+					MeetingRoomWindow::showStandaloneNotice(
+						QStringLiteral("meetingOperationError"),
+						QMessageBox::Warning,
+						QCoreApplication::translate("MeetingUI", "Sign-In Required"),
+						QCoreApplication::translate("MeetingUI", "Your account session changed before joining the meeting. Please sign in and try again."));
+				}
 				return;
 			}
 			coordinator->joinMeetingAsync(config.meetingId, password, config.displayName,

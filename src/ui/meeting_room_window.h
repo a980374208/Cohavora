@@ -127,6 +127,9 @@ public:
 	void prepareMediaAndJoin(std::function<void()> admission);
 	void requestScreenShare();
 	void requestDefaultScreenShare();
+	static void closeStandaloneNotices();
+	static void showStandaloneNotice(const QString &objectName, QMessageBox::Icon icon,
+		const QString &title, const QString &message);
 	~MeetingRoomWindow() override;
 
 	void receiveRemoteVideoFrame(
@@ -375,6 +378,7 @@ private:
 	qint64 _lastRenderTelemetrySampleMs = 0;
 	bool _closeRequested = false;
 	bool _closingForSessionInvalidation = false;
+	bool _standaloneDepartureNoticeShown = false;
 	QPointer<QMessageBox> _departureNotice;
 	QString _pendingDepartureTitle;
 	QString _pendingDepartureMessage;

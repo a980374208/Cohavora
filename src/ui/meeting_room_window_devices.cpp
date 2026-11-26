@@ -158,9 +158,18 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 		}, [callbacks](std::exception_ptr failure) {
 			callbacks->Post([failure](MeetingRoomWindow *window) {
 				if (failure) {
+					const bool hadPendingAdmission = static_cast<bool>(window->_pendingAdmission);
 					window->cancelMediaPreparation();
 					window->updateRecoveryStateUi(OpenMeeting::MeetingState::Failed,
 						QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."));
+					if (hadPendingAdmission &&
+						!window->_closingForSessionInvalidation &&
+						!OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+						window->showDepartureNotice(
+							QCoreApplication::translate("MeetingUI", "Media Preparation Failed"),
+							QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."),
+							QMessageBox::Critical);
+					}
 					return;
 				}
 				window->finishMediaPreparation();
@@ -168,10 +177,19 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 		});
 	if (!accepted) {
 		// No worker ran and no native resources exist when admission is rejected.
+		const bool hadPendingAdmission = static_cast<bool>(_pendingAdmission);
 		_mediaPreparation.reset();
 		cancelMediaPreparation();
 		updateRecoveryStateUi(OpenMeeting::MeetingState::Failed,
 			QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."));
+		if (hadPendingAdmission &&
+			!_closingForSessionInvalidation &&
+			!OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+			showDepartureNotice(
+				QCoreApplication::translate("MeetingUI", "Media Preparation Failed"),
+				QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."),
+				QMessageBox::Critical);
+		}
 	}
 }
 

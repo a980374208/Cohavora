@@ -175,57 +175,76 @@ private:
     }
     void run() {
         owner_ = this;
-        MSG initial;
-        PeekMessageW(&initial,nullptr,0,0,PM_NOREMOVE);
-        threadId_ = GetCurrentThreadId();
-        // Work in physical coordinates regardless of the calling Qt thread's
-        // DPI context. This does not change the process-wide DPI policy.
-        const auto dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        const auto mouse = SetWindowsHookExW(WH_MOUSE_LL,MouseHook,GetModuleHandleW(nullptr),0);
-        const auto key = SetWindowsHookExW(WH_KEYBOARD_LL,KeyHook,GetModuleHandleW(nullptr),0);
-        ready_ = dpi && mouse && key && InteractiveDesktop();
-        // Account for a local key/button held before the hooks were installed.
-        // Only physical state is retained, never text or an input history.
-        if (ready_) {
-            std::lock_guard lock(mutex_);
-            for (unsigned vk = 8; vk < 256; ++vk) if (vk != VK_SHIFT && vk != VK_CONTROL && vk != VK_MENU &&
-                (GetAsyncKeyState(int(vk)) & 0x8000)) {
-                const auto scan = MapVirtualKeyW(vk,MAPVK_VK_TO_VSC_EX);
-                arbitration_.localActivity(NowMs(),scan ? (scan & 0xff) | ((scan & 0xff00) ? 0x100 : 0)
-                    : 0x20000u + vk,true);
-            }
-            const int mouseKeys[] = {VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};
-            for (int i = 0; i < 5; ++i) if (GetAsyncKeyState(mouseKeys[i]) & 0x8000)
-                arbitration_.localActivity(NowMs(),MouseToken(i+1),true);
-        }
-        if (!ready_) { std::lock_guard lock(mutex_); if (lease_) lease_->valid = false; }
-        while (!quitting_) {
-            DWORD waitMs = 250;
-            MSG msg;
-            while (PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
-            {
+        HHOOK mouse = nullptr;
+        HHOOK key = nullptr;
+        const auto cleanup = [&]() noexcept {
+            try {
                 std::lock_guard lock(mutex_);
-                if (lease_ && (!lease_->permits(NowMs()) || !InteractiveDesktop())) lease_->valid = false;
-                if (!lease_ || !lease_->valid) { queue_.clear(); release(); }
-                else {
-                    if (arbitration_.status().paused) { queue_.clear(); release(); }
-                    arbitration_.poll(NowMs(),keys_.empty() && buttons_.empty());
-                    if (!queue_.empty()) {
-                        const auto value = queue_.front(); queue_.pop_front();
-                        if (arbitration_.accepts(value.epoch) && !execute(value.input)) {
-                            lease_->valid = false; queue_.clear(); release();
+                release();
+            } catch (...) {
+            }
+            if (mouse) { UnhookWindowsHookEx(mouse); mouse = nullptr; }
+            if (key) { UnhookWindowsHookEx(key); key = nullptr; }
+            ready_ = false;
+            owner_ = nullptr;
+            threadId_ = 0;
+        };
+        try {
+            MSG initial;
+            PeekMessageW(&initial,nullptr,0,0,PM_NOREMOVE);
+            threadId_ = GetCurrentThreadId();
+            // Work in physical coordinates regardless of the calling Qt thread's
+            // DPI context. This does not change the process-wide DPI policy.
+            const auto dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            mouse = SetWindowsHookExW(WH_MOUSE_LL,MouseHook,GetModuleHandleW(nullptr),0);
+            key = SetWindowsHookExW(WH_KEYBOARD_LL,KeyHook,GetModuleHandleW(nullptr),0);
+            ready_ = dpi && mouse && key && InteractiveDesktop();
+            // Account for a local key/button held before the hooks were installed.
+            // Only physical state is retained, never text or an input history.
+            if (ready_) {
+                std::lock_guard lock(mutex_);
+                for (unsigned vk = 8; vk < 256; ++vk) if (vk != VK_SHIFT && vk != VK_CONTROL && vk != VK_MENU &&
+                    (GetAsyncKeyState(int(vk)) & 0x8000)) {
+                    const auto scan = MapVirtualKeyW(vk,MAPVK_VK_TO_VSC_EX);
+                    arbitration_.localActivity(NowMs(),scan ? (scan & 0xff) | ((scan & 0xff00) ? 0x100 : 0)
+                        : 0x20000u + vk,true);
+                }
+                const int mouseKeys[] = {VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};
+                for (int i = 0; i < 5; ++i) if (GetAsyncKeyState(mouseKeys[i]) & 0x8000)
+                    arbitration_.localActivity(NowMs(),MouseToken(i+1),true);
+            }
+            if (!ready_) { std::lock_guard lock(mutex_); if (lease_) lease_->valid = false; }
+            while (!quitting_) {
+                DWORD waitMs = 250;
+                MSG msg;
+                while (PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+                {
+                    std::lock_guard lock(mutex_);
+                    if (lease_ && (!lease_->permits(NowMs()) || !InteractiveDesktop())) lease_->valid = false;
+                    if (!lease_ || !lease_->valid) { queue_.clear(); release(); }
+                    else {
+                        if (arbitration_.status().paused) { queue_.clear(); release(); }
+                        arbitration_.poll(NowMs(),keys_.empty() && buttons_.empty());
+                        if (!queue_.empty()) {
+                            const auto value = queue_.front(); queue_.pop_front();
+                            if (arbitration_.accepts(value.epoch) && !execute(value.input)) {
+                                lease_->valid = false; queue_.clear(); release();
+                            }
                         }
                     }
+                    if (lease_ && lease_->valid) waitMs = 5;
                 }
-                if (lease_ && lease_->valid) waitMs = 5;
+                MsgWaitForMultipleObjects(0,nullptr,FALSE,waitMs,QS_ALLINPUT);
             }
-            MsgWaitForMultipleObjects(0,nullptr,FALSE,waitMs,QS_ALLINPUT);
+        } catch (...) {
+            try {
+                std::lock_guard lock(mutex_);
+                if (lease_) lease_->valid = false;
+                queue_.clear();
+            } catch (...) {
+            }
         }
-        { std::lock_guard lock(mutex_); release(); }
-        if (mouse) UnhookWindowsHookEx(mouse);
-        if (key) UnhookWindowsHookEx(key);
-        ready_ = false; owner_ = nullptr;
-        threadId_ = 0;
+        cleanup();
     }
     // SendInput can re-enter a native hook on this owner thread.
     std::recursive_mutex mutex_;
