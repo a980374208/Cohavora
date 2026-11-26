@@ -8,6 +8,7 @@
 
 #include "api/make_ref_counted.h"
 #include "libyuv/convert_argb.h"
+#include "libyuv/rotate_argb.h"
 
 namespace livekit {
 
@@ -37,6 +38,104 @@ std::atomic<std::uint64_t> g_gpu_frames_created{0};
 std::atomic<std::uint64_t> g_gpu_scales_performed{0};
 std::atomic<std::uint64_t> g_cpu_readbacks_performed{0};
 std::atomic<std::uint64_t> g_pool_exhausted_drops{0};
+
+bool IsValidVideoProcessorRotation(D3D11_VIDEO_PROCESSOR_ROTATION rotation) noexcept {
+    switch (rotation) {
+    case D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY:
+    case D3D11_VIDEO_PROCESSOR_ROTATION_90:
+    case D3D11_VIDEO_PROCESSOR_ROTATION_180:
+    case D3D11_VIDEO_PROCESSOR_ROTATION_270:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool ToLibyuvRotation(D3D11_VIDEO_PROCESSOR_ROTATION rotation,
+                      libyuv::RotationMode* out_mode) noexcept {
+    if (!out_mode) return false;
+    switch (rotation) {
+    case D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY:
+        *out_mode = libyuv::kRotate0;
+        return true;
+    case D3D11_VIDEO_PROCESSOR_ROTATION_90:
+        *out_mode = libyuv::kRotate90;
+        return true;
+    case D3D11_VIDEO_PROCESSOR_ROTATION_180:
+        *out_mode = libyuv::kRotate180;
+        return true;
+    case D3D11_VIDEO_PROCESSOR_ROTATION_270:
+        *out_mode = libyuv::kRotate270;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool CreateConfiguredVideoProcessor(
+    ID3D11VideoDevice* video_device,
+    int in_w,
+    int in_h,
+    int out_w,
+    int out_h,
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator>* out_enumerator,
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessor>* out_processor,
+    bool* out_rotation_supported,
+    bool* out_format_unsupported) {
+    if (out_rotation_supported) *out_rotation_supported = false;
+    if (out_format_unsupported) *out_format_unsupported = false;
+    if (!video_device || in_w <= 0 || in_h <= 0 || out_w <= 0 || out_h <= 0 ||
+        !out_enumerator || !out_processor) {
+        return false;
+    }
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content_desc{};
+    content_desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    content_desc.InputFrameRate.Numerator = 60;
+    content_desc.InputFrameRate.Denominator = 1;
+    content_desc.InputWidth = static_cast<UINT>(in_w);
+    content_desc.InputHeight = static_cast<UINT>(in_h);
+    content_desc.OutputFrameRate.Numerator = 60;
+    content_desc.OutputFrameRate.Denominator = 1;
+    content_desc.OutputWidth = static_cast<UINT>(out_w);
+    content_desc.OutputHeight = static_cast<UINT>(out_h);
+    content_desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+    if (FAILED(video_device->CreateVideoProcessorEnumerator(&content_desc, enumerator.GetAddressOf())) ||
+        !enumerator) {
+        return false;
+    }
+
+    UINT bgra_flags = 0;
+    UINT nv12_flags = 0;
+    if (FAILED(enumerator->CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM, &bgra_flags)) ||
+        (bgra_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
+        FAILED(enumerator->CheckVideoProcessorFormat(DXGI_FORMAT_NV12, &nv12_flags)) ||
+        (nv12_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
+        if (out_format_unsupported) *out_format_unsupported = true;
+        return false;
+    }
+
+    D3D11_VIDEO_PROCESSOR_CAPS caps{};
+    if (FAILED(enumerator->GetVideoProcessorCaps(&caps))) {
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessor> processor;
+    if (FAILED(video_device->CreateVideoProcessor(enumerator.Get(), 0, processor.GetAddressOf())) ||
+        !processor) {
+        return false;
+    }
+
+    if (out_rotation_supported) {
+        *out_rotation_supported =
+            (caps.FeatureCaps & D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ROTATION) != 0;
+    }
+    *out_enumerator = std::move(enumerator);
+    *out_processor = std::move(processor);
+    return true;
+}
 
 } // namespace
 
@@ -111,6 +210,41 @@ bool QueryD3d11AdapterLuid(ID3D11Device* device, LUID* out_luid) noexcept {
     }
     *out_luid = desc.AdapterLuid;
     return true;
+}
+
+bool DxgiModeRotationToVideoProcessorRotation(
+    DXGI_MODE_ROTATION dxgi_rotation,
+    D3D11_VIDEO_PROCESSOR_ROTATION* out_rotation) noexcept {
+    if (!out_rotation) return false;
+    switch (dxgi_rotation) {
+    case DXGI_MODE_ROTATION_UNSPECIFIED:
+    case DXGI_MODE_ROTATION_IDENTITY:
+        *out_rotation = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY;
+        return true;
+    case DXGI_MODE_ROTATION_ROTATE90:
+        *out_rotation = D3D11_VIDEO_PROCESSOR_ROTATION_90;
+        return true;
+    case DXGI_MODE_ROTATION_ROTATE180:
+        *out_rotation = D3D11_VIDEO_PROCESSOR_ROTATION_180;
+        return true;
+    case DXGI_MODE_ROTATION_ROTATE270:
+        *out_rotation = D3D11_VIDEO_PROCESSOR_ROTATION_270;
+        return true;
+    default:
+        return false;
+    }
+}
+
+void RotatedDimensions(
+    int raw_width,
+    int raw_height,
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation,
+    int* out_width,
+    int* out_height) noexcept {
+    const bool swap = rotation == D3D11_VIDEO_PROCESSOR_ROTATION_90 ||
+                      rotation == D3D11_VIDEO_PROCESSOR_ROTATION_270;
+    if (out_width) *out_width = swap ? raw_height : raw_width;
+    if (out_height) *out_height = swap ? raw_width : raw_height;
 }
 
 D3d11Nv12FrameBuffer::Diagnostics D3d11Nv12FrameBuffer::GetDiagnostics() noexcept {
@@ -620,6 +754,48 @@ void D3d11VideoProcessorConverter::Clear() noexcept {
     enum_in_h_ = 0;
     enum_out_w_ = 0;
     enum_out_h_ = 0;
+    rotation_supported_ = false;
+}
+
+bool D3d11VideoProcessorConverter::ProbeSupport(
+    ID3D11Device* device,
+    int src_width,
+    int src_height,
+    int dst_width,
+    int dst_height,
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation) {
+    if (!device || src_width <= 0 || src_height <= 0 || dst_width <= 0 || dst_height <= 0 ||
+        !IsValidVideoProcessorRotation(rotation)) {
+        return false;
+    }
+    const int even_dst_w = (std::max)(2, dst_width & ~1);
+    const int even_dst_h = (std::max)(2, dst_height & ~1);
+
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    device->GetImmediateContext(context.GetAddressOf());
+    Microsoft::WRL::ComPtr<ID3D11VideoDevice> video_device;
+    Microsoft::WRL::ComPtr<ID3D11VideoContext> video_context;
+    if (FAILED(device->QueryInterface(__uuidof(ID3D11VideoDevice),
+                                      reinterpret_cast<void**>(video_device.GetAddressOf()))) ||
+        !video_device || !context ||
+        FAILED(context->QueryInterface(__uuidof(ID3D11VideoContext),
+                                       reinterpret_cast<void**>(video_context.GetAddressOf()))) ||
+        !video_context) {
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+    Microsoft::WRL::ComPtr<ID3D11VideoProcessor> processor;
+    bool rotation_supported = false;
+    if (!CreateConfiguredVideoProcessor(
+            video_device.Get(), src_width, src_height, even_dst_w, even_dst_h,
+            &enumerator, &processor, &rotation_supported, nullptr)) {
+        return false;
+    }
+    if (rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY && !rotation_supported) {
+        return false;
+    }
+    return true;
 }
 
 bool D3d11VideoProcessorConverter::EnsureProcessorLocked(int in_w, int in_h, int out_w, int out_h) {
@@ -641,38 +817,15 @@ bool D3d11VideoProcessorConverter::EnsureProcessorLocked(int in_w, int in_h, int
 
     processor_.Reset();
     enumerator_.Reset();
+    rotation_supported_ = false;
 
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC content_desc{};
-    content_desc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-    content_desc.InputFrameRate.Numerator = 60;
-    content_desc.InputFrameRate.Denominator = 1;
-    content_desc.InputWidth = static_cast<UINT>(in_w);
-    content_desc.InputHeight = static_cast<UINT>(in_h);
-    content_desc.OutputFrameRate.Numerator = 60;
-    content_desc.OutputFrameRate.Denominator = 1;
-    content_desc.OutputWidth = static_cast<UINT>(out_w);
-    content_desc.OutputHeight = static_cast<UINT>(out_h);
-    content_desc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
-
-    if (FAILED(video_device_->CreateVideoProcessorEnumerator(&content_desc, enumerator_.GetAddressOf())) ||
-        !enumerator_) {
-        return false;
-    }
-
-    UINT bgra_flags = 0;
-    UINT nv12_flags = 0;
-    if (FAILED(enumerator_->CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM, &bgra_flags)) ||
-        (bgra_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT) == 0 ||
-        FAILED(enumerator_->CheckVideoProcessorFormat(DXGI_FORMAT_NV12, &nv12_flags)) ||
-        (nv12_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT) == 0) {
-        enumerator_.Reset();
-        supported_ = false;
-        return false;
-    }
-
-    if (FAILED(video_device_->CreateVideoProcessor(enumerator_.Get(), 0, processor_.GetAddressOf())) ||
-        !processor_) {
-        enumerator_.Reset();
+    bool format_unsupported = false;
+    if (!CreateConfiguredVideoProcessor(
+            video_device_.Get(), in_w, in_h, out_w, out_h,
+            &enumerator_, &processor_, &rotation_supported_, &format_unsupported)) {
+        if (format_unsupported) {
+            supported_ = false;
+        }
         return false;
     }
 
@@ -711,8 +864,11 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     int dst_width,
     int dst_height,
     int offset_x,
-    int offset_y, bool direct_input_only) {
-    if (!src_texture || src_width <= 0 || src_height <= 0 || dst_width <= 0 || dst_height <= 0 || !pool_) {
+    int offset_y,
+    bool direct_input_only,
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation) {
+    if (!src_texture || src_width <= 0 || src_height <= 0 || dst_width <= 0 || dst_height <= 0 ||
+        !pool_ || !IsValidVideoProcessorRotation(rotation)) {
         return nullptr;
     }
     const int even_dst_w = (std::max)(2, dst_width & ~1);
@@ -732,6 +888,9 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     src_texture->GetDesc(&src_desc);
 
     if (!EnsureProcessorLocked(src_width, src_height, even_dst_w, even_dst_h)) {
+        return nullptr;
+    }
+    if (rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY && !rotation_supported_) {
         return nullptr;
     }
 
@@ -825,6 +984,12 @@ webrtc::scoped_refptr<D3d11Nv12FrameBuffer> D3d11VideoProcessorConverter::Conver
     video_context_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &src_rect);
     video_context_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &dst_rect);
     video_context_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &dst_rect);
+    if (rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY) {
+        video_context_->VideoProcessorSetStreamRotation(processor_.Get(), 0, TRUE, rotation);
+    } else if (rotation_supported_) {
+        video_context_->VideoProcessorSetStreamRotation(
+            processor_.Get(), 0, FALSE, D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY);
+    }
 
     D3D11_VIDEO_PROCESSOR_STREAM stream_data{};
     stream_data.Enable = TRUE;
@@ -853,7 +1018,10 @@ D3d11TextureDesktopFrame::D3d11TextureDesktopFrame(
     Microsoft::WRL::ComPtr<ID3D11Device> device,
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
     LUID adapter_luid,
-    std::shared_ptr<std::mutex> device_context_mutex)
+    std::shared_ptr<std::mutex> device_context_mutex,
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation,
+    int texture_width,
+    int texture_height)
     : webrtc::DesktopFrame(
           size,
           size.width() * kBytesPerPixel,
@@ -866,6 +1034,10 @@ D3d11TextureDesktopFrame::D3d11TextureDesktopFrame(
       texture_(std::move(texture)),
       adapter_luid_(adapter_luid),
       device_context_mutex_(std::move(device_context_mutex)),
+      rotation_(IsValidVideoProcessorRotation(rotation) ? rotation
+                                                        : D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY),
+      texture_width_(texture_ ? (texture_width > 0 ? texture_width : size.width()) : 0),
+      texture_height_(texture_ ? (texture_height > 0 ? texture_height : size.height()) : 0),
       cpu_data_(data_) {
     set_capturer_id(kD3d11TextureDesktopFrameCapturerIdBit);
     auto& registry = FrameRegistry();
@@ -903,8 +1075,21 @@ const std::uint8_t* D3d11TextureDesktopFrame::EnsureCpuData() const {
             &libyuv::kYuvH709Constants, size().width(), size().height()) == 0;
         return cpu_populated_ ? data_ : nullptr;
     }
-    if (cpu_populated_ || !device_ || !texture_) {
+    if (cpu_populated_) {
         return data_;
+    }
+    if (!device_ || !texture_) {
+        return nullptr;
+    }
+    const int raw_w = texture_width_ > 0 ? texture_width_ : size().width();
+    const int raw_h = texture_height_ > 0 ? texture_height_ : size().height();
+    int expected_w = 0;
+    int expected_h = 0;
+    RotatedDimensions(raw_w, raw_h, rotation_, &expected_w, &expected_h);
+    libyuv::RotationMode libyuv_rotation = libyuv::kRotate0;
+    if (raw_w <= 0 || raw_h <= 0 || expected_w != size().width() || expected_h != size().height() ||
+        !ToLibyuvRotation(rotation_, &libyuv_rotation)) {
+        return nullptr;
     }
     std::unique_lock<std::mutex> ctx_lock;
     if (device_context_mutex_) {
@@ -912,8 +1097,8 @@ const std::uint8_t* D3d11TextureDesktopFrame::EnsureCpuData() const {
     }
     D3D11_TEXTURE2D_DESC desc{};
     texture_->GetDesc(&desc);
-    desc.Width = static_cast<UINT>(size().width());
-    desc.Height = static_cast<UINT>(size().height());
+    desc.Width = static_cast<UINT>(raw_w);
+    desc.Height = static_cast<UINT>(raw_h);
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.SampleDesc = {1, 0};
@@ -926,21 +1111,32 @@ const std::uint8_t* D3d11TextureDesktopFrame::EnsureCpuData() const {
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> ctx;
         device_->GetImmediateContext(ctx.GetAddressOf());
         if (ctx) {
-            D3D11_BOX box{0, 0, 0, static_cast<UINT>(size().width()), static_cast<UINT>(size().height()), 1};
+            D3D11_BOX box{0, 0, 0, static_cast<UINT>(raw_w), static_cast<UINT>(raw_h), 1};
             ctx->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture_.Get(), 0, &box);
             D3D11_MAPPED_SUBRESOURCE mapped{};
             if (SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)) && mapped.pData) {
-                for (int r = 0; r < size().height(); ++r) {
-                    std::memcpy(cpu_data_.get() + r * stride(),
-                                static_cast<const std::uint8_t*>(mapped.pData) + r * mapped.RowPitch,
-                                size().width() * kBytesPerPixel);
+                if (rotation_ == D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY) {
+                    for (int r = 0; r < raw_h; ++r) {
+                        std::memcpy(cpu_data_.get() + r * stride(),
+                                    static_cast<const std::uint8_t*>(mapped.pData) + r * mapped.RowPitch,
+                                    static_cast<std::size_t>(raw_w) * kBytesPerPixel);
+                    }
+                    cpu_populated_ = true;
+                } else {
+                    cpu_populated_ = libyuv::ARGBRotate(
+                        static_cast<const std::uint8_t*>(mapped.pData),
+                        static_cast<int>(mapped.RowPitch),
+                        cpu_data_.get(),
+                        stride(),
+                        raw_w,
+                        raw_h,
+                        libyuv_rotation) == 0;
                 }
                 ctx->Unmap(staging.Get(), 0);
-                cpu_populated_ = true;
             }
         }
     }
-    return data_;
+    return cpu_populated_ ? data_ : nullptr;
 }
 
 std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::CaptureTexture(
@@ -951,11 +1147,17 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
     ID3D11Texture2D* source_texture,
     int width,
     int height,
-    bool populate_cpu_mirror, bool prepare_nv12) {
-    if (!device || !context || !source_texture || width <= 0 || height <= 0) {
+    bool populate_cpu_mirror,
+    bool prepare_nv12,
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation) {
+    if (!device || !context || !source_texture || width <= 0 || height <= 0 ||
+        !IsValidVideoProcessorRotation(rotation)) {
         return nullptr;
     }
-    const webrtc::DesktopSize target_size(width, height);
+    int out_width = 0;
+    int out_height = 0;
+    RotatedDimensions(width, height, rotation, &out_width, &out_height);
+    const webrtc::DesktopSize target_size(out_width, out_height);
     for (auto& slot : slots_) {
         if (slot.frame && slot.frame->IsShared()) {
             continue;
@@ -965,14 +1167,14 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
             tex_frame = slot.texture_frame;
         }
         if (tex_frame) tex_frame->prepared_ = nullptr;
-        if (prepare_nv12 && !(width & 1) && !(height & 1)) {
+        if (prepare_nv12 && !(out_width & 1) && !(out_height & 1)) {
             if (!converter_ || converter_->device() != device)
                 converter_ = std::make_unique<D3d11VideoProcessorConverter>(
                     device, adapter_luid, device_context_mutex);
             // This command is submitted and flushed on the capture device while
             // the WGC frame / DXGI duplication surface still belongs to us.
             if (auto native = converter_->ConvertAndScale(source_texture, width, height,
-                    width, height, 0, 0, true)) {
+                    out_width, out_height, 0, 0, true, rotation)) {
                 if (!tex_frame || tex_frame->device() != device) {
                     auto owned = std::make_unique<D3d11TextureDesktopFrame>(target_size, device,
                         nullptr, adapter_luid, device_context_mutex);
@@ -982,6 +1184,9 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
                 }
                 g_direct_capture_conversions.fetch_add(1, std::memory_order_relaxed);
                 tex_frame->texture_.Reset();
+                tex_frame->texture_width_ = 0;
+                tex_frame->texture_height_ = 0;
+                tex_frame->rotation_ = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY;
                 tex_frame->prepared_ = std::move(native);
                 tex_frame->ResetCpuPopulated();
                 if (populate_cpu_mirror && !tex_frame->EnsureCpuData()) return nullptr;
@@ -990,7 +1195,8 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
                 return shared;
             }
         }
-        if (!tex_frame || tex_frame->device() != device || !tex_frame->texture()) {
+        if (!tex_frame || tex_frame->device() != device || !tex_frame->texture() ||
+            tex_frame->texture_width() != width || tex_frame->texture_height() != height) {
             D3D11_TEXTURE2D_DESC desc{};
             source_texture->GetDesc(&desc);
             desc.Width = static_cast<UINT>(width);
@@ -1009,10 +1215,13 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
                 return nullptr;
             }
             auto owned_frame = std::make_unique<D3d11TextureDesktopFrame>(
-                target_size, device, std::move(gpu_copy), adapter_luid, device_context_mutex);
+                target_size, device, std::move(gpu_copy), adapter_luid,
+                device_context_mutex, rotation, width, height);
             tex_frame = owned_frame.get();
             slot.frame = webrtc::SharedDesktopFrame::Wrap(std::move(owned_frame));
             slot.texture_frame = tex_frame;
+        } else {
+            tex_frame->rotation_ = rotation;
         }
 
         {
@@ -1025,8 +1234,8 @@ std::unique_ptr<webrtc::SharedDesktopFrame> D3d11DesktopFrameTexturePool::Captur
                 tex_frame->texture(), 0, 0, 0, 0, source_texture, 0, &box);
         }
         tex_frame->ResetCpuPopulated();
-        if (populate_cpu_mirror) {
-            tex_frame->EnsureCpuData();
+        if (populate_cpu_mirror && (!tex_frame->EnsureCpuData() || !tex_frame->cpu_populated())) {
+            return nullptr;
         }
         auto shared = slot.frame->Share();
         shared->set_capturer_id(slot.frame->capturer_id() | kD3d11TextureDesktopFrameCapturerIdBit);

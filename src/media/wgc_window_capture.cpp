@@ -362,12 +362,23 @@ public:
 
         D3D11_TEXTURE2D_DESC desc{};
         desktop_tex->GetDesc(&desc);
-        const int width = static_cast<int>(desc.Width);
-        const int height = static_cast<int>(desc.Height);
-        if (width <= 0 || height <= 0 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+        const int raw_w = static_cast<int>(desc.Width);
+        const int raw_h = static_cast<int>(desc.Height);
+        if (raw_w <= 0 || raw_h <= 0 || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
             Close();
             callback_->OnCaptureResult(Result::ERROR_PERMANENT, nullptr);
             return;
+        }
+        if (rotation_ != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY) {
+            int logical_w = 0;
+            int logical_h = 0;
+            RotatedDimensions(raw_w, raw_h, rotation_, &logical_w, &logical_h);
+            if (expected_logical_width_ > 0 && expected_logical_height_ > 0 &&
+                (logical_w != expected_logical_width_ || logical_h != expected_logical_height_)) {
+                Close();
+                callback_->OnCaptureResult(Result::ERROR_PERMANENT, nullptr);
+                return;
+            }
         }
 
         auto gpu_shared = gpu_buffers_.CaptureTexture(
@@ -376,9 +387,11 @@ public:
             adapter_luid_,
             device_context_mutex_,
             desktop_tex.Get(),
-            width,
-            height,
-            /*populate_cpu_mirror=*/false, /*prepare_nv12=*/true);
+            raw_w,
+            raw_h,
+            /*populate_cpu_mirror=*/false,
+            /*prepare_nv12=*/true,
+            rotation_);
         if (!gpu_shared) {
             std::unique_ptr<webrtc::SharedDesktopFrame> cached;
             if (latest_) {
@@ -415,6 +428,9 @@ private:
 
         Microsoft::WRL::ComPtr<IDXGIAdapter1> matched_adapter;
         Microsoft::WRL::ComPtr<IDXGIOutput1> matched_output;
+        D3D11_VIDEO_PROCESSOR_ROTATION output_rotation = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY;
+        int logical_w = 0;
+        int logical_h = 0;
         for (UINT a = 0;; ++a) {
             Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
             if (factory->EnumAdapters1(a, adapter.GetAddressOf()) == DXGI_ERROR_NOT_FOUND || !adapter) {
@@ -428,13 +444,15 @@ private:
                 DXGI_OUTPUT_DESC out_desc{};
                 if (SUCCEEDED(output->GetDesc(&out_desc)) && out_desc.AttachedToDesktop &&
                     out_desc.Monitor == monitor_) {
-                    // Rotation other than identity falls back to WebRTC's rotation-aware DXGI capturer.
-                    if (out_desc.Rotation != DXGI_MODE_ROTATION_IDENTITY &&
-                        out_desc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED) {
+                    if (!DxgiModeRotationToVideoProcessorRotation(out_desc.Rotation, &output_rotation)) {
                         return false;
                     }
                     if (SUCCEEDED(output.As(&matched_output)) && matched_output) {
                         matched_adapter = adapter;
+                        logical_w = static_cast<int>(
+                            out_desc.DesktopCoordinates.right - out_desc.DesktopCoordinates.left);
+                        logical_h = static_cast<int>(
+                            out_desc.DesktopCoordinates.bottom - out_desc.DesktopCoordinates.top);
                         break;
                     }
                 }
@@ -491,11 +509,39 @@ private:
             Close();
             return false;
         }
+        DXGI_OUTDUPL_DESC dupl_desc{};
+        duplication_->GetDesc(&dupl_desc);
+        D3D11_VIDEO_PROCESSOR_ROTATION dupl_rotation = output_rotation;
+        if (dupl_desc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED &&
+            !DxgiModeRotationToVideoProcessorRotation(dupl_desc.Rotation, &dupl_rotation)) {
+            Close();
+            return false;
+        }
+        if (dupl_rotation != D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY) {
+            if (logical_w <= 0 || logical_h <= 0) {
+                Close();
+                return false;
+            }
+            int probe_raw_w = 0;
+            int probe_raw_h = 0;
+            RotatedDimensions(logical_w, logical_h, dupl_rotation, &probe_raw_w, &probe_raw_h);
+            if (!D3d11VideoProcessorConverter::ProbeSupport(
+                    device_.Get(), probe_raw_w, probe_raw_h, logical_w, logical_h, dupl_rotation)) {
+                Close();
+                return false;
+            }
+        }
+        rotation_ = dupl_rotation;
+        expected_logical_width_ = logical_w;
+        expected_logical_height_ = logical_h;
         return true;
     }
 
     void Close() noexcept {
         duplication_.Reset();
+        rotation_ = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY;
+        expected_logical_width_ = 0;
+        expected_logical_height_ = 0;
         latest_.reset();
         gpu_buffers_.Clear();
         if (context_) {
@@ -518,6 +564,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;
     Microsoft::WRL::ComPtr<IDXGIOutputDuplication> duplication_;
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation_ = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY;
+    int expected_logical_width_ = 0;
+    int expected_logical_height_ = 0;
     LUID adapter_luid_{};
     std::shared_ptr<std::mutex> device_context_mutex_;
     std::unique_ptr<webrtc::SharedDesktopFrame> latest_;

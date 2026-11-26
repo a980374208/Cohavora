@@ -484,8 +484,11 @@ private:
                     gpu_converter_ = std::make_unique<D3d11VideoProcessorConverter>(
                         gpu_frame->device(), gpu_frame->adapter_luid(), gpu_frame->device_context_mutex());
                 }
+                const int src_w = gpu_frame->texture_width() > 0 ? gpu_frame->texture_width() : w;
+                const int src_h = gpu_frame->texture_height() > 0 ? gpu_frame->texture_height() : h;
                 nv12 = gpu_converter_->ConvertAndScale(
-                    gpu_frame->texture(), w, h, profile.width, profile.height);
+                    gpu_frame->texture(), src_w, src_h, profile.width, profile.height,
+                    0, 0, /*direct_input_only=*/false, gpu_frame->rotation());
             }
             if (nv12) {
                 VideoFrame delivered_gpu(std::move(nv12), VideoBufferType::NV12);

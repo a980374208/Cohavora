@@ -193,6 +193,14 @@ public:
         std::shared_ptr<std::mutex> device_context_mutex = std::make_shared<std::mutex>());
     ~D3d11VideoProcessorConverter();
 
+    static bool ProbeSupport(
+        ID3D11Device* device,
+        int src_width,
+        int src_height,
+        int dst_width,
+        int dst_height,
+        D3D11_VIDEO_PROCESSOR_ROTATION rotation = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY);
+
     // Converts a GPU BGRA (or NV12) texture and scales to (dst_width, dst_height)
     // in a single VideoProcessorBlt pass, returning a pooled D3d11Nv12FrameBuffer.
     webrtc::scoped_refptr<D3d11Nv12FrameBuffer> ConvertAndScale(
@@ -202,7 +210,9 @@ public:
         int dst_width,
         int dst_height,
         int offset_x = 0,
-        int offset_y = 0, bool direct_input_only = false);
+        int offset_y = 0,
+        bool direct_input_only = false,
+        D3D11_VIDEO_PROCESSOR_ROTATION rotation = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY);
 
     void Clear() noexcept;
 
@@ -234,6 +244,7 @@ private:
     int enum_out_h_ = 0;
     bool initialized_ = false;
     bool supported_ = true;
+    bool rotation_supported_ = false;
 };
 
 // DesktopFrame subclass carrying a captured GPU BGRA texture alongside a lazy
@@ -245,7 +256,10 @@ public:
         Microsoft::WRL::ComPtr<ID3D11Device> device,
         Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
         LUID adapter_luid,
-        std::shared_ptr<std::mutex> device_context_mutex);
+        std::shared_ptr<std::mutex> device_context_mutex,
+        D3D11_VIDEO_PROCESSOR_ROTATION rotation = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY,
+        int texture_width = 0,
+        int texture_height = 0);
 
     ~D3d11TextureDesktopFrame() override;
 
@@ -255,6 +269,9 @@ public:
     std::shared_ptr<std::mutex> device_context_mutex() const noexcept {
         return device_context_mutex_;
     }
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation() const noexcept { return rotation_; }
+    int texture_width() const noexcept { return texture_width_; }
+    int texture_height() const noexcept { return texture_height_; }
 
     const webrtc::scoped_refptr<D3d11Nv12FrameBuffer>& preparedNV12() const noexcept { return prepared_; }
     bool cpu_populated() const noexcept {
@@ -283,6 +300,9 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture_;
     const LUID adapter_luid_;
     std::shared_ptr<std::mutex> device_context_mutex_;
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation_ = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY;
+    int texture_width_ = 0;
+    int texture_height_ = 0;
     friend class D3d11DesktopFrameTexturePool;
     webrtc::scoped_refptr<D3d11Nv12FrameBuffer> prepared_;
     mutable std::mutex cpu_mutex_;
@@ -304,7 +324,9 @@ public:
         ID3D11Texture2D* source_texture,
         int width,
         int height,
-        bool populate_cpu_mirror = false, bool prepare_nv12 = false);
+        bool populate_cpu_mirror = false,
+        bool prepare_nv12 = false,
+        D3D11_VIDEO_PROCESSOR_ROTATION rotation = D3D11_VIDEO_PROCESSOR_ROTATION_IDENTITY);
 
     void Clear() noexcept {
         converter_.reset();
@@ -326,5 +348,14 @@ private:
 };
 
 bool QueryD3d11AdapterLuid(ID3D11Device* device, LUID* out_luid) noexcept;
+bool DxgiModeRotationToVideoProcessorRotation(
+    DXGI_MODE_ROTATION dxgi_rotation,
+    D3D11_VIDEO_PROCESSOR_ROTATION* out_rotation) noexcept;
+void RotatedDimensions(
+    int raw_width,
+    int raw_height,
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation,
+    int* out_width,
+    int* out_height) noexcept;
 
 } // namespace livekit
